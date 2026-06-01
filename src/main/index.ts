@@ -13,7 +13,7 @@ import {
 import Store from "electron-store";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { syncDefaultSessions, type IndexStatus } from "../core/indexer";
+import { syncDefaultSessionsInBatches, type IndexStatus } from "../core/indexer";
 import { formatSessionMarkdown, formatSessionPlainText } from "../core/format-session";
 import { defaultSettings, getResumeCommand, openNativeApp, openResumeInTerminal, revealInFileManager } from "../core/platform";
 import { SessionStore } from "../core/session-store";
@@ -30,6 +30,7 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let store: SessionStore;
 let indexStatus: IndexStatus = { running: false, indexed: 0, total: 0, lastIndexedAt: null, error: null };
+let activeIndexRun: Promise<IndexStatus> | null = null;
 
 const settingsStore = new Store<AppSettings>({
   defaults: defaultSettings,
@@ -191,21 +192,39 @@ function createApplicationMenu(): void {
 }
 
 async function runIndexSync(): Promise<IndexStatus> {
+  if (activeIndexRun) return activeIndexRun;
+
   indexStatus = { ...indexStatus, running: true, error: null };
   mainWindow?.webContents.send("index-status", indexStatus);
-  try {
-    indexStatus = syncDefaultSessions(store);
-  } catch (error) {
-    indexStatus = {
-      running: false,
-      indexed: 0,
-      total: 0,
-      lastIndexedAt: indexStatus.lastIndexedAt,
-      error: String(error),
-    };
-  }
-  mainWindow?.webContents.send("index-status", indexStatus);
-  return indexStatus;
+
+  activeIndexRun = syncDefaultSessionsInBatches(store, {
+    batchSize: 2,
+    onProgress: (status) => {
+      indexStatus = { ...status, lastIndexedAt: indexStatus.lastIndexedAt };
+      mainWindow?.webContents.send("index-status", indexStatus);
+    },
+  })
+    .then((status) => {
+      indexStatus = status;
+      mainWindow?.webContents.send("index-status", indexStatus);
+      return indexStatus;
+    })
+    .catch((error) => {
+      indexStatus = {
+        running: false,
+        indexed: 0,
+        total: 0,
+        lastIndexedAt: indexStatus.lastIndexedAt,
+        error: String(error),
+      };
+      mainWindow?.webContents.send("index-status", indexStatus);
+      return indexStatus;
+    })
+    .finally(() => {
+      activeIndexRun = null;
+    });
+
+  return activeIndexRun;
 }
 
 function registerIpc(): void {
@@ -270,7 +289,7 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
   globalShortcut.register("Alt+Space", toggleWindow);
-  void runIndexSync();
+  setTimeout(() => void runIndexSync(), 750);
 });
 
 app.on("window-all-closed", () => {

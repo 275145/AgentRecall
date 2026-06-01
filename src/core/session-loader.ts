@@ -158,8 +158,12 @@ function walkJsonlFiles(dir: string): string[] {
 }
 
 export function loadCodexSessions(codexDir = path.join(os.homedir(), ".codex")): LoadedSession[] {
+  return [...loadCodexSessionsIterator(codexDir)];
+}
+
+export function* loadCodexSessionsIterator(codexDir = path.join(os.homedir(), ".codex")): Generator<LoadedSession> {
   const sessionsDir = path.join(codexDir, "sessions");
-  if (!fs.existsSync(sessionsDir)) return [];
+  if (!fs.existsSync(sessionsDir)) return;
 
   const titleMap = new Map<string, { title: string; updatedAt: string }>();
   const indexPath = path.join(codexDir, "session_index.jsonl");
@@ -169,16 +173,28 @@ export function loadCodexSessions(codexDir = path.join(os.homedir(), ".codex")):
     }
   }
 
-  const loaded: LoadedSession[] = [];
   for (const filePath of walkJsonlFiles(sessionsDir)) {
     const rows = readJsonl(filePath);
     const meta = rows.length > 0 ? parseCodexSessionMetaLine(rows[0] as CodexConversationLine) : null;
     if (!meta) continue;
     const indexedTitle = titleMap.get(meta.id);
-    const item = loadCodexSessionFile(filePath, indexedTitle?.title, indexedTitle?.updatedAt);
-    if (item) loaded.push(item);
+    const messages = extractMessages(rows, "codex");
+    const question = firstQuestion(messages);
+    const source: SessionSource = meta.originator === CODEX_APP_ORIGINATOR ? "codex-app" : "codex-cli";
+    yield {
+      session: createIndexedSession({
+        family: "codex",
+        rawId: meta.id,
+        source,
+        projectPath: meta.projectPath,
+        filePath,
+        originalTitle: indexedTitle?.title || cleanTitle(question) || "Untitled Session",
+        firstQuestion: question ? cleanTitle(question) : "",
+        timestamp: indexedTitle?.updatedAt ? new Date(indexedTitle.updatedAt).getTime() : meta.ts,
+      }),
+      messages,
+    };
   }
-  return loaded;
 }
 
 function encodeClaudeProjectDir(cwd: string): string {
@@ -190,9 +206,13 @@ function loadClaudeMessages(filePath: string): SessionMessage[] {
 }
 
 export function loadClaudeCliSessions(claudeDir = path.join(os.homedir(), ".claude")): LoadedSession[] {
+  return [...loadClaudeCliSessionsIterator(claudeDir)];
+}
+
+export function* loadClaudeCliSessionsIterator(claudeDir = path.join(os.homedir(), ".claude")): Generator<LoadedSession> {
   const sessionsDir = path.join(claudeDir, "sessions");
   const projectsDir = path.join(claudeDir, "projects");
-  if (!fs.existsSync(projectsDir)) return [];
+  if (!fs.existsSync(projectsDir)) return;
 
   const index = new Map<string, ClaudeSessionIndexFile>();
   if (fs.existsSync(sessionsDir)) {
@@ -207,7 +227,6 @@ export function loadClaudeCliSessions(claudeDir = path.join(os.homedir(), ".clau
     }
   }
 
-  const loaded: LoadedSession[] = [];
   for (const projectDir of fs.readdirSync(projectsDir)) {
     const projectPath = path.join(projectsDir, projectDir);
     if (!fs.existsSync(projectPath) || !fs.statSync(projectPath).isDirectory()) continue;
@@ -215,12 +234,13 @@ export function loadClaudeCliSessions(claudeDir = path.join(os.homedir(), ".clau
       if (!file.endsWith(".jsonl")) continue;
       const rawId = file.replace(/\.jsonl$/, "");
       const filePath = path.join(projectPath, file);
-      const messages = loadClaudeMessages(filePath);
+      const rows = readJsonl(filePath);
+      const messages = extractMessages(rows, "claude");
       const question = firstQuestion(messages);
-      const embeddedCwd = (readJsonl(filePath).find((row) => row && typeof row === "object" && "cwd" in row) as
+      const embeddedCwd = (rows.find((row) => row && typeof row === "object" && "cwd" in row) as
         | ClaudeConversationLine
         | undefined)?.cwd;
-      loaded.push({
+      yield {
         session: createIndexedSession({
           family: "claude",
           rawId,
@@ -232,17 +252,23 @@ export function loadClaudeCliSessions(claudeDir = path.join(os.homedir(), ".clau
           timestamp: index.get(rawId)?.startedAt || 0,
         }),
         messages,
-      });
+      };
     }
   }
-  return loaded;
 }
 
 export function loadClaudeAppSessions(
   appSessionsDir = path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code-sessions"),
   claudeDir = path.join(os.homedir(), ".claude"),
 ): LoadedSession[] {
-  if (!fs.existsSync(appSessionsDir)) return [];
+  return [...loadClaudeAppSessionsIterator(appSessionsDir, claudeDir)];
+}
+
+export function* loadClaudeAppSessionsIterator(
+  appSessionsDir = path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code-sessions"),
+  claudeDir = path.join(os.homedir(), ".claude"),
+): Generator<LoadedSession> {
+  if (!fs.existsSync(appSessionsDir)) return;
   const projectsDir = path.join(claudeDir, "projects");
   const metaFiles: string[] = [];
 
@@ -258,7 +284,6 @@ export function loadClaudeAppSessions(
     }
   }
 
-  const loaded: LoadedSession[] = [];
   for (const metaPath of metaFiles) {
     let appMeta: ClaudeAppSessionFile;
     try {
@@ -270,10 +295,11 @@ export function loadClaudeAppSessions(
     const cwd = appMeta.cwd || appMeta.originCwd || "";
     const convoPath =
       rawId && cwd ? path.join(projectsDir, encodeClaudeProjectDir(cwd), `${rawId}.jsonl`) : metaPath;
-    const messages = fs.existsSync(convoPath) ? loadClaudeMessages(convoPath) : [];
+    const rows = fs.existsSync(convoPath) ? readJsonl(convoPath) : [];
+    const messages = extractMessages(rows, "claude");
     const question = firstQuestion(messages);
     const title = appMeta.title && !/^Session\s+\d+$/i.test(appMeta.title) ? appMeta.title : cleanTitle(question);
-    loaded.push({
+    yield {
       session: createIndexedSession({
         family: "claude",
         rawId,
@@ -287,11 +313,16 @@ export function loadClaudeAppSessions(
         prNumber: appMeta.prNumber || null,
       }),
       messages,
-    });
+    };
   }
-  return loaded;
 }
 
 export function loadDefaultSessions(): LoadedSession[] {
-  return [...loadClaudeCliSessions(), ...loadClaudeAppSessions(), ...loadCodexSessions()];
+  return [...loadDefaultSessionsIterator()];
+}
+
+export function* loadDefaultSessionsIterator(): Generator<LoadedSession> {
+  yield* loadClaudeCliSessionsIterator();
+  yield* loadClaudeAppSessionsIterator();
+  yield* loadCodexSessionsIterator();
 }
