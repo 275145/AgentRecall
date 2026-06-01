@@ -25,11 +25,16 @@ button {
   background: transparent;
   color: inherit;
   border-radius: 6px;
-  cursor: default;
+  cursor: pointer;
 }
 
 button:hover {
   background: rgba(32, 36, 33, 0.08);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 .app {
@@ -473,6 +478,27 @@ button:hover {
   padding: 5px 9px;
   border: 1px solid #d3d9d2;
   background: #fff;
+}
+
+.action-status {
+  padding: 8px 18px;
+  border-bottom: 1px solid #e4e8e2;
+  font-size: 12px;
+}
+
+.action-status.running {
+  background: #eef4f1;
+  color: #27654d;
+}
+
+.action-status.success {
+  background: #eaf6ef;
+  color: #27654d;
+}
+
+.action-status.error {
+  background: #fff1ed;
+  color: #9b3928;
 }
 
 .matched,

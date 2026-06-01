@@ -44,6 +44,11 @@ type ViewMode = "default" | "pinned" | "hidden";
 const INITIAL_MESSAGE_LIMIT = 20;
 const MESSAGE_PAGE_SIZE = 80;
 
+type ActionStatus = {
+  kind: "running" | "success" | "error";
+  message: string;
+};
+
 interface ContextMenuState {
   x: number;
   y: number;
@@ -73,6 +78,7 @@ export function App(): ReactElement {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dialog, setDialog] = useState<DialogState>(null);
   const [deleteTagName, setDeleteTagName] = useState<string | null>(null);
+  const [actionStatus, setActionStatus] = useState<ActionStatus | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -190,10 +196,19 @@ export function App(): ReactElement {
     }
   }
 
-  async function runAction(action: () => Promise<void>): Promise<void> {
+  async function runAction(label: string, action: () => Promise<void>, successMessage: string): Promise<void> {
     setContextMenu(null);
-    await action();
-    await refreshAfterAction();
+    setActionStatus({ kind: "running", message: `${label}...` });
+    try {
+      await action();
+      await refreshAfterAction();
+      setActionStatus({ kind: "success", message: successMessage });
+      window.setTimeout(() => {
+        setActionStatus((current) => (current?.kind === "success" && current.message === successMessage ? null : current));
+      }, 1800);
+    } catch (error) {
+      setActionStatus({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   return (
@@ -323,18 +338,29 @@ export function App(): ReactElement {
           session={detail}
           messages={messages}
           loading={messagesLoading}
+          actionStatus={actionStatus}
           query={query}
           onClose={() => setDetail(null)}
           onShowMore={() => void loadMoreMessages()}
           onRename={() => beginRename(detail)}
           onAddTag={() => beginAddTag(detail)}
           onRemoveTag={(tagName) => void removeTag(detail, tagName)}
-          onResume={() => void runAction(() => window.sessionSearch.resumeSession(detail.sessionKey))}
-          onOpenApp={() => void runAction(() => window.sessionSearch.openNativeApp(detail.sessionKey))}
-          onCopyResume={() => void runAction(() => window.sessionSearch.copyResumeCommand(detail.sessionKey))}
-          onCopyMarkdown={() => void runAction(() => window.sessionSearch.copyMarkdown(detail.sessionKey))}
-          onCopyPlain={() => void runAction(() => window.sessionSearch.copyPlainText(detail.sessionKey))}
-          onReveal={() => void runAction(() => window.sessionSearch.revealSession(detail.sessionKey))}
+          onResume={() =>
+            void runAction("Opening terminal", () => window.sessionSearch.resumeSession(detail.sessionKey), "Resume command sent to terminal.")
+          }
+          onOpenApp={() =>
+            void runAction("Opening native app", () => window.sessionSearch.openNativeApp(detail.sessionKey), "Native app opened.")
+          }
+          onCopyResume={() =>
+            void runAction("Copying resume command", () => window.sessionSearch.copyResumeCommand(detail.sessionKey), "Resume command copied.")
+          }
+          onCopyMarkdown={() =>
+            void runAction("Copying markdown", () => window.sessionSearch.copyMarkdown(detail.sessionKey), "Markdown copied.")
+          }
+          onCopyPlain={() =>
+            void runAction("Copying plain text", () => window.sessionSearch.copyPlainText(detail.sessionKey), "Plain text copied.")
+          }
+          onReveal={() => void runAction("Opening Finder", () => window.sessionSearch.revealSession(detail.sessionKey), "Finder opened.")}
         />
       ) : null}
 
@@ -344,14 +370,34 @@ export function App(): ReactElement {
           onClose={() => setContextMenu(null)}
           onRename={() => beginRename(contextMenu.session)}
           onAddTag={() => beginAddTag(contextMenu.session)}
-          onPin={() => void runAction(() => window.sessionSearch.setPinned(contextMenu.session.sessionKey, !contextMenu.session.pinned))}
-          onHide={() => void runAction(() => window.sessionSearch.setHidden(contextMenu.session.sessionKey, !contextMenu.session.hidden))}
-          onResume={() => void runAction(() => window.sessionSearch.resumeSession(contextMenu.session.sessionKey))}
-          onOpenApp={() => void runAction(() => window.sessionSearch.openNativeApp(contextMenu.session.sessionKey))}
-          onCopyResume={() => void runAction(() => window.sessionSearch.copyResumeCommand(contextMenu.session.sessionKey))}
-          onCopyMarkdown={() => void runAction(() => window.sessionSearch.copyMarkdown(contextMenu.session.sessionKey))}
-          onCopyPlain={() => void runAction(() => window.sessionSearch.copyPlainText(contextMenu.session.sessionKey))}
-          onReveal={() => void runAction(() => window.sessionSearch.revealSession(contextMenu.session.sessionKey))}
+          onPin={() =>
+            void runAction("Updating pin", () => window.sessionSearch.setPinned(contextMenu.session.sessionKey, !contextMenu.session.pinned), "Pin updated.")
+          }
+          onHide={() =>
+            void runAction(
+              "Updating visibility",
+              () => window.sessionSearch.setHidden(contextMenu.session.sessionKey, !contextMenu.session.hidden),
+              "Visibility updated.",
+            )
+          }
+          onResume={() =>
+            void runAction("Opening terminal", () => window.sessionSearch.resumeSession(contextMenu.session.sessionKey), "Resume command sent to terminal.")
+          }
+          onOpenApp={() =>
+            void runAction("Opening native app", () => window.sessionSearch.openNativeApp(contextMenu.session.sessionKey), "Native app opened.")
+          }
+          onCopyResume={() =>
+            void runAction("Copying resume command", () => window.sessionSearch.copyResumeCommand(contextMenu.session.sessionKey), "Resume command copied.")
+          }
+          onCopyMarkdown={() =>
+            void runAction("Copying markdown", () => window.sessionSearch.copyMarkdown(contextMenu.session.sessionKey), "Markdown copied.")
+          }
+          onCopyPlain={() =>
+            void runAction("Copying plain text", () => window.sessionSearch.copyPlainText(contextMenu.session.sessionKey), "Plain text copied.")
+          }
+          onReveal={() =>
+            void runAction("Opening Finder", () => window.sessionSearch.revealSession(contextMenu.session.sessionKey), "Finder opened.")
+          }
         />
       ) : null}
 
@@ -427,6 +473,7 @@ function DetailPanel({
   session,
   messages,
   loading,
+  actionStatus,
   query,
   onClose,
   onShowMore,
@@ -443,6 +490,7 @@ function DetailPanel({
   session: SessionSearchResult;
   messages: SessionMessage[];
   loading: boolean;
+  actionStatus: ActionStatus | null;
   query: string;
   onClose: () => void;
   onShowMore: () => void;
@@ -460,6 +508,7 @@ function DetailPanel({
     ? messages.findIndex((message) => message.content.toLowerCase().includes(query.toLowerCase()))
     : -1;
   const context = matchIndex >= 0 ? messages.slice(Math.max(0, matchIndex - 1), Math.min(messages.length, matchIndex + 2)) : [];
+  const actionRunning = actionStatus?.kind === "running";
 
   return (
     <div className="detail-backdrop" onClick={onClose}>
@@ -479,27 +528,28 @@ function DetailPanel({
         </button>
       </div>
       <div className="detail-actions">
-        <button onClick={onResume}>
+        <button onClick={onResume} disabled={actionRunning}>
           <Play size={15} /> Resume
         </button>
-        <button onClick={onOpenApp}>
+        <button onClick={onOpenApp} disabled={actionRunning}>
           <AppWindow size={15} /> Open App
         </button>
-        <button onClick={onRename}>
+        <button onClick={onRename} disabled={actionRunning}>
           <Clipboard size={15} /> Rename
         </button>
-        <button onClick={onAddTag}>
+        <button onClick={onAddTag} disabled={actionRunning}>
           <Tag size={15} /> Add Tag
         </button>
-        <button onClick={onCopyResume}>
+        <button onClick={onCopyResume} disabled={actionRunning}>
           <Copy size={15} /> Copy Cmd
         </button>
-        <button onClick={onCopyMarkdown}>Markdown</button>
-        <button onClick={onCopyPlain}>Plain Text</button>
-        <button onClick={onReveal}>
+        <button onClick={onCopyMarkdown} disabled={actionRunning}>Markdown</button>
+        <button onClick={onCopyPlain} disabled={actionRunning}>Plain Text</button>
+        <button onClick={onReveal} disabled={actionRunning}>
           <FolderOpen size={15} /> Finder
         </button>
       </div>
+      {actionStatus ? <div className={`action-status ${actionStatus.kind}`}>{actionStatus.message}</div> : null}
       <div className="detail-tags">
         {session.tags.map((tagName) => (
           <button key={tagName} className="chip" onClick={() => onRemoveTag(tagName)}>
