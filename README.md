@@ -1,5 +1,7 @@
 # Agent-Session-Search
 
+[中文文档](./README.zh-CN.md)
+
 Agent-Session-Search is a local desktop console for finding, organizing, and resuming Claude Code and Codex sessions.
 
 It indexes existing local session files, lets you add your own titles and tags, and keeps that metadata in a separate local SQLite database. It does not modify the original Claude or Codex session files.
