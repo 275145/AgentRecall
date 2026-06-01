@@ -2,10 +2,10 @@
 
 ## 安装并使用（给使用者）
 
-推荐使用源码目录安装。只要本机有 **Node.js 22.13+** 和 nvm，在仓库目录执行下面这一行即可重新安装依赖、构建并注册全局命令：
+进入仓库目录后，执行下面这一行即可重新安装依赖、构建并注册全局命令：
 
 ```bash
-cd ~/myProject/agent-session-search && nvm use 22 && rm -rf node_modules && npm ci && npm run build && npm install -g .
+nvm use 22 && rm -rf node_modules && npm ci && npm run build && npm install -g .
 ```
 
 装好后，在任意终端运行即可启动：
@@ -24,15 +24,13 @@ agent-session-search
 > 说明：这种方式通过命令行启动，不打包成 `.app`，因此**不需要 Apple 签名或公证**，也不会被 Gatekeeper 拦截。
 >
 > SQLite 说明：项目使用 Electron 42 自带的 `node:sqlite`。安装时会下载 Electron binary（约 100MB+），但**不需要 Xcode、node-gyp、better-sqlite3 或 electron-rebuild**。
->
-> 不推荐使用 `npm install -g git+https://...` 直接从 Git 仓库安装。npm 的 git dependency preparation 会在临时目录里触发构建，Electron/Vite 项目在这条路径上容易遇到 `electron-vite: command not found` 等安装阶段问题。
 
 ### 更新到新版本
 
 先拉取最新代码，再重新跑安装命令：
 
 ```bash
-cd ~/myProject/agent-session-search && git pull --ff-only && nvm use 22 && rm -rf node_modules && npm ci && npm run build && npm install -g .
+git pull --ff-only && nvm use 22 && rm -rf node_modules && npm ci && npm run build && npm install -g .
 ```
 
 ### 卸载
@@ -46,7 +44,7 @@ npm uninstall -g agent-session-search
 如果还没有本地仓库，先克隆：
 
 ```bash
-mkdir -p ~/myProject && git clone https://github.com/zszz3/agent-session-search.git ~/myProject/agent-session-search
+git clone https://github.com/zszz3/agent-session-search.git
 ```
 
 ---
