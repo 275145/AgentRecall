@@ -116,15 +116,23 @@ export class SessionStore {
   }
 
   removeTag(sessionKey: string, tagName: string): void {
-    this.db
-      .prepare(
-        `
-        DELETE FROM session_tags
-        WHERE session_key = ?
-          AND tag_id = (SELECT id FROM tags WHERE name = ?)
-      `,
-      )
-      .run(sessionKey, tagName);
+    const write = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `
+          DELETE FROM session_tags
+          WHERE session_key = ?
+            AND tag_id = (SELECT id FROM tags WHERE name = ?)
+        `,
+        )
+        .run(sessionKey, tagName);
+      this.deleteUnusedTag(tagName);
+    });
+    write();
+  }
+
+  deleteTag(tagName: string): void {
+    this.db.prepare("DELETE FROM tags WHERE name = ?").run(tagName.trim());
   }
 
   listTags(): string[] {
@@ -269,6 +277,22 @@ export class SessionStore {
         "INSERT INTO session_fts (session_key, title, first_question, content_text, project_path) VALUES (?, ?, ?, ?, ?)",
       )
       .run(sessionKey, title, row.first_question, contentText, row.project_path);
+  }
+
+  private deleteUnusedTag(tagName: string): void {
+    this.db
+      .prepare(
+        `
+        DELETE FROM tags
+        WHERE name = ?
+          AND NOT EXISTS (
+            SELECT 1
+            FROM session_tags
+            WHERE session_tags.tag_id = tags.id
+          )
+      `,
+      )
+      .run(tagName);
   }
 
   private getCandidateRows(options: SearchOptions): SessionRow[] {

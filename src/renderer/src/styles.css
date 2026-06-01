@@ -138,7 +138,8 @@ button:hover {
 }
 
 .nav-group button,
-.tag-list button {
+.tag-list > button,
+.tag-filter {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -150,9 +151,49 @@ button:hover {
 }
 
 .nav-group button.active,
-.tag-list button.active {
+.tag-list > button.active,
+.tag-list-row.active {
   background: #2a332d;
   color: #7ee0ad;
+}
+
+.tag-list-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-radius: 6px;
+}
+
+.tag-filter {
+  min-width: 0;
+  flex: 1;
+}
+
+.tag-filter span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag-delete {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 28px;
+  min-height: 28px;
+  padding: 0;
+  color: #9ba59b;
+  opacity: 0;
+}
+
+.tag-list-row:hover .tag-delete,
+.tag-delete:focus-visible {
+  opacity: 1;
+}
+
+.tag-delete:hover {
+  background: rgba(255, 178, 156, 0.14);
+  color: #ffb29c;
 }
 
 .content {
@@ -607,8 +648,24 @@ button:hover {
   border: 1px solid #cbd1ca;
 }
 
+.dialog-copy {
+  margin: 10px 2px 16px;
+  color: #485149;
+  font-size: 13px;
+}
+
 .dialog-actions .primary-action {
   border-color: #2f7d5f;
   background: #2f7d5f;
   color: #fff;
+}
+
+.dialog-actions .danger-action {
+  border-color: #b94734;
+  background: #b94734;
+  color: #fff;
+}
+
+.dialog-actions .danger-action:hover {
+  background: #c95542;
 }

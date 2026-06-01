@@ -70,6 +70,23 @@ describe("SessionStore", () => {
     expect(store.searchSessions({ query: "", tag: "backend" })).toHaveLength(1);
   });
 
+  it("deletes tags globally and removes unused tags after unlinking", () => {
+    const store = createInMemoryStore();
+    store.upsertIndexedSession(sampleSession(), messages);
+    store.upsertIndexedSession(sampleSession({ sessionKey: "claude:def", rawId: "def", source: "claude-cli" }), messages);
+    store.addTag("codex:abc", "backend");
+    store.addTag("claude:def", "backend");
+    store.addTag("codex:abc", "solo");
+
+    store.removeTag("codex:abc", "solo");
+    expect(store.listTags()).toEqual(["backend"]);
+
+    store.deleteTag("backend");
+    expect(store.listTags()).toEqual([]);
+    expect(store.searchSessions({ tag: "backend" })).toHaveLength(0);
+    expect(store.getSession("claude:def")?.tags).toEqual([]);
+  });
+
   it("loads messages in pages for responsive detail views", () => {
     const store = createInMemoryStore();
     store.upsertIndexedSession(sampleSession(), [

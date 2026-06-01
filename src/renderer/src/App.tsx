@@ -16,6 +16,7 @@ import {
   Search,
   Tag,
   Terminal,
+  Trash2,
   X,
 } from "lucide-react";
 import type { IndexStatus } from "../../core/indexer";
@@ -71,6 +72,7 @@ export function App(): ReactElement {
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dialog, setDialog] = useState<DialogState>(null);
+  const [deleteTagName, setDeleteTagName] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -177,6 +179,17 @@ export function App(): ReactElement {
     await refreshAfterAction();
   }
 
+  async function deleteTagGlobally(tagName: string): Promise<void> {
+    await window.sessionSearch.deleteTag(tagName);
+    setDeleteTagName(null);
+    if (tag === tagName) setTag(undefined);
+    else await load();
+    if (detail) {
+      const fresh = await window.sessionSearch.getSession(detail.sessionKey);
+      if (fresh) setDetail(fresh);
+    }
+  }
+
   async function runAction(action: () => Promise<void>): Promise<void> {
     setContextMenu(null);
     await action();
@@ -238,10 +251,23 @@ export function App(): ReactElement {
             All Tags
           </button>
           {tags.map((tagName) => (
-            <button key={tagName} className={tag === tagName ? "active" : ""} onClick={() => setTag(tagName)}>
-              <Tag size={13} />
-              {tagName}
-            </button>
+            <div key={tagName} className={`tag-list-row ${tag === tagName ? "active" : ""}`}>
+              <button className="tag-filter" onClick={() => setTag(tagName)} title={`Filter by ${tagName}`}>
+                <Tag size={13} />
+                <span>{tagName}</span>
+              </button>
+              <button
+                className="tag-delete"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setDeleteTagName(tagName);
+                }}
+                title={`Delete tag ${tagName}`}
+                aria-label={`Delete tag ${tagName}`}
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
           ))}
         </nav>
       </section>
@@ -336,6 +362,14 @@ export function App(): ReactElement {
           onChange={(value) => setDialog({ ...dialog, value })}
           onSubmit={(value) => void submitDialog(value)}
           onCancel={() => setDialog(null)}
+        />
+      ) : null}
+
+      {deleteTagName ? (
+        <DeleteTagDialog
+          tagName={deleteTagName}
+          onConfirm={() => void deleteTagGlobally(deleteTagName)}
+          onCancel={() => setDeleteTagName(null)}
         />
       ) : null}
     </main>
@@ -573,6 +607,40 @@ function ContextMenu({
       </button>
       <hr />
       <button onClick={onClose}>Close Menu</button>
+    </div>
+  );
+}
+
+function DeleteTagDialog({
+  tagName,
+  onConfirm,
+  onCancel,
+}: {
+  tagName: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}): ReactElement {
+  return (
+    <div className="dialog-backdrop" onMouseDown={onCancel}>
+      <div className="command-dialog" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="dialog-title">
+          <span>Delete Tag</span>
+          <button type="button" className="icon-button" onClick={onCancel} aria-label="Close">
+            <X size={16} />
+          </button>
+        </div>
+        <p className="dialog-copy">
+          Delete <strong>#{tagName}</strong> from all sessions?
+        </p>
+        <div className="dialog-actions">
+          <button type="button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="danger-action" onClick={onConfirm}>
+            Delete
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

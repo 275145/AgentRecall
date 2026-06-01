@@ -27,10 +27,11 @@ function getSettings(): AppSettings {
   return { ...defaultSettings, ...settingsStore.store };
 }
 
-function getPrimaryDisplayBounds(): { width: number; height: number; x: number; y: number } {
+function getPreferredWindowBounds(): { width: number; height: number; x: number; y: number } {
   const defaultWidth = 1120;
   const defaultHeight = 760;
-  const { workArea } = screen.getPrimaryDisplay();
+  const cursorPoint = screen.getCursorScreenPoint();
+  const { workArea } = screen.getDisplayNearestPoint(cursorPoint);
   const width = Math.min(defaultWidth, workArea.width);
   const height = Math.min(defaultHeight, workArea.height);
 
@@ -44,7 +45,7 @@ function getPrimaryDisplayBounds(): { width: number; height: number; x: number; 
 
 function createWindow(): void {
   const preloadPath = path.join(__dirname, "../preload/index.mjs");
-  const initialBounds = getPrimaryDisplayBounds();
+  const initialBounds = getPreferredWindowBounds();
   mainWindow = new BrowserWindow({
     ...initialBounds,
     minWidth: 860,
@@ -85,6 +86,7 @@ function toggleWindow(): void {
   if (!mainWindow) return;
   if (mainWindow.isVisible() && mainWindow.isFocused()) mainWindow.hide();
   else {
+    mainWindow.setBounds(getPreferredWindowBounds(), false);
     mainWindow.show();
     mainWindow.focus();
     mainWindow.webContents.send("focus-search");
@@ -139,6 +141,7 @@ function registerIpc(): void {
   ipcMain.handle("title:set", (_event, sessionKey: string, title: string | null) => store.setCustomTitle(sessionKey, title));
   ipcMain.handle("tag:add", (_event, sessionKey: string, tagName: string) => store.addTag(sessionKey, tagName));
   ipcMain.handle("tag:remove", (_event, sessionKey: string, tagName: string) => store.removeTag(sessionKey, tagName));
+  ipcMain.handle("tag:delete", (_event, tagName: string) => store.deleteTag(tagName));
   ipcMain.handle("pin:set", (_event, sessionKey: string, pinned: boolean) => store.setPinned(sessionKey, pinned));
   ipcMain.handle("hide:set", (_event, sessionKey: string, hidden: boolean) => store.setHidden(sessionKey, hidden));
   ipcMain.handle("index:refresh", () => runIndexSync());
