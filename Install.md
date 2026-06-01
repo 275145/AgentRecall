@@ -1,6 +1,51 @@
 # Agent-Session-Search Install
 
-This file is for coding agents. If the Agent-Session-Search repository is not already cloned and open, clone `https://github.com/zszz3/agent-session-search.git` first, then continue from the repository root.
+## 安装并使用（给使用者）
+
+只要本机有 **Node.js 20+** 和 **Git**，复制下面这一行到终端回车即可安装：
+
+```bash
+git clone https://github.com/zszz3/agent-session-search.git && cd agent-session-search && npm install && npm run build && npm install -g .
+```
+
+装好后，在任意终端运行即可启动：
+
+```bash
+agent-session-search
+```
+
+应用启动后常驻后台（菜单栏有图标），随时按 **⌥ Option + Space** 唤起搜索窗口。
+
+### 要求
+
+- macOS
+- Node.js 20 或更高版本（含 npm）
+- Git
+- 首次安装会编译原生模块 `better-sqlite3`，需要 **Xcode Command Line Tools**。若提示缺少编译工具，先执行一次：
+
+  ```bash
+  xcode-select --install
+  ```
+
+> 说明：这种方式通过命令行启动，不打包成 `.app`，因此**不需要 Apple 签名或公证**，也不会被 Gatekeeper 拦截。
+
+### 更新到新版本
+
+```bash
+cd agent-session-search && git pull && npm install && npm run build && npm install -g .
+```
+
+### 卸载
+
+```bash
+npm uninstall -g agent-session-search
+```
+
+---
+
+## 给编码 Agent 的引导
+
+This section is for coding agents. If the Agent-Session-Search repository is not already cloned and open, clone `https://github.com/zszz3/agent-session-search.git` first, then continue from the repository root.
 
 ## Goal
 
