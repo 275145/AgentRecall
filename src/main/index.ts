@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Menu, nativeImage, Tray } from "electron";
+import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Menu, nativeImage, screen, Tray } from "electron";
 import Store from "electron-store";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,11 +27,26 @@ function getSettings(): AppSettings {
   return { ...defaultSettings, ...settingsStore.store };
 }
 
+function getPrimaryDisplayBounds(): { width: number; height: number; x: number; y: number } {
+  const defaultWidth = 1120;
+  const defaultHeight = 760;
+  const { workArea } = screen.getPrimaryDisplay();
+  const width = Math.min(defaultWidth, workArea.width);
+  const height = Math.min(defaultHeight, workArea.height);
+
+  return {
+    width,
+    height,
+    x: Math.round(workArea.x + Math.max(0, workArea.width - width) / 2),
+    y: Math.round(workArea.y + Math.max(0, workArea.height - height) / 2),
+  };
+}
+
 function createWindow(): void {
   const preloadPath = path.join(__dirname, "../preload/index.mjs");
+  const initialBounds = getPrimaryDisplayBounds();
   mainWindow = new BrowserWindow({
-    width: 1120,
-    height: 760,
+    ...initialBounds,
     minWidth: 860,
     minHeight: 560,
     title: PRODUCT_NAME,
