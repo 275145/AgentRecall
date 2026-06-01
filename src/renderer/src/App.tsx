@@ -423,7 +423,6 @@ export function App(): ReactElement {
       {contextMenu ? (
         <ContextMenu
           state={contextMenu}
-          onClose={() => setContextMenu(null)}
           onRename={() => beginRename(contextMenu.session)}
           onAddTag={() => beginAddTag(contextMenu.session)}
           onPin={() =>
@@ -654,7 +653,6 @@ function MessageBlock({ message, query }: { message: SessionMessage; query: stri
 
 function ContextMenu({
   state,
-  onClose,
   onRename,
   onAddTag,
   onPin,
@@ -667,7 +665,6 @@ function ContextMenu({
   onReveal,
 }: {
   state: ContextMenuState;
-  onClose: () => void;
   onRename: () => void;
   onAddTag: () => void;
   onPin: () => void;
@@ -706,8 +703,6 @@ function ContextMenu({
       <button onClick={onReveal}>
         <FolderOpen size={14} /> Show in Finder
       </button>
-      <hr />
-      <button onClick={onClose}>Close Menu</button>
     </div>
   );
 }
