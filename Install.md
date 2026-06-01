@@ -1,0 +1,160 @@
+# Agent-Session-Search Install
+
+This file is for coding agents. If the Agent-Session-Search repository is not already cloned and open, clone `https://github.com/zszz3/agent-session-search.git` first, then continue from the repository root.
+
+## Goal
+
+Bootstrap a local development workspace for Agent-Session-Search with the least risky path available.
+
+Default preference:
+
+1. Install dependencies with npm.
+2. Verify the app with tests and type checks.
+3. Start the Electron development app only when the user asks to run it.
+
+## Success Criteria
+
+- The repository root is confirmed by checking `package.json`, `src/`, and `electron.vite.config.ts`.
+- `node_modules/` exists after `npm install`.
+- `npm test` passes.
+- `npm run typecheck` passes.
+- `npm run build` passes when the user wants a build verification.
+- The user receives the exact command to launch the development app.
+- No Claude or Codex source session files are modified.
+- No runtime SQLite database is committed to git.
+
+## Operating Rules
+
+- Be idempotent. Re-running this document should not damage an existing setup.
+- Prefer package scripts over ad hoc shell commands.
+- Do not use `sudo` or install system packages without explicit user approval.
+- Do not run `npm audit fix`, dependency upgrades, formatters, or broad refactors unless the user asks.
+- Do not delete `node_modules/`, build output, Electron user data, or existing SQLite databases unless the user asks.
+- Do not read or print secret-bearing files such as `.env`, shell profiles, or private Claude/Codex configuration files.
+- Treat Claude and Codex session files as read-only input.
+- If a command fails, stop, report the smallest blocker, and provide the next command that would unblock setup.
+- If a development server or Electron process is started for verification, do not leave it running after the task is complete unless the user asked for a persistent app session.
+
+## Prerequisites
+
+Expected tools:
+
+- Node.js 20 or newer
+- npm
+- Git
+- macOS for the current desktop workflow
+- Xcode Command Line Tools for native Node module builds
+
+Check versions:
+
+```bash
+node --version
+npm --version
+git --version
+```
+
+If `npm install` fails while compiling `better-sqlite3`, ask the user to install or repair Xcode Command Line Tools:
+
+```bash
+xcode-select --install
+```
+
+Do not run this automatically without user approval.
+
+## Install Steps
+
+1. Confirm the repository root:
+
+   ```bash
+   test -f package.json && test -d src && test -f electron.vite.config.ts
+   ```
+
+2. Install dependencies:
+
+   ```bash
+   npm install
+   ```
+
+3. Run the test suite:
+
+   ```bash
+   npm test
+   ```
+
+   This script rebuilds `better-sqlite3` for Node before running Vitest.
+
+4. Run TypeScript checks:
+
+   ```bash
+   npm run typecheck
+   ```
+
+5. Build the app when build verification is requested:
+
+   ```bash
+   npm run build
+   ```
+
+6. Start the app only when the user asks to run it:
+
+   ```bash
+   npm run dev
+   ```
+
+   This script rebuilds `better-sqlite3` for Electron before starting `electron-vite`.
+
+## Runtime Data Boundary
+
+The app creates a local SQLite database at Electron's `userData` path:
+
+```text
+<Electron userData>/session-search.sqlite
+```
+
+This database contains the search index and app-only metadata such as custom titles, tags, pinned state, and hidden state. It is runtime state, not source code.
+
+Never commit:
+
+```text
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+```
+
+The app should read upstream sessions from these locations when they exist:
+
+```text
+~/.codex/sessions/**/*.jsonl
+~/.codex/session_index.jsonl
+~/.claude/projects/*/*.jsonl
+~/.claude/sessions/*.json
+~/Library/Application Support/Claude/claude-code-sessions/**/local_*.json
+```
+
+Do not edit, rewrite, or delete those source files during installation.
+
+## Native Module Recovery
+
+Use the runtime-specific rebuild scripts when `better-sqlite3` reports an ABI or native module loading error:
+
+```bash
+npm run rebuild:node
+npm run rebuild:electron
+```
+
+Use `npm run rebuild:node` before tests. Use `npm run rebuild:electron` before the Electron development app.
+
+## TODO
+
+- [ ] Confirm the repository root.
+- [ ] Install dependencies with `npm install`.
+- [ ] Run `npm test`.
+- [ ] Run `npm run typecheck`.
+- [ ] Run `npm run build` if build verification is requested.
+- [ ] Report the exact development launch command: `npm run dev`.
+- [ ] Confirm no SQLite database files are staged for commit.
+
+## EXECUTE NOW
+
+Complete the setup steps above. When finished, stop at the setup boundary and report status instead of continuing into feature work, dependency upgrades, or unrelated repository changes.
