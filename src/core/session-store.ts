@@ -1,4 +1,5 @@
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { createRequire } from "node:module";
+import type { DatabaseSync as DatabaseSyncType, SQLInputValue } from "node:sqlite";
 import type {
   IndexedSession,
   ProjectSummary,
@@ -15,7 +16,10 @@ import type {
   TokenUsageEvent,
 } from "./types";
 
-type Db = DatabaseSync;
+const require = createRequire(import.meta.url);
+const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: typeof DatabaseSyncType };
+
+type Db = DatabaseSyncType;
 
 interface StatsRange {
   period: SessionStatsPeriod;
