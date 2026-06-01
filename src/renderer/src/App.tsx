@@ -140,6 +140,17 @@ export function App(): ReactElement {
         return;
       }
 
+      // Esc backs out of the frontmost layer, one at a time.
+      if (event.key === "Escape") {
+        if (dialog) setDialog(null);
+        else if (deleteTagName) setDeleteTagName(null);
+        else if (contextMenu) setContextMenu(null);
+        else if (detail) setDetail(null);
+        else return;
+        event.preventDefault();
+        return;
+      }
+
       // Leave list navigation alone while an overlay or menu is in front.
       if (detail || dialog || deleteTagName || contextMenu) return;
 
