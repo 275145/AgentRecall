@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import type { IndexStatus } from "../../core/indexer";
 import { formatMessageTime, formatRelativeTime } from "../../core/format-session";
+import type { TerminalAvailability } from "../../core/platform";
 import type { ProjectSummary, SearchOptions, SessionMessage, SessionSearchResult, SessionSortBy, SessionSource } from "../../core/types";
 import {
   readSidebarSections,
@@ -117,6 +118,7 @@ export function App(): ReactElement {
   const [dialog, setDialog] = useState<DialogState>(null);
   const [deleteTagName, setDeleteTagName] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState<ActionStatus | null>(null);
+  const [terminalAvailability, setTerminalAvailability] = useState<TerminalAvailability>({ iTerm: false });
   const searchRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -167,6 +169,12 @@ export function App(): ReactElement {
       offFocus();
     };
   }, [load]);
+
+  useEffect(() => {
+    void window.sessionSearch.getTerminalAvailability().then(setTerminalAvailability).catch(() => {
+      setTerminalAvailability({ iTerm: false });
+    });
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -533,6 +541,7 @@ export function App(): ReactElement {
           messages={messages}
           loading={messagesLoading}
           actionStatus={actionStatus}
+          itermAvailable={terminalAvailability.iTerm}
           query={query}
           onClose={() => setDetail(null)}
           onShowMore={() => void loadMoreMessages()}
@@ -563,6 +572,7 @@ export function App(): ReactElement {
       {contextMenu ? (
         <ContextMenu
           state={contextMenu}
+          itermAvailable={terminalAvailability.iTerm}
           onRename={() => beginRename(contextMenu.session)}
           onAddTag={() => beginAddTag(contextMenu.session)}
           onFavorite={() =>
@@ -724,6 +734,7 @@ function DetailPanel({
   messages,
   loading,
   actionStatus,
+  itermAvailable,
   query,
   onClose,
   onShowMore,
@@ -743,6 +754,7 @@ function DetailPanel({
   messages: SessionMessage[];
   loading: boolean;
   actionStatus: ActionStatus | null;
+  itermAvailable: boolean;
   query: string;
   onClose: () => void;
   onShowMore: () => void;
@@ -838,9 +850,11 @@ function DetailPanel({
         <button onClick={onResume} disabled={actionRunning}>
           <Play size={15} /> Resume
         </button>
-        <button onClick={onResumeIterm} disabled={actionRunning}>
-          <Terminal size={15} /> iTerm
-        </button>
+        {itermAvailable ? (
+          <button onClick={onResumeIterm} disabled={actionRunning}>
+            <Terminal size={15} /> iTerm
+          </button>
+        ) : null}
         <button onClick={onRename} disabled={actionRunning}>
           <Clipboard size={15} /> Rename
         </button>
@@ -912,6 +926,7 @@ function MessageBlock({ message, query }: { message: SessionMessage; query: stri
 
 function ContextMenu({
   state,
+  itermAvailable,
   onRename,
   onAddTag,
   onFavorite,
@@ -926,6 +941,7 @@ function ContextMenu({
   onReveal,
 }: {
   state: ContextMenuState;
+  itermAvailable: boolean;
   onRename: () => void;
   onAddTag: () => void;
   onFavorite: () => void;
@@ -959,9 +975,11 @@ function ContextMenu({
       <button onClick={onResume}>
         <Play size={14} /> Resume in Terminal
       </button>
-      <button onClick={onResumeIterm}>
-        <Terminal size={14} /> Resume in iTerm
-      </button>
+      {itermAvailable ? (
+        <button onClick={onResumeIterm}>
+          <Terminal size={14} /> Resume in iTerm
+        </button>
+      ) : null}
       <button onClick={onOpenApp}>
         <AppWindow size={14} /> Open App
       </button>

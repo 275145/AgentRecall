@@ -1,10 +1,16 @@
 import { execFile } from "node:child_process";
 import type { SessionSearchResult, SessionSource } from "./types";
 
+type ProcessRunner = (command: string, args: string[]) => Promise<void>;
+
 export interface AppSettings {
   defaultTerminal: "Terminal" | "iTerm" | "Ghostty" | "WezTerm" | "Warp";
   claudeBinary: string;
   codexBinary: string;
+}
+
+export interface TerminalAvailability {
+  iTerm: boolean;
 }
 
 export const defaultSettings: AppSettings = {
@@ -12,6 +18,8 @@ export const defaultSettings: AppSettings = {
   claudeBinary: "claude",
   codexBinary: "codex",
 };
+
+const ITERM_APPLICATION_NAMES = ["iTerm", "iTerm2"];
 
 export function sourceFamily(source: SessionSource): "claude" | "codex" {
   return source === "claude-cli" || source === "claude-app" ? "claude" : "codex";
@@ -43,8 +51,13 @@ export async function openResumeInTerminal(session: SessionSearchResult, setting
   }
 
   if (settings.defaultTerminal === "iTerm") {
-    await runAppleScript(`set wasRunning to application "iTerm" is running
-tell application "iTerm"
+    const appName = await resolveMacApplicationName(ITERM_APPLICATION_NAMES);
+    if (!appName) {
+      throw new Error("iTerm is not installed or is not registered with macOS. Install iTerm2 or use Resume in Terminal.");
+    }
+
+    await runAppleScript(`set wasRunning to application "${escapeAppleScript(appName)}" is running
+tell application "${escapeAppleScript(appName)}"
   activate
   if wasRunning then
     if (count of windows) = 0 then
@@ -94,6 +107,23 @@ export async function openResumeInSpecificTerminal(
   terminal: AppSettings["defaultTerminal"],
 ): Promise<void> {
   await openResumeInTerminal(session, { ...settings, defaultTerminal: terminal });
+}
+
+export async function getTerminalAvailability(): Promise<TerminalAvailability> {
+  if (process.platform !== "darwin") return { iTerm: false };
+  return { iTerm: Boolean(await resolveMacApplicationName(ITERM_APPLICATION_NAMES)) };
+}
+
+export async function resolveMacApplicationName(names: string[], runner: ProcessRunner = runProcess): Promise<string | null> {
+  for (const name of names) {
+    try {
+      await runner("/usr/bin/osascript", ["-e", `id of application "${escapeAppleScript(name)}"`]);
+      return name;
+    } catch {
+      // Try the next commonly registered app name.
+    }
+  }
+  return null;
 }
 
 export async function openNativeApp(source: SessionSource): Promise<void> {
