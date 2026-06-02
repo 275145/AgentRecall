@@ -9,6 +9,7 @@ import {
   Clipboard,
   Code2,
   Copy,
+  Download,
   Edit3,
   Eye,
   EyeOff,
@@ -581,6 +582,25 @@ export function App(): ReactElement {
     }
   }
 
+  async function exportMarkdown(sessionKey: string): Promise<void> {
+    setContextMenu(null);
+    setActionStatus({ kind: "running", message: "Exporting markdown..." });
+    try {
+      const exported = await window.sessionSearch.exportMarkdown(sessionKey);
+      if (!exported) {
+        setActionStatus(null);
+        return;
+      }
+      const successMessage = "Markdown exported.";
+      setActionStatus({ kind: "success", message: successMessage });
+      window.setTimeout(() => {
+        setActionStatus((current) => (current?.kind === "success" && current.message === successMessage ? null : current));
+      }, 1800);
+    } catch (error) {
+      setActionStatus({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   async function refreshNow(): Promise<void> {
     setContextMenu(null);
     setRefreshFeedback({ kind: "running", message: "Refreshing index..." });
@@ -946,12 +966,16 @@ export function App(): ReactElement {
           onResumeIterm={() =>
             void runAction("Opening iTerm", () => window.sessionSearch.resumeSessionInIterm(detail.sessionKey), "Resume command sent to iTerm.")
           }
+          onFocusTerminal={() =>
+            void runAction("Bringing terminal forward", () => window.sessionSearch.focusLiveTerminal(detail.sessionKey), "Terminal brought to front.")
+          }
           onCopyResume={() =>
             void runAction("Copying resume command", () => window.sessionSearch.copyResumeCommand(detail.sessionKey), "Resume command copied.")
           }
           onCopyMarkdown={() =>
             void runAction("Copying markdown", () => window.sessionSearch.copyMarkdown(detail.sessionKey), "Markdown copied.")
           }
+          onExportMarkdown={() => void exportMarkdown(detail.sessionKey)}
           onCopyPlain={() =>
             void runAction("Copying plain text", () => window.sessionSearch.copyPlainText(detail.sessionKey), "Plain text copied.")
           }
@@ -1004,9 +1028,7 @@ export function App(): ReactElement {
           onCopyMarkdown={() =>
             void runAction("Copying markdown", () => window.sessionSearch.copyMarkdown(contextMenu.session.sessionKey), "Markdown copied.")
           }
-          onCopyPlain={() =>
-            void runAction("Copying plain text", () => window.sessionSearch.copyPlainText(contextMenu.session.sessionKey), "Plain text copied.")
-          }
+          onExportMarkdown={() => void exportMarkdown(contextMenu.session.sessionKey)}
           onReveal={() =>
             void runAction("Opening Finder", () => window.sessionSearch.revealSession(contextMenu.session.sessionKey), "Finder opened.")
           }
@@ -1236,8 +1258,10 @@ function DetailPanel({
   onFavorite,
   onResume,
   onResumeIterm,
+  onFocusTerminal,
   onCopyResume,
   onCopyMarkdown,
+  onExportMarkdown,
   onCopyPlain,
   onReveal,
 }: {
@@ -1256,8 +1280,10 @@ function DetailPanel({
   onFavorite: () => void;
   onResume: () => void;
   onResumeIterm: () => void;
+  onFocusTerminal: () => void;
   onCopyResume: () => void;
   onCopyMarkdown: () => void;
+  onExportMarkdown: () => void;
   onCopyPlain: () => void;
   onReveal: () => void;
 }): ReactElement {
@@ -1351,6 +1377,9 @@ function DetailPanel({
         <button onClick={onResumeIterm} disabled={actionRunning}>
           <Terminal size={15} /> iTerm
         </button>
+        <button onClick={onFocusTerminal} disabled={actionRunning || liveState !== "open"}>
+          <BringToFront size={15} /> Bring to Front
+        </button>
         <button onClick={onRename} disabled={actionRunning}>
           <Clipboard size={15} /> Rename
         </button>
@@ -1361,6 +1390,9 @@ function DetailPanel({
           <Copy size={15} /> Copy Cmd
         </button>
         <button onClick={onCopyMarkdown} disabled={actionRunning}>Markdown</button>
+        <button onClick={onExportMarkdown} disabled={actionRunning}>
+          <Download size={15} /> Export MD
+        </button>
         <button onClick={onCopyPlain} disabled={actionRunning}>Plain Text</button>
         <button onClick={onReveal} disabled={actionRunning}>
           <FolderOpen size={15} /> Finder
@@ -1441,7 +1473,7 @@ function ContextMenu({
   onOpenApp,
   onCopyResume,
   onCopyMarkdown,
-  onCopyPlain,
+  onExportMarkdown,
   onReveal,
 }: {
   state: ContextMenuState;
@@ -1457,7 +1489,7 @@ function ContextMenu({
   onOpenApp: () => void;
   onCopyResume: () => void;
   onCopyMarkdown: () => void;
-  onCopyPlain: () => void;
+  onExportMarkdown: () => void;
   onReveal: () => void;
 }): ReactElement {
   return (
@@ -1483,11 +1515,9 @@ function ContextMenu({
       <button onClick={onResumeIterm}>
         <Terminal size={14} /> Resume in iTerm
       </button>
-      {liveState === "open" ? (
-        <button onClick={onFocusTerminal}>
-          <BringToFront size={14} /> Bring to Front
-        </button>
-      ) : null}
+      <button onClick={onFocusTerminal} disabled={liveState !== "open"}>
+        <BringToFront size={14} /> Bring to Front
+      </button>
       <button onClick={onOpenApp}>
         <AppWindow size={14} /> Open App
       </button>
@@ -1495,7 +1525,9 @@ function ContextMenu({
         <Copy size={14} /> Copy Resume Cmd
       </button>
       <button onClick={onCopyMarkdown}>Copy Markdown</button>
-      <button onClick={onCopyPlain}>Copy Plain Text</button>
+      <button onClick={onExportMarkdown}>
+        <Download size={14} /> Export Markdown
+      </button>
       <button onClick={onReveal}>
         <FolderOpen size={14} /> Show in Finder
       </button>

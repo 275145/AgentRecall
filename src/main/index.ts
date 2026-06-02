@@ -2,6 +2,7 @@ import {
   app,
   BrowserWindow,
   clipboard,
+  dialog,
   globalShortcut,
   ipcMain,
   Menu,
@@ -11,6 +12,7 @@ import {
   type MenuItemConstructorOptions,
 } from "electron";
 import Store from "electron-store";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { syncDefaultSessionsInBatches, type IndexStatus } from "../core/indexer";
@@ -53,6 +55,25 @@ const settingsStore = new Store<AppSettings>({
 function getSettings(): AppSettings {
   const settings = { ...defaultSettings, ...settingsStore.store };
   return { ...settings, globalShortcut: normalizeGlobalShortcut(settings.globalShortcut) };
+}
+
+function markdownExportFileName(title: string): string {
+  const safeTitle = title
+    .replace(/[\\/:*?"<>|\x00-\x1f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `${safeTitle || "session"}.md`;
+}
+
+async function chooseMarkdownExportPath(defaultFileName: string): Promise<string | null> {
+  const options = {
+    title: "Export Markdown",
+    defaultPath: path.join(app.getPath("documents"), defaultFileName),
+    filters: [{ name: "Markdown", extensions: ["md"] }],
+  };
+  const result = mainWindow ? await dialog.showSaveDialog(mainWindow, options) : await dialog.showSaveDialog(options);
+  if (result.canceled || !result.filePath) return null;
+  return path.extname(result.filePath) ? result.filePath : `${result.filePath}.md`;
 }
 
 function getPreferredWindowBounds(): { width: number; height: number; x: number; y: number } {
@@ -369,6 +390,14 @@ function registerIpc(): void {
     const session = store.getSession(sessionKey);
     if (!session) return;
     clipboard.writeText(formatSessionMarkdown(session, store.getAllMessages(sessionKey)));
+  });
+  ipcMain.handle("command:export-markdown", async (_event, sessionKey: string) => {
+    const session = store.getSession(sessionKey);
+    if (!session) return false;
+    const exportPath = await chooseMarkdownExportPath(markdownExportFileName(session.displayTitle || session.originalTitle || session.rawId));
+    if (!exportPath) return false;
+    await fs.writeFile(exportPath, formatSessionMarkdown(session, store.getAllMessages(sessionKey)), "utf-8");
+    return true;
   });
   ipcMain.handle("command:copy-plain", (_event, sessionKey: string) => {
     const session = store.getSession(sessionKey);

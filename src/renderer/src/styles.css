@@ -1733,7 +1733,7 @@ select:focus-visible {
   transition: background 0.1s ease, color 0.1s ease;
 }
 
-.context-menu button:hover {
+.context-menu button:hover:not(:disabled) {
   background: var(--panel-hover);
   color: var(--text);
 }
@@ -1742,7 +1742,7 @@ select:focus-visible {
   color: var(--text-faint);
 }
 
-.context-menu button:hover svg {
+.context-menu button:hover:not(:disabled) svg {
   color: var(--accent);
 }
 
