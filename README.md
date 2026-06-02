@@ -37,6 +37,18 @@ Agent-Session-Search 会把两类数据分开处理：
 
 SQLite 数据库属于运行时状态，不应该提交到 git。
 
+## 安装使用
+
+要求 macOS 和 Node.js 22.13+（含 npm）。进入仓库目录后，执行下面这一行即可安装依赖、构建并注册全局命令：
+
+```bash
+nvm use 22 && rm -rf node_modules && npm ci && npm run build && npm install -g .
+```
+
+装好后，在任意终端运行 `agent-session-search` 即可启动。应用常驻后台（菜单栏有图标），随时按 **⌥ Option + Space** 唤起搜索窗口。
+
+更新、卸载、从源码克隆、网络镜像等详情见 [Install.md](./Install.md)。
+
 ## 开发环境
 
 要求：
