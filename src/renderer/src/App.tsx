@@ -695,6 +695,8 @@ export function App(): ReactElement {
           snapshot={quotas}
           loading={quotaLoading}
           feedback={quotaFeedback}
+          expanded={sidebarSections.remaining}
+          onToggle={() => toggleSidebarSectionById("remaining")}
           onRefresh={() => void loadQuotas(true)}
         />
 
@@ -986,32 +988,41 @@ function QuotaPanel({
   snapshot,
   loading,
   feedback,
+  expanded,
+  onToggle,
   onRefresh,
 }: {
   snapshot: UsageQuotaSnapshot;
   loading: boolean;
   feedback: QuotaFeedback;
+  expanded: boolean;
+  onToggle: () => void;
   onRefresh: () => void;
 }): ReactElement {
   const updatedAt = snapshot.generatedAt ? formatRelativeTime(Date.parse(snapshot.generatedAt)) : "";
   return (
     <div className="quota-panel">
       <div className="quota-header">
-        <div>
+        <button className="quota-section-toggle" onClick={onToggle} aria-expanded={expanded}>
           <span>Remaining</span>
           {updatedAt ? <em>{updatedAt}</em> : null}
-        </div>
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </button>
         <button className="quota-refresh" onClick={onRefresh} disabled={loading} title="Refresh usage limits" aria-label="Refresh usage limits">
           <RefreshCw size={13} />
         </button>
       </div>
-      <div className="quota-list">
-        {snapshot.providers.map((card) => (
-          <QuotaProviderCard key={card.provider} card={card} />
-        ))}
-        {snapshot.providers.length === 0 ? <div className="quota-empty">{loading ? "Checking usage limits..." : "Usage limits unavailable."}</div> : null}
-      </div>
-      {feedback ? <div className={`quota-feedback ${feedback.kind}`}>{feedback.message}</div> : null}
+      {expanded ? (
+        <>
+          <div className="quota-list">
+            {snapshot.providers.map((card) => (
+              <QuotaProviderCard key={card.provider} card={card} />
+            ))}
+            {snapshot.providers.length === 0 ? <div className="quota-empty">{loading ? "Checking usage limits..." : "Usage limits unavailable."}</div> : null}
+          </div>
+          {feedback ? <div className={`quota-feedback ${feedback.kind}`}>{feedback.message}</div> : null}
+        </>
+      ) : null}
     </div>
   );
 }

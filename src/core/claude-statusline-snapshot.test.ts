@@ -1,0 +1,46 @@
+import { execFileSync } from "node:child_process";
+import { readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { describe, expect, it } from "vitest";
+
+const SCRIPT_PATH = path.resolve("bin", "claude-statusline-snapshot.cjs");
+
+describe("Claude statusline snapshot bridge", () => {
+  it("writes a minimal quota snapshot from Claude Code statusline input", () => {
+    const outputPath = path.join(tmpdir(), `claude-statusline-${process.pid}-${Date.now()}.json`);
+    try {
+      const stdout = execFileSync(process.execPath, [SCRIPT_PATH], {
+        input: JSON.stringify({
+          plan: "max",
+          cwd: "/should/not/be/persisted",
+          session_id: "session-should-not-be-persisted",
+          rate_limits: {
+            five_hour: { used_percentage: 12.4, resets_at: 1_807_000_000 },
+            seven_day: { remaining_percentage: 70, resets_at: 1_807_400_000 },
+          },
+        }),
+        env: {
+          ...process.env,
+          AGENT_SESSION_SEARCH_CLAUDE_STATUSLINE: outputPath,
+        },
+        encoding: "utf8",
+      });
+
+      const snapshot = JSON.parse(readFileSync(outputPath, "utf8")) as Record<string, unknown>;
+      expect(stdout).toContain("5h 88% left");
+      expect(snapshot).toMatchObject({
+        source: "agent-session-search-statusline",
+        plan: "max",
+        rate_limits: {
+          five_hour: { used_percentage: 12.4, resets_at: 1_807_000_000 },
+          seven_day: { remaining_percentage: 70, resets_at: 1_807_400_000 },
+        },
+      });
+      expect(snapshot).not.toHaveProperty("cwd");
+      expect(snapshot).not.toHaveProperty("session_id");
+    } finally {
+      rmSync(outputPath, { force: true });
+    }
+  });
+});

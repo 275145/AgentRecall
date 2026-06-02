@@ -7,7 +7,8 @@
   "main": "out/main/index.js",
   "type": "module",
   "bin": {
-    "agent-session-search": "bin/agent-session-search.cjs"
+    "agent-session-search": "bin/agent-session-search.cjs",
+    "agent-session-search-claude-statusline": "bin/claude-statusline-snapshot.cjs"
   },
   "engines": {
     "node": ">=22.13.0"

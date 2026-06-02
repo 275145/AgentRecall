@@ -1,8 +1,9 @@
-export type SidebarSectionId = "views" | "sources" | "projects" | "tags";
+export type SidebarSectionId = "remaining" | "views" | "sources" | "projects" | "tags";
 
 export type SidebarSectionsState = Record<SidebarSectionId, boolean>;
 
 export const DEFAULT_SIDEBAR_SECTIONS: SidebarSectionsState = {
+  remaining: true,
   projects: true,
   sources: true,
   tags: true,
@@ -14,6 +15,7 @@ export function readSidebarSections(value: string | null): SidebarSectionsState 
   try {
     const parsed = JSON.parse(value) as Partial<Record<SidebarSectionId, unknown>>;
     return {
+      remaining: typeof parsed.remaining === "boolean" ? parsed.remaining : DEFAULT_SIDEBAR_SECTIONS.remaining,
       projects: typeof parsed.projects === "boolean" ? parsed.projects : DEFAULT_SIDEBAR_SECTIONS.projects,
       sources: typeof parsed.sources === "boolean" ? parsed.sources : DEFAULT_SIDEBAR_SECTIONS.sources,
       tags: typeof parsed.tags === "boolean" ? parsed.tags : DEFAULT_SIDEBAR_SECTIONS.tags,
