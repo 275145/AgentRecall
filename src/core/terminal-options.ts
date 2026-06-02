@@ -24,22 +24,27 @@ const TERMINAL_LABELS: Record<TerminalChoice, string> = {
   Cmd: "Command Prompt",
 };
 
-export function terminalOptionsFor(platform: NodeJS.Platform = process.platform): TerminalChoice[] {
+function currentPlatform(): NodeJS.Platform {
+  const platform = (globalThis as { process?: { platform?: NodeJS.Platform } }).process?.platform;
+  return platform ?? "darwin";
+}
+
+export function terminalOptionsFor(platform: NodeJS.Platform = currentPlatform()): TerminalChoice[] {
   return platform === "win32" ? [...WINDOWS_TERMINALS] : [...MAC_TERMINALS];
 }
 
-export function defaultTerminalFor(platform: NodeJS.Platform = process.platform): TerminalChoice {
+export function defaultTerminalFor(platform: NodeJS.Platform = currentPlatform()): TerminalChoice {
   return platform === "win32" ? "WindowsTerminal" : "Terminal";
 }
 
-export function normalizeTerminal(value: unknown, platform: NodeJS.Platform = process.platform): TerminalChoice {
+export function normalizeTerminal(value: unknown, platform: NodeJS.Platform = currentPlatform()): TerminalChoice {
   const options = terminalOptionsFor(platform);
   return options.includes(value as TerminalChoice) ? (value as TerminalChoice) : defaultTerminalFor(platform);
 }
 
 // {label,value} pairs for a settings dropdown, filtered to the platform.
 export function terminalSelectOptions(
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform = currentPlatform(),
 ): Array<{ label: string; value: TerminalChoice }> {
   return terminalOptionsFor(platform).map((value) => ({ label: TERMINAL_LABELS[value], value }));
 }

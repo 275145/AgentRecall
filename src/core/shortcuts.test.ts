@@ -15,19 +15,27 @@ describe("normalizeGlobalShortcut", () => {
     expect(normalizeGlobalShortcut("nonsense", "win32")).toBe("Ctrl+Alt+Space");
     expect(normalizeGlobalShortcut("nonsense", "darwin")).toBe("Alt+Space");
   });
+  it("normalizes Windows-reserved or duplicate values to the Windows default", () => {
+    expect(normalizeGlobalShortcut("Alt+Space", "win32")).toBe("Ctrl+Alt+Space");
+    expect(normalizeGlobalShortcut("CommandOrControl+Alt+Space", "win32")).toBe("Ctrl+Alt+Space");
+    expect(normalizeGlobalShortcut("", "win32")).toBe("");
+  });
   it("keeps a valid value", () => {
     expect(normalizeGlobalShortcut("Ctrl+Alt+Space", "darwin")).toBe("Ctrl+Alt+Space");
   });
 });
 
 describe("globalShortcutOptions", () => {
-  it("labels modifiers as Alt/Ctrl on Windows", () => {
-    const labels = globalShortcutOptions("win32").map((o) => o.label);
-    expect(labels).toContain("Alt + Space");
-    expect(labels.join(" ")).not.toContain("Option");
+  it("only exposes Windows-safe shortcuts on Windows", () => {
+    const options = globalShortcutOptions("win32");
+    expect(options).toEqual([
+      { label: "Ctrl + Alt + Space", value: "Ctrl+Alt+Space" },
+      { label: "Disabled", value: "" },
+    ]);
   });
   it("labels modifiers as Option/Command on macOS", () => {
     const labels = globalShortcutOptions("darwin").map((o) => o.label);
     expect(labels).toContain("Option + Space");
+    expect(labels).toContain("Command + Option + Space");
   });
 });

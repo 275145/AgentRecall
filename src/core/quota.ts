@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import https from "node:https";
 import { homedir } from "node:os";
@@ -215,8 +216,10 @@ function claudeStatuslineCandidates(options: QuotaLoadOptions): string[] {
   const env = options.env ?? process.env;
   const home = getHomeDir(options);
   const candidates: string[] = [];
-  const explicitPath = env.KABOO_CLAUDE_STATUSLINE?.trim();
-  if (explicitPath) candidates.push(expandHome(explicitPath, home));
+  const explicitPaths = [env.AGENT_SESSION_SEARCH_CLAUDE_STATUSLINE?.trim(), env.KABOO_CLAUDE_STATUSLINE?.trim()];
+  for (const explicitPath of explicitPaths) {
+    if (explicitPath) candidates.push(expandHome(explicitPath, home));
+  }
   if (home) {
     candidates.push(
       path.join(home, ".claude", "statusline-snapshot.json"),
@@ -363,6 +366,17 @@ function quotaLabel(key: string): string {
 }
 
 async function fetchCodexUsageHTTP(accessToken: string, accountId: string): Promise<CodexUsageResponse> {
+  if (process.platform === "win32") {
+    try {
+      return await doCodexUsagePowerShellRequest(CODEX_USAGE_PRIMARY_URL, accessToken, accountId);
+    } catch (error) {
+      if (error instanceof CodexHttpError && error.statusCode === 404) {
+        return doCodexUsagePowerShellRequest(CODEX_USAGE_FALLBACK_URL, accessToken, accountId);
+      }
+      throw error;
+    }
+  }
+
   try {
     return await doCodexUsageRequest(CODEX_USAGE_PRIMARY_URL, accessToken, accountId);
   } catch (error) {
@@ -371,6 +385,71 @@ async function fetchCodexUsageHTTP(accessToken: string, accountId: string): Prom
     }
     throw error;
   }
+}
+
+function doCodexUsagePowerShellRequest(endpoint: string, accessToken: string, accountId: string): Promise<CodexUsageResponse> {
+  const script = `
+$ErrorActionPreference = 'Stop'
+$headers = @{
+  Accept = 'application/json'
+  Authorization = 'Bearer ' + $env:AGENT_SESSION_SEARCH_CODEX_ACCESS_TOKEN
+  'User-Agent' = 'agent-session-search'
+}
+if ($env:AGENT_SESSION_SEARCH_CODEX_ACCOUNT_ID) {
+  $headers['X-Account-Id'] = $env:AGENT_SESSION_SEARCH_CODEX_ACCOUNT_ID
+  $headers['ChatClaude-Account-Id'] = $env:AGENT_SESSION_SEARCH_CODEX_ACCOUNT_ID
+  $headers['ChatGPT-Account-Id'] = $env:AGENT_SESSION_SEARCH_CODEX_ACCOUNT_ID
+}
+try {
+  $response = Invoke-WebRequest -Uri $env:AGENT_SESSION_SEARCH_CODEX_USAGE_URL -Headers $headers -Method GET -TimeoutSec 15 -UseBasicParsing
+  [Console]::Out.Write($response.Content)
+} catch {
+  $statusCode = $null
+  if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+    $statusCode = [int]$_.Exception.Response.StatusCode
+  }
+  if ($statusCode) {
+    [Console]::Error.Write("HTTP $statusCode")
+  } else {
+    [Console]::Error.Write($_.Exception.Message)
+  }
+  exit 1
+}
+`;
+
+  return new Promise((resolve, reject) => {
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+      {
+        timeout: 20_000,
+        maxBuffer: HTTP_BODY_LIMIT,
+        env: {
+          ...process.env,
+          AGENT_SESSION_SEARCH_CODEX_USAGE_URL: endpoint,
+          AGENT_SESSION_SEARCH_CODEX_ACCESS_TOKEN: accessToken,
+          AGENT_SESSION_SEARCH_CODEX_ACCOUNT_ID: accountId,
+        },
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const message = stderr.trim() || error.message;
+          const statusCode = Number(message.match(/HTTP\s+(\d+)/)?.[1]);
+          if (Number.isFinite(statusCode)) {
+            reject(new CodexHttpError(codexHttpStatusMessage(statusCode), statusCode));
+            return;
+          }
+          reject(new Error(message));
+          return;
+        }
+        try {
+          resolve(JSON.parse(stdout) as CodexUsageResponse);
+        } catch (parseError) {
+          reject(parseError instanceof Error ? new Error(`Invalid Codex usage response: ${parseError.message}`) : parseError);
+        }
+      },
+    );
+  });
 }
 
 class CodexHttpError extends Error {

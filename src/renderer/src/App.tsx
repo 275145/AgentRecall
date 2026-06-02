@@ -108,6 +108,8 @@ const STATS_PERIOD_OPTIONS: Array<{ label: string; value: SessionStatsPeriod }> 
 ];
 
 const RUNTIME_PLATFORM: NodeJS.Platform = window.sessionSearch.platform;
+const IS_MAC = RUNTIME_PLATFORM === "darwin";
+const FILE_MANAGER_LABEL = IS_MAC ? "Finder" : RUNTIME_PLATFORM === "win32" ? "Explorer" : "File Manager";
 
 const DEFAULT_TERMINAL_OPTIONS = terminalSelectOptions(RUNTIME_PLATFORM);
 
@@ -410,9 +412,9 @@ export function App(): ReactElement {
         const delta = event.key === "ArrowDown" ? 1 : -1;
         const nextIndex =
           currentIndex < 0
-            ? delta === 1
-              ? 0
-              : displayedResults.length - 1
+            ? RUNTIME_PLATFORM === "darwin" && delta === -1
+              ? displayedResults.length - 1
+              : 0
             : Math.min(displayedResults.length - 1, Math.max(0, currentIndex + delta));
         setSelectedKey(displayedResults[nextIndex].sessionKey);
         return;
@@ -657,7 +659,7 @@ export function App(): ReactElement {
   }
 
   return (
-    <main className="app" data-theme={theme} onClick={() => setContextMenu(null)}>
+    <main className="app" data-theme={theme} data-platform={RUNTIME_PLATFORM} onClick={() => setContextMenu(null)}>
       <div className="titlebar-drag" />
       <section className="sidebar">
         <div className="brand">
@@ -835,9 +837,9 @@ export function App(): ReactElement {
               placeholder={searchPlaceholder}
               autoFocus
             />
-            <span className="kbd-hint">⌘K</span>
+            <span className="kbd-hint">{RUNTIME_PLATFORM === "darwin" ? "⌘K" : "Ctrl+K"}</span>
             <span className="kbd-hint" title="Resume selected session in the default terminal">
-              ⌘↵
+              {RUNTIME_PLATFORM === "darwin" ? "⌘↵" : "Ctrl+Enter"}
             </span>
           </div>
           {selectedProject ? (
@@ -930,6 +932,8 @@ export function App(): ReactElement {
           actionStatus={actionStatus}
           query={query}
           liveState={getLiveSessionState(detail, liveSessionKeys, liveDetectionFailed)}
+          revealLabel={FILE_MANAGER_LABEL}
+          showItermAction={IS_MAC}
           onClose={closeDetail}
           onShowMore={() => void loadMoreMessages()}
           onRename={() => beginRename(detail)}
@@ -952,7 +956,13 @@ export function App(): ReactElement {
           onCopyPlain={() =>
             void runAction("Copying plain text", () => window.sessionSearch.copyPlainText(detail.sessionKey), "Plain text copied.")
           }
-          onReveal={() => void runAction("Opening Finder", () => window.sessionSearch.revealSession(detail.sessionKey), "Finder opened.")}
+          onReveal={() =>
+            void runAction(
+              `Opening ${FILE_MANAGER_LABEL}`,
+              () => window.sessionSearch.revealSession(detail.sessionKey),
+              `${FILE_MANAGER_LABEL} opened.`,
+            )
+          }
         />
       ) : null}
 
@@ -960,6 +970,8 @@ export function App(): ReactElement {
         <ContextMenu
           state={contextMenu}
           liveState={getLiveSessionState(contextMenu.session, liveSessionKeys, liveDetectionFailed)}
+          revealLabel={FILE_MANAGER_LABEL}
+          showMacActions={IS_MAC}
           onRename={() => beginRename(contextMenu.session)}
           onAddTag={() => beginAddTag(contextMenu.session)}
           onFavorite={() =>
@@ -1005,7 +1017,11 @@ export function App(): ReactElement {
             void runAction("Copying plain text", () => window.sessionSearch.copyPlainText(contextMenu.session.sessionKey), "Plain text copied.")
           }
           onReveal={() =>
-            void runAction("Opening Finder", () => window.sessionSearch.revealSession(contextMenu.session.sessionKey), "Finder opened.")
+            void runAction(
+              `Opening ${FILE_MANAGER_LABEL}`,
+              () => window.sessionSearch.revealSession(contextMenu.session.sessionKey),
+              `${FILE_MANAGER_LABEL} opened.`,
+            )
           }
         />
       ) : null}
@@ -1225,6 +1241,8 @@ function DetailPanel({
   actionStatus,
   query,
   liveState,
+  revealLabel,
+  showItermAction,
   onClose,
   onShowMore,
   onRename,
@@ -1245,6 +1263,8 @@ function DetailPanel({
   actionStatus: ActionStatus | null;
   query: string;
   liveState: LiveSessionState;
+  revealLabel: string;
+  showItermAction: boolean;
   onClose: () => void;
   onShowMore: () => void;
   onRename: () => void;
@@ -1346,9 +1366,11 @@ function DetailPanel({
         <button onClick={onResume} disabled={actionRunning}>
           <Play size={15} /> Resume
         </button>
-        <button onClick={onResumeIterm} disabled={actionRunning}>
-          <Terminal size={15} /> iTerm
-        </button>
+        {showItermAction ? (
+          <button onClick={onResumeIterm} disabled={actionRunning}>
+            <Terminal size={15} /> iTerm
+          </button>
+        ) : null}
         <button onClick={onRename} disabled={actionRunning}>
           <Clipboard size={15} /> Rename
         </button>
@@ -1361,7 +1383,7 @@ function DetailPanel({
         <button onClick={onCopyMarkdown} disabled={actionRunning}>Markdown</button>
         <button onClick={onCopyPlain} disabled={actionRunning}>Plain Text</button>
         <button onClick={onReveal} disabled={actionRunning}>
-          <FolderOpen size={15} /> Finder
+          <FolderOpen size={15} /> {revealLabel}
         </button>
       </div>
       <div className="detail-tags">
@@ -1428,6 +1450,8 @@ function ActionToast({ status }: { status: ActionStatus }): ReactElement {
 function ContextMenu({
   state,
   liveState,
+  revealLabel,
+  showMacActions,
   onRename,
   onAddTag,
   onFavorite,
@@ -1444,6 +1468,8 @@ function ContextMenu({
 }: {
   state: ContextMenuState;
   liveState: LiveSessionState;
+  revealLabel: string;
+  showMacActions: boolean;
   onRename: () => void;
   onAddTag: () => void;
   onFavorite: () => void;
@@ -1478,24 +1504,28 @@ function ContextMenu({
       <button onClick={onResume}>
         <Play size={14} /> Resume in Terminal
       </button>
-      <button onClick={onResumeIterm}>
-        <Terminal size={14} /> Resume in iTerm
-      </button>
-      {liveState === "open" ? (
+      {showMacActions ? (
+        <button onClick={onResumeIterm}>
+          <Terminal size={14} /> Resume in iTerm
+        </button>
+      ) : null}
+      {showMacActions && liveState === "open" ? (
         <button onClick={onFocusTerminal}>
           <BringToFront size={14} /> Bring to Front
         </button>
       ) : null}
-      <button onClick={onOpenApp}>
-        <AppWindow size={14} /> Open App
-      </button>
+      {showMacActions ? (
+        <button onClick={onOpenApp}>
+          <AppWindow size={14} /> Open App
+        </button>
+      ) : null}
       <button onClick={onCopyResume}>
         <Copy size={14} /> Copy Resume Cmd
       </button>
       <button onClick={onCopyMarkdown}>Copy Markdown</button>
       <button onClick={onCopyPlain}>Copy Plain Text</button>
       <button onClick={onReveal}>
-        <FolderOpen size={14} /> Show in Finder
+        <FolderOpen size={14} /> Show in {revealLabel}
       </button>
     </div>
   );

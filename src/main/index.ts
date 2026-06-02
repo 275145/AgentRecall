@@ -177,33 +177,31 @@ function createTray(): void {
 }
 
 function createApplicationMenu(): void {
+  if (process.platform !== "darwin") {
+    Menu.setApplicationMenu(null);
+    return;
+  }
+
   app.setAboutPanelOptions({ applicationName: PRODUCT_NAME });
 
-  const appMenu: MenuItemConstructorOptions[] =
-    process.platform === "darwin"
-      ? [
-          {
-            label: PRODUCT_NAME,
-            submenu: [
-              { label: `About ${PRODUCT_NAME}`, role: "about" },
-              { type: "separator" },
-              { role: "services" },
-              { type: "separator" },
-              { label: `Hide ${PRODUCT_NAME}`, accelerator: "Command+H", role: "hide" },
-              { label: "Hide Others", accelerator: "Command+Alt+H", role: "hideOthers" },
-              { label: "Show All", role: "unhide" },
-              { type: "separator" },
-              { label: `Quit ${PRODUCT_NAME}`, accelerator: "Command+Q", click: () => app.quit() },
-            ],
-          },
-        ]
-      : [];
-
   const template: MenuItemConstructorOptions[] = [
-    ...appMenu,
+    {
+      label: PRODUCT_NAME,
+      submenu: [
+        { label: `About ${PRODUCT_NAME}`, role: "about" },
+        { type: "separator" },
+        { role: "services" },
+        { type: "separator" },
+        { label: `Hide ${PRODUCT_NAME}`, accelerator: "Command+H", role: "hide" },
+        { label: "Hide Others", accelerator: "Command+Alt+H", role: "hideOthers" },
+        { label: "Show All", role: "unhide" },
+        { type: "separator" },
+        { label: `Quit ${PRODUCT_NAME}`, accelerator: "Command+Q", click: () => app.quit() },
+      ],
+    },
     {
       label: "File",
-      submenu: [process.platform === "darwin" ? { role: "close" } : { label: "Quit", role: "quit" }],
+      submenu: [{ role: "close" }],
     },
     {
       label: "Edit",
@@ -234,10 +232,7 @@ function createApplicationMenu(): void {
     },
     {
       label: "Window",
-      submenu:
-        process.platform === "darwin"
-          ? [{ role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" }]
-          : [{ role: "minimize" }, { role: "close" }],
+      submenu: [{ role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" }],
     },
   ];
 

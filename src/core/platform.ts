@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { DEFAULT_GLOBAL_SHORTCUT, type GlobalShortcut } from "./shortcuts";
 import {
   type TerminalChoice,
@@ -76,12 +77,16 @@ interface WindowsLaunch {
 // Ordered candidate launches. The caller tries each until one spawns (ENOENT -> next).
 export function buildWindowsLaunchPlan(terminal: TerminalChoice, command: string, cwd: string): WindowsLaunch[] {
   const wt = (): WindowsLaunch => {
-    const inner = ["pwsh.exe", "-NoExit", "-Command", command];
+    const inner = ["cmd.exe", "/d", "/k", command];
     return { file: "wt.exe", args: cwd ? ["-d", cwd, ...inner] : inner };
   };
-  const pwsh = (): WindowsLaunch => ({ file: "pwsh.exe", args: ["-NoExit", "-Command", command], cwd: cwd || undefined });
-  const powershell = (): WindowsLaunch => ({ file: "powershell.exe", args: ["-NoExit", "-Command", command], cwd: cwd || undefined });
-  const cmd = (): WindowsLaunch => ({ file: "cmd.exe", args: ["/K", command], cwd: cwd || undefined });
+  const pwsh = (): WindowsLaunch => ({ file: "pwsh.exe", args: ["-NoLogo", "-NoProfile", "-NoExit", "-Command", command], cwd: cwd || undefined });
+  const powershell = (): WindowsLaunch => ({
+    file: "powershell.exe",
+    args: ["-NoLogo", "-NoProfile", "-NoExit", "-Command", command],
+    cwd: cwd || undefined,
+  });
+  const cmd = (): WindowsLaunch => ({ file: "cmd.exe", args: ["/d", "/k", command], cwd: cwd || undefined });
 
   if (terminal === "Cmd") return [cmd()];
   if (terminal === "PowerShell") return [pwsh(), powershell(), cmd()];
@@ -92,7 +97,8 @@ export function buildWindowsLaunchPlan(terminal: TerminalChoice, command: string
 async function openResumeInWindowsTerminal(session: SessionSearchResult, settings: AppSettings): Promise<void> {
   const command = getResumeCommand(session, settings, { withCwd: false, platform: "win32" });
   const terminal = normalizeTerminal(settings.defaultTerminal, "win32");
-  const plan = buildWindowsLaunchPlan(terminal, command, session.projectPath ?? "");
+  const cwd = existingDirectory(session.projectPath);
+  const plan = buildWindowsLaunchPlan(terminal, command, cwd);
 
   let lastError: Error | null = null;
   for (const launch of plan) {
@@ -107,6 +113,15 @@ async function openResumeInWindowsTerminal(session: SessionSearchResult, setting
     }
   }
   throw new Error(`No Windows terminal could be launched. ${lastError?.message ?? ""}`.trim());
+}
+
+function existingDirectory(value: string | null | undefined): string {
+  if (!value) return "";
+  try {
+    return existsSync(value) ? value : "";
+  } catch {
+    return "";
+  }
 }
 
 function spawnDetached(command: string, args: string[], cwd?: string): Promise<void> {

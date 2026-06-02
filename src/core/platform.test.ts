@@ -31,7 +31,9 @@ describe("resume commands", () => {
       projectPath: "/repo",
     } as SessionSearchResult;
 
-    expect(getResumeCommand(session)).toBe("cd /repo && codebuddy --resume codebuddy-1");
+    expect(getResumeCommand(session, defaultSettings, { platform: "darwin" })).toBe(
+      "cd /repo && codebuddy --resume codebuddy-1",
+    );
   });
 
   it("builds a cmd-compatible cd prefix on Windows", () => {
@@ -84,25 +86,30 @@ describe("buildWindowsLaunchPlan", () => {
   it("Windows Terminal first, then powershell shells, then cmd", () => {
     const plan = buildWindowsLaunchPlan("WindowsTerminal", cmd, cwd);
     expect(plan.map((p) => p.file)).toEqual(["wt.exe", "pwsh.exe", "powershell.exe", "cmd.exe"]);
-    expect(plan[0].args).toEqual(["-d", cwd, "pwsh.exe", "-NoExit", "-Command", cmd]);
+    expect(plan[0].args).toEqual(["-d", cwd, "cmd.exe", "/d", "/k", cmd]);
   });
 
   it("PowerShell prefers pwsh then powershell then cmd", () => {
     const plan = buildWindowsLaunchPlan("PowerShell", cmd, cwd);
     expect(plan.map((p) => p.file)).toEqual(["pwsh.exe", "powershell.exe", "cmd.exe"]);
-    expect(plan[0].args).toEqual(["-NoExit", "-Command", cmd]);
+    expect(plan[0].args).toEqual(["-NoLogo", "-NoProfile", "-NoExit", "-Command", cmd]);
     expect(plan[0].cwd).toBe(cwd);
   });
 
   it("Cmd uses cmd.exe /K", () => {
     const plan = buildWindowsLaunchPlan("Cmd", cmd, cwd);
     expect(plan.map((p) => p.file)).toEqual(["cmd.exe"]);
-    expect(plan[0].args).toEqual(["/K", cmd]);
+    expect(plan[0].args).toEqual(["/d", "/k", cmd]);
     expect(plan[0].cwd).toBe(cwd);
   });
 
   it("omits wt start-dir flag when cwd is empty", () => {
     const plan = buildWindowsLaunchPlan("WindowsTerminal", cmd, "");
-    expect(plan[0].args).toEqual(["pwsh.exe", "-NoExit", "-Command", cmd]);
+    expect(plan[0].args).toEqual(["cmd.exe", "/d", "/k", cmd]);
+  });
+
+  it("does not set shell cwd when cwd is empty", () => {
+    const plan = buildWindowsLaunchPlan("WindowsTerminal", cmd, "");
+    expect(plan.map((p) => p.cwd)).toEqual([undefined, undefined, undefined, undefined]);
   });
 });
