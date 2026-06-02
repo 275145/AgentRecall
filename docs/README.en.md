@@ -14,6 +14,7 @@ It indexes existing local session files, lets you add your own titles and tags, 
 - Filter by project, tag, source, pinned sessions, or hidden sessions.
 - Resume a session in Terminal, iTerm, Ghostty, WezTerm, or Warp.
 - Copy resume commands or conversation exports.
+- Show Codex subscription quota; Claude Code quota can be shown through a statusline snapshot bridge.
 - Refresh the local index from the tray menu.
 - Toggle the app with `Option+Space` on macOS.
 
@@ -48,6 +49,23 @@ nvm use 22 && rm -rf node_modules && npm ci && npm run build && npm install -g .
 Once installed, run `agent-session-search` from any terminal to launch it. The app stays in the background (with a menu bar icon); press **⌥ Option + Space** anytime to open the search window.
 
 See [Install.md](../Install.md) for updating, uninstalling, installing from a fresh clone, and network mirror tips.
+
+### Claude Code Quota Bridge
+
+Codex quota is loaded read-only through `~/.codex/auth.json`. Claude Code does not expose an equivalent local quota file or read-only usage API; quota appears in the `rate_limits` field passed to statusline commands.
+
+To show Claude Code 5h / 7d quota in the app, add this to `~/.claude/settings.json` after globally installing this project:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "agent-session-search-claude-statusline"
+  }
+}
+```
+
+Then run Claude Code once and wait for the first API response. The bridge writes `~/.claude/statusline-snapshot.json`, which the app reads on Usage refresh. The script stores only `rate_limits`, optional plan, and update time, not the full statusline input.
 
 ## Development Setup
 
