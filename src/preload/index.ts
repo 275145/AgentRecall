@@ -41,6 +41,7 @@ const api = {
   openNativeApp: (sessionKey: string): Promise<void> => ipcRenderer.invoke("command:open-app", sessionKey),
   revealSession: (sessionKey: string): Promise<void> => ipcRenderer.invoke("command:reveal", sessionKey),
   copyMarkdown: (sessionKey: string): Promise<void> => ipcRenderer.invoke("command:copy-markdown", sessionKey),
+  exportMarkdown: (sessionKey: string): Promise<boolean> => ipcRenderer.invoke("command:export-markdown", sessionKey),
   copyPlainText: (sessionKey: string): Promise<void> => ipcRenderer.invoke("command:copy-plain", sessionKey),
   onIndexStatus: (callback: (status: IndexStatus) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, status: IndexStatus) => callback(status);
@@ -51,6 +52,11 @@ const api = {
     const listener = () => callback();
     ipcRenderer.on("focus-search", listener);
     return () => ipcRenderer.removeListener("focus-search", listener);
+  },
+  onOpenSettings: (callback: () => void): (() => void) => {
+    const listener = () => callback();
+    ipcRenderer.on("open-settings", listener);
+    return () => ipcRenderer.removeListener("open-settings", listener);
   },
 };
 

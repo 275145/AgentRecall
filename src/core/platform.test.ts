@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { getResumeCommand, resolveMacApplicationName, defaultTerminalFor, terminalOptionsFor, normalizeTerminal, defaultSettings, buildWindowsLaunchPlan } from "./platform";
+import {
+  buildWindowsLaunchPlan,
+  defaultSettings,
+  defaultTerminalFor,
+  getResumeCommand,
+  getResumeProcessSpec,
+  normalizeTerminal,
+  resolveMacApplicationName,
+  terminalOptionsFor,
+} from "./platform";
 import type { SessionSearchResult } from "./types";
 
 describe("platform application resolution", () => {
@@ -111,5 +120,36 @@ describe("buildWindowsLaunchPlan", () => {
   it("does not set shell cwd when cwd is empty", () => {
     const plan = buildWindowsLaunchPlan("WindowsTerminal", cmd, "");
     expect(plan.map((p) => p.cwd)).toEqual([undefined, undefined, undefined, undefined]);
+  });
+});
+
+describe("resume process specs", () => {
+  it("builds Codex resume as binary args with cwd instead of shell text", () => {
+    const session = {
+      source: "codex-cli",
+      rawId: "codex-1",
+      projectPath: "/repo with spaces",
+    } as SessionSearchResult;
+
+    expect(getResumeProcessSpec(session, defaultSettings, { platform: "darwin" })).toMatchObject({
+      command: "codex",
+      args: ["resume", "codex-1"],
+      cwd: "/repo with spaces",
+      displayCommand: "cd '/repo with spaces' && codex resume codex-1",
+    });
+  });
+
+  it("builds Claude resume as binary args", () => {
+    const session = {
+      source: "claude-cli",
+      rawId: "claude-1",
+      projectPath: "/repo",
+    } as SessionSearchResult;
+
+    expect(getResumeProcessSpec(session)).toMatchObject({
+      command: "claude",
+      args: ["--resume", "claude-1"],
+      cwd: "/repo",
+    });
   });
 });

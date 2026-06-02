@@ -9,6 +9,7 @@ import {
   Clipboard,
   Code2,
   Copy,
+  Download,
   Edit3,
   Eye,
   EyeOff,
@@ -16,6 +17,7 @@ import {
   FolderOpen,
   GitBranch,
   Keyboard,
+  Languages,
   Moon,
   Pin,
   PinOff,
@@ -26,7 +28,7 @@ import {
   Star,
   Sun,
   Tag,
-  Terminal,
+  Terminal as TerminalIcon,
   Trash2,
   X,
 } from "lucide-react";
@@ -63,6 +65,7 @@ import {
   type SidebarSectionId,
   type SidebarSectionsState,
 } from "./sidebar-sections";
+import { LANGUAGE_STORAGE_KEY, localize, readInitialLanguage, type LanguageMode } from "./language";
 import { readInitialTheme, THEME_STORAGE_KEY, type ThemeMode } from "./theme";
 
 const SOURCE_LABEL: Record<SessionSource, string> = {
@@ -161,6 +164,33 @@ function sourceUiFamily(source: SessionSource): "claude" | "codex" | "codebuddy"
   return "codebuddy";
 }
 
+function sortLabel(value: SessionSortBy, language: LanguageMode): string {
+  if (value === "created") return localize(language, "Created", "创建时间");
+  if (value === "updated") return localize(language, "Updated", "更新时间");
+  return localize(language, "Latest activity", "最近活动");
+}
+
+function statsPeriodLabel(value: SessionStatsPeriod, language: LanguageMode): string {
+  if (value === "today") return localize(language, "Today", "今天");
+  if (value === "sevenDay") return localize(language, "7D", "7 天");
+  if (value === "thirtyDay") return localize(language, "30D", "30 天");
+  return localize(language, "All", "全部");
+}
+
+function liveStatusFilterLabel(value: LiveStatusFilter, language: LanguageMode): string {
+  if (value === "open") return localize(language, "Open", "打开");
+  if (value === "closed") return localize(language, "Closed", "关闭");
+  return localize(language, "All", "全部");
+}
+
+function sourceFilterLabel(item: { label: string; value: SearchOptions["source"] }, language: LanguageMode): string {
+  return item.value === "all" ? localize(language, "All", "全部") : item.label;
+}
+
+function localizedLiveStateLabel(state: LiveSessionState, language: LanguageMode): string {
+  return localize(language, liveStateLabel(state), state === "open" ? "打开" : state === "closed" ? "关闭" : "未知");
+}
+
 type ActionStatus = {
   kind: "running" | "success" | "error";
   message: string;
@@ -194,6 +224,7 @@ function loadInitialSidebarSections(): SidebarSectionsState {
 
 export function App(): ReactElement {
   const [theme, setTheme] = useState<ThemeMode>(() => readInitialTheme());
+  const [language, setLanguage] = useState<LanguageMode>(() => readInitialLanguage());
   const [sidebarSections, setSidebarSections] = useState<SidebarSectionsState>(() => loadInitialSidebarSections());
   const [query, setQuery] = useState("");
   const [source, setSource] = useState<SearchOptions["source"]>("all");
@@ -234,6 +265,7 @@ export function App(): ReactElement {
   const loadSeqRef = useRef(0);
   const detailLoadSeqRef = useRef(0);
   const searchRef = useRef<HTMLInputElement>(null);
+  const t = useCallback((en: string, zh: string) => localize(language, en, zh), [language]);
 
   const load = useCallback(async () => {
     const requestId = ++loadSeqRef.current;
@@ -264,10 +296,10 @@ export function App(): ReactElement {
 
   const refreshStats = useCallback(async () => {
     setStatsRefreshing(true);
-    setStatsFeedback({ kind: "running", message: "Refreshing usage..." });
+    setStatsFeedback({ kind: "running", message: t("Refreshing usage...", "正在刷新用量...") });
     try {
       setStats(await window.sessionSearch.getStats({ period: statsPeriod }));
-      const successMessage = "Usage refreshed.";
+      const successMessage = t("Usage refreshed.", "用量已刷新。");
       setStatsFeedback({ kind: "success", message: successMessage });
       window.setTimeout(() => {
         setStatsFeedback((current) => (current?.kind === "success" && current.message === successMessage ? null : current));
@@ -277,16 +309,16 @@ export function App(): ReactElement {
     } finally {
       setStatsRefreshing(false);
     }
-  }, [statsPeriod]);
+  }, [statsPeriod, t]);
 
   const loadQuotas = useCallback(async (manual = false) => {
     setQuotaLoading(true);
-    if (manual) setQuotaFeedback({ kind: "running", message: "Refreshing usage limits..." });
+    if (manual) setQuotaFeedback({ kind: "running", message: t("Refreshing usage limits...", "正在刷新额度...") });
     try {
       const nextQuotas = await window.sessionSearch.getQuotas();
       setQuotas(nextQuotas);
       if (manual) {
-        const successMessage = "Usage limits refreshed.";
+        const successMessage = t("Usage limits refreshed.", "额度已刷新。");
         setQuotaFeedback({ kind: "success", message: successMessage });
         window.setTimeout(() => {
           setQuotaFeedback((current) => (current?.kind === "success" && current.message === successMessage ? null : current));
@@ -297,7 +329,7 @@ export function App(): ReactElement {
     } finally {
       setQuotaLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const refreshLiveSessions = useCallback(async () => {
     try {
@@ -341,6 +373,11 @@ export function App(): ReactElement {
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
   }, [theme]);
 
+  useLayoutEffect(() => {
+    document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+  }, [language]);
+
   useEffect(() => {
     window.localStorage.setItem(SIDEBAR_SECTIONS_STORAGE_KEY, serializeSidebarSections(sidebarSections));
   }, [sidebarSections]);
@@ -351,9 +388,11 @@ export function App(): ReactElement {
       if (!nextStatus.running) void load();
     });
     const offFocus = window.sessionSearch.onFocusSearch(() => searchRef.current?.focus());
+    const offOpenSettings = window.sessionSearch.onOpenSettings(() => setSettingsOpen(true));
     return () => {
       offIndex();
       offFocus();
+      offOpenSettings();
     };
   }, [load]);
 
@@ -373,6 +412,13 @@ export function App(): ReactElement {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === ",") {
+        event.preventDefault();
+        setContextMenu(null);
+        setSettingsOpen(true);
+        return;
+      }
+
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         searchRef.current?.focus();
@@ -400,7 +446,7 @@ export function App(): ReactElement {
         if (actionStatus?.kind === "running" || !selectedKey) return;
         const session = displayedResults.find((item) => item.sessionKey === selectedKey);
         if (session) {
-          void runAction("Opening terminal", () => window.sessionSearch.resumeSession(session.sessionKey), "Resume command sent to terminal.");
+          void runAction(t("Opening terminal", "正在打开终端"), () => window.sessionSearch.resumeSession(session.sessionKey), t("Resume command sent to terminal.", "Resume 命令已发送到终端。"));
         }
         return;
       }
@@ -433,7 +479,7 @@ export function App(): ReactElement {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [displayedResults, selectedKey, detail, dialog, deleteTagName, contextMenu, settingsOpen, actionStatus]);
+  }, [displayedResults, selectedKey, detail, dialog, deleteTagName, contextMenu, settingsOpen, actionStatus, t]);
 
   useEffect(() => {
     if (!selectedKey) return;
@@ -460,10 +506,10 @@ export function App(): ReactElement {
     [projects, projectPath],
   );
   const searchPlaceholder = projectPath
-    ? `Search within ${selectedProject?.label || "project"}`
+    ? t(`Search within ${selectedProject?.label || "project"}`, `在 ${selectedProject?.label || "项目"} 中搜索`)
     : tag
-      ? `Search within #${tag}`
-      : "Search titles, first questions, full text, paths, or ids";
+      ? t(`Search within #${tag}`, `在 #${tag} 中搜索`)
+      : t("Search titles, first questions, full text, paths, or ids", "搜索标题、首个问题、全文、路径或 ID");
 
   useEffect(() => {
     setSelectedKey((current) =>
@@ -580,9 +626,28 @@ export function App(): ReactElement {
     }
   }
 
+  async function exportMarkdown(sessionKey: string): Promise<void> {
+    setContextMenu(null);
+    setActionStatus({ kind: "running", message: t("Exporting markdown...", "正在导出 Markdown...") });
+    try {
+      const exported = await window.sessionSearch.exportMarkdown(sessionKey);
+      if (!exported) {
+        setActionStatus(null);
+        return;
+      }
+      const successMessage = t("Markdown exported.", "Markdown 已导出。");
+      setActionStatus({ kind: "success", message: successMessage });
+      window.setTimeout(() => {
+        setActionStatus((current) => (current?.kind === "success" && current.message === successMessage ? null : current));
+      }, 1800);
+    } catch (error) {
+      setActionStatus({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   async function refreshNow(): Promise<void> {
     setContextMenu(null);
-    setRefreshFeedback({ kind: "running", message: "Refreshing index..." });
+    setRefreshFeedback({ kind: "running", message: t("Refreshing index...", "正在更新索引...") });
     try {
       const status = await window.sessionSearch.refreshIndex();
       setIndexStatus(status);
@@ -591,7 +656,7 @@ export function App(): ReactElement {
         setRefreshFeedback({ kind: "error", message: status.error });
         return;
       }
-      const successMessage = `Index refreshed: ${status.indexed}/${status.total} sessions.`;
+      const successMessage = t(`Index refreshed: ${status.indexed}/${status.total} sessions.`, `索引已更新：${status.indexed}/${status.total} 个会话。`);
       setRefreshFeedback({ kind: "success", message: successMessage });
       window.setTimeout(() => {
         setRefreshFeedback((current) => (current?.kind === "success" && current.message === successMessage ? null : current));
@@ -613,7 +678,7 @@ export function App(): ReactElement {
     const enablingClaude = next.includeClaudeInternal === true && !appSettings?.includeClaudeInternal;
     const enablingCodex = next.includeCodexInternal === true && !appSettings?.includeCodexInternal;
     const enablingCodeBuddy = next.includeCodeBuddyCli === true && !appSettings?.includeCodeBuddyCli;
-    setSettingsFeedback({ kind: "running", message: "Saving settings..." });
+    setSettingsFeedback({ kind: "running", message: t("Saving settings...", "正在保存设置...") });
     try {
       const nextSettings = await window.sessionSearch.setSettings(next);
       setAppSettings(nextSettings);
@@ -624,7 +689,7 @@ export function App(): ReactElement {
         if (enablingClaude) setPendingPersonalSources((current) => ({ ...current, claude: true }));
         if (enablingCodex) setPendingPersonalSources((current) => ({ ...current, codex: true }));
         if (enablingCodeBuddy) setPendingPersonalSources((current) => ({ ...current, codebuddy: true }));
-        setSettingsFeedback({ kind: "success", message: "Loading sessions in the background…" });
+        setSettingsFeedback({ kind: "success", message: t("Loading sessions in the background...", "正在后台加载会话...") });
         void window.sessionSearch
           .refreshIndex()
           .then(async () => {
@@ -634,7 +699,7 @@ export function App(): ReactElement {
               codebuddy: enablingCodeBuddy ? false : current.codebuddy,
             }));
             await load();
-            setSettingsFeedback({ kind: "success", message: "Sources ready." });
+            setSettingsFeedback({ kind: "success", message: t("Sources ready.", "来源已就绪。") });
             window.setTimeout(() => {
               setSettingsFeedback((current) => (current?.kind === "success" ? null : current));
             }, 1600);
@@ -649,7 +714,7 @@ export function App(): ReactElement {
       }
 
       await load();
-      setSettingsFeedback({ kind: "success", message: "Settings saved." });
+      setSettingsFeedback({ kind: "success", message: t("Settings saved.", "设置已保存。") });
       window.setTimeout(() => {
         setSettingsFeedback((current) => (current?.kind === "success" ? null : current));
       }, 1600);
@@ -668,30 +733,30 @@ export function App(): ReactElement {
           </div>
           <div>
             <h1>Agent Session Search</h1>
-            <p>Codex and Claude Code</p>
+            <p>{t("Codex and Claude Code", "Codex 和 Claude Code")}</p>
           </div>
         </div>
 
         <div className="refresh-control">
           <button className={`primary ${indexStatus?.running ? "is-running" : ""}`} onClick={() => void refreshNow()} disabled={indexStatus?.running}>
             <RefreshCw size={16} />
-            {indexStatus?.running ? "Refreshing Index..." : "Refresh Index"}
+            {indexStatus?.running ? t("Refreshing Index...", "正在更新索引...") : t("Refresh Index", "更新索引")}
           </button>
           {refreshFeedback ? <div className={`refresh-feedback ${refreshFeedback.kind}`}>{refreshFeedback.message}</div> : null}
         </div>
 
         <div className="stats-panel">
           <div className="stats-header">
-            <span>Usage</span>
+            <span>{t("Usage", "用量")}</span>
             <div className="stats-controls">
-              <div className="stats-period-toggle" role="group" aria-label="Usage period">
+              <div className="stats-period-toggle" role="group" aria-label={t("Usage period", "用量周期")}>
                 {STATS_PERIOD_OPTIONS.map((option) => (
                   <button
                     key={option.value}
                     className={statsPeriod === option.value ? "active" : ""}
                     onClick={() => setStatsPeriod(option.value)}
                   >
-                    {option.label}
+                    {statsPeriodLabel(option.value, language)}
                   </button>
                 ))}
               </div>
@@ -699,8 +764,8 @@ export function App(): ReactElement {
                 className="stats-refresh"
                 onClick={() => void refreshStats()}
                 disabled={statsRefreshing}
-                title="Refresh usage stats"
-                aria-label="Refresh usage stats"
+                title={t("Refresh usage stats", "刷新用量统计")}
+                aria-label={t("Refresh usage stats", "刷新用量统计")}
               >
                 <RefreshCw size={13} />
               </button>
@@ -710,11 +775,11 @@ export function App(): ReactElement {
           <div className="stats-metrics">
             <span>
               <strong>{formatCompactNumber(stats.total.messageCount)}</strong>
-              Messages
+              {t("Messages", "消息")}
             </span>
             <span>
               <strong>{formatTokenCount(stats.total.totalTokens)}</strong>
-              Tokens
+              {t("Tokens", "Token")}
             </span>
           </div>
           <div className="stats-breakdown">
@@ -722,7 +787,7 @@ export function App(): ReactElement {
               <div key={item.source}>
                 <span>{SOURCE_LABEL[item.source]}</span>
                 <em>
-                  {formatCompactNumber(item.messageCount)} msg · {formatTokenCount(item.totalTokens)}
+                  {formatCompactNumber(item.messageCount)} {t("msg", "条")} · {formatTokenCount(item.totalTokens)}
                 </em>
               </div>
             ))}
@@ -736,45 +801,46 @@ export function App(): ReactElement {
           expanded={sidebarSections.remaining}
           onToggle={() => toggleSidebarSectionById("remaining")}
           onRefresh={() => void loadQuotas(true)}
+          language={language}
         />
 
-        <SidebarSectionHeader title="Views" expanded={sidebarSections.views} onToggle={() => toggleSidebarSectionById("views")} />
+        <SidebarSectionHeader title={t("Views", "视图")} expanded={sidebarSections.views} onToggle={() => toggleSidebarSectionById("views")} />
         {sidebarSections.views ? (
           <nav className="nav-group">
             <button className={visibility === "default" ? "active" : ""} onClick={() => setVisibility("default")}>
-              All
+              {t("All", "全部")}
             </button>
             <button className={visibility === "favorites" ? "active" : ""} onClick={() => setVisibility("favorites")}>
               <Star size={14} />
-              Favorites
+              {t("Favorites", "收藏")}
             </button>
             <button className={visibility === "pinned" ? "active" : ""} onClick={() => setVisibility("pinned")}>
               <Pin size={14} />
-              Pinned
+              {t("Pinned", "置顶")}
             </button>
             <button className={visibility === "hidden" ? "active" : ""} onClick={() => setVisibility("hidden")}>
               <EyeOff size={14} />
-              Hidden
+              {t("Hidden", "隐藏")}
             </button>
           </nav>
         ) : null}
 
-        <SidebarSectionHeader title="Sources" expanded={sidebarSections.sources} onToggle={() => toggleSidebarSectionById("sources")} />
+        <SidebarSectionHeader title={t("Sources", "来源")} expanded={sidebarSections.sources} onToggle={() => toggleSidebarSectionById("sources")} />
         {sidebarSections.sources ? (
           <nav className="nav-group">
             {visibleSourceFilters.map((item) => (
               <button key={item.label} className={source === item.value ? "active" : ""} onClick={() => setSource(item.value)}>
-                {item.label}
+                {sourceFilterLabel(item, language)}
               </button>
             ))}
           </nav>
         ) : null}
 
-        <SidebarSectionHeader title="Projects" expanded={sidebarSections.projects} onToggle={() => toggleSidebarSectionById("projects")} />
+        <SidebarSectionHeader title={t("Projects", "项目")} expanded={sidebarSections.projects} onToggle={() => toggleSidebarSectionById("projects")} />
         {sidebarSections.projects ? (
           <nav className="project-list">
             <button className={!projectPath ? "active" : ""} onClick={() => setProjectPath(undefined)}>
-              All Projects
+              {t("All Projects", "全部项目")}
             </button>
             {projects.map((project) => (
               <button
@@ -791,18 +857,18 @@ export function App(): ReactElement {
           </nav>
         ) : null}
 
-        <SidebarSectionHeader title="Tags" expanded={sidebarSections.tags} onToggle={() => toggleSidebarSectionById("tags")} />
+        <SidebarSectionHeader title={t("Tags", "标签")} expanded={sidebarSections.tags} onToggle={() => toggleSidebarSectionById("tags")} />
         {sidebarSections.tags ? (
           <nav className="tag-list">
             <button className={!tag ? "active" : ""} onClick={() => setTag(undefined)}>
-              All Tags
+              {t("All Tags", "全部标签")}
             </button>
             {tags.map((tagName) => (
               <div
                 key={tagName}
                 className={`tag-list-row ${tag === tagName ? "active" : ""} ${isBranchTag(tagName) ? "branch-tag" : ""}`}
               >
-                <button className="tag-filter" onClick={() => setTag(tagName)} title={`Filter by ${tagName}`}>
+                <button className="tag-filter" onClick={() => setTag(tagName)} title={t(`Filter by ${tagName}`, `按 ${tagName} 过滤`)}>
                   {isBranchTag(tagName) ? <GitBranch size={13} /> : <Tag size={13} />}
                   <span>{tagName}</span>
                 </button>
@@ -812,8 +878,8 @@ export function App(): ReactElement {
                     event.stopPropagation();
                     setDeleteTagName(tagName);
                   }}
-                  title={`Delete tag ${tagName}`}
-                  aria-label={`Delete tag ${tagName}`}
+                  title={t(`Delete tag ${tagName}`, `删除标签 ${tagName}`)}
+                  aria-label={t(`Delete tag ${tagName}`, `删除标签 ${tagName}`)}
                 >
                   <Trash2 size={13} />
                 </button>
@@ -859,16 +925,16 @@ export function App(): ReactElement {
                 className={liveStatus === option.value ? "active" : ""}
                 onClick={() => setLiveStatus(option.value)}
               >
-                {option.label}
+                {liveStatusFilterLabel(option.value, language)}
               </button>
             ))}
           </div>
           <label className="sort-menu">
-            <span>Sort</span>
+            <span>{t("Sort", "排序")}</span>
             <select value={sortBy} onChange={(event) => setSortBy(event.target.value as SessionSortBy)}>
               {SORT_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>
-                  {option.label}
+                  {sortLabel(option.value, language)}
                 </option>
               ))}
             </select>
@@ -876,17 +942,9 @@ export function App(): ReactElement {
           <div className="top-actions">
             <button
               className="icon-button toolbar-icon-button"
-              onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
-              title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-              aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-            >
-              {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
-            </button>
-            <button
-              className="icon-button toolbar-icon-button"
               onClick={() => setSettingsOpen(true)}
-              title="Settings"
-              aria-label="Settings"
+              title={t("Settings", "设置")}
+              aria-label={t("Settings", "设置")}
             >
               <Settings size={15} />
             </button>
@@ -896,8 +954,8 @@ export function App(): ReactElement {
         <div className="result-count">
           <span>
             {displayedResults.length === results.length
-              ? `${results.length} sessions`
-              : `${displayedResults.length} of ${results.length} sessions`}
+              ? t(`${results.length} sessions`, `${results.length} 个会话`)
+              : t(`${displayedResults.length} of ${results.length} sessions`, `${displayedResults.length} / ${results.length} 个会话`)}
           </span>
           {selected ? <span className="selected-path">{selected.projectPath || selected.rawId}</span> : null}
         </div>
@@ -909,6 +967,7 @@ export function App(): ReactElement {
               session={session}
               selected={selected?.sessionKey === session.sessionKey}
               liveState={getLiveSessionState(session, liveSessionKeys, liveDetectionFailed)}
+              language={language}
               onSelect={() => setSelectedKey(session.sessionKey)}
               onOpen={() => void openDetail(session)}
               onRename={() => beginRename(session)}
@@ -920,7 +979,7 @@ export function App(): ReactElement {
               }}
             />
           ))}
-          {displayedResults.length === 0 ? <div className="empty">No sessions found.</div> : null}
+          {displayedResults.length === 0 ? <div className="empty">{t("No sessions found.", "没有找到会话。")}</div> : null}
         </div>
       </section>
 
@@ -932,6 +991,7 @@ export function App(): ReactElement {
           actionStatus={actionStatus}
           query={query}
           liveState={getLiveSessionState(detail, liveSessionKeys, liveDetectionFailed)}
+          language={language}
           revealLabel={FILE_MANAGER_LABEL}
           showItermAction={IS_MAC}
           onClose={closeDetail}
@@ -942,19 +1002,23 @@ export function App(): ReactElement {
           onRenameTitle={() => beginRename(detail)}
           onFavorite={() => void toggleFavorite(detail)}
           onResume={() =>
-            void runAction("Opening terminal", () => window.sessionSearch.resumeSession(detail.sessionKey), "Resume command sent to terminal.")
+            void runAction(t("Opening terminal", "正在打开终端"), () => window.sessionSearch.resumeSession(detail.sessionKey), t("Resume command sent to terminal.", "Resume 命令已发送到终端。"))
           }
           onResumeIterm={() =>
-            void runAction("Opening iTerm", () => window.sessionSearch.resumeSessionInIterm(detail.sessionKey), "Resume command sent to iTerm.")
+            void runAction(t("Opening iTerm", "正在打开 iTerm"), () => window.sessionSearch.resumeSessionInIterm(detail.sessionKey), t("Resume command sent to iTerm.", "Resume 命令已发送到 iTerm。"))
+          }
+          onFocusTerminal={() =>
+            void runAction(t("Bringing terminal forward", "正在前置终端"), () => window.sessionSearch.focusLiveTerminal(detail.sessionKey), t("Terminal brought to front.", "终端已前置。"))
           }
           onCopyResume={() =>
-            void runAction("Copying resume command", () => window.sessionSearch.copyResumeCommand(detail.sessionKey), "Resume command copied.")
+            void runAction(t("Copying resume command", "正在复制 Resume 命令"), () => window.sessionSearch.copyResumeCommand(detail.sessionKey), t("Resume command copied.", "Resume 命令已复制。"))
           }
           onCopyMarkdown={() =>
-            void runAction("Copying markdown", () => window.sessionSearch.copyMarkdown(detail.sessionKey), "Markdown copied.")
+            void runAction(t("Copying markdown", "正在复制 Markdown"), () => window.sessionSearch.copyMarkdown(detail.sessionKey), t("Markdown copied.", "Markdown 已复制。"))
           }
+          onExportMarkdown={() => void exportMarkdown(detail.sessionKey)}
           onCopyPlain={() =>
-            void runAction("Copying plain text", () => window.sessionSearch.copyPlainText(detail.sessionKey), "Plain text copied.")
+            void runAction(t("Copying plain text", "正在复制纯文本"), () => window.sessionSearch.copyPlainText(detail.sessionKey), t("Plain text copied.", "纯文本已复制。"))
           }
           onReveal={() =>
             void runAction(
@@ -970,52 +1034,51 @@ export function App(): ReactElement {
         <ContextMenu
           state={contextMenu}
           liveState={getLiveSessionState(contextMenu.session, liveSessionKeys, liveDetectionFailed)}
+          language={language}
           revealLabel={FILE_MANAGER_LABEL}
           showMacActions={IS_MAC}
           onRename={() => beginRename(contextMenu.session)}
           onAddTag={() => beginAddTag(contextMenu.session)}
           onFavorite={() =>
             void runAction(
-              contextMenu.session.favorited ? "Removing favorite" : "Adding favorite",
+              contextMenu.session.favorited ? t("Removing favorite", "正在取消收藏") : t("Adding favorite", "正在加入收藏"),
               () => window.sessionSearch.setFavorited(contextMenu.session.sessionKey, !contextMenu.session.favorited),
-              contextMenu.session.favorited ? "Removed from favorites." : "Added to favorites.",
+              contextMenu.session.favorited ? t("Removed from favorites.", "已取消收藏。") : t("Added to favorites.", "已加入收藏。"),
             )
           }
           onPin={() =>
-            void runAction("Updating pin", () => window.sessionSearch.setPinned(contextMenu.session.sessionKey, !contextMenu.session.pinned), "Pin updated.")
+            void runAction(t("Updating pin", "正在更新置顶"), () => window.sessionSearch.setPinned(contextMenu.session.sessionKey, !contextMenu.session.pinned), t("Pin updated.", "置顶已更新。"))
           }
           onHide={() =>
             void runAction(
-              "Updating visibility",
+              t("Updating visibility", "正在更新可见性"),
               () => window.sessionSearch.setHidden(contextMenu.session.sessionKey, !contextMenu.session.hidden),
-              "Visibility updated.",
+              t("Visibility updated.", "可见性已更新。"),
             )
           }
           onResume={() =>
-            void runAction("Opening terminal", () => window.sessionSearch.resumeSession(contextMenu.session.sessionKey), "Resume command sent to terminal.")
+            void runAction(t("Opening terminal", "正在打开终端"), () => window.sessionSearch.resumeSession(contextMenu.session.sessionKey), t("Resume command sent to terminal.", "Resume 命令已发送到终端。"))
           }
           onResumeIterm={() =>
-            void runAction("Opening iTerm", () => window.sessionSearch.resumeSessionInIterm(contextMenu.session.sessionKey), "Resume command sent to iTerm.")
+            void runAction(t("Opening iTerm", "正在打开 iTerm"), () => window.sessionSearch.resumeSessionInIterm(contextMenu.session.sessionKey), t("Resume command sent to iTerm.", "Resume 命令已发送到 iTerm。"))
           }
           onFocusTerminal={() =>
             void runAction(
-              "Bringing terminal forward",
+              t("Bringing terminal forward", "正在前置终端"),
               () => window.sessionSearch.focusLiveTerminal(contextMenu.session.sessionKey),
-              "Terminal brought to front.",
+              t("Terminal brought to front.", "终端已前置。"),
             )
           }
           onOpenApp={() =>
-            void runAction("Opening native app", () => window.sessionSearch.openNativeApp(contextMenu.session.sessionKey), "Native app opened.")
+            void runAction(t("Opening native app", "正在打开原生应用"), () => window.sessionSearch.openNativeApp(contextMenu.session.sessionKey), t("Native app opened.", "原生应用已打开。"))
           }
           onCopyResume={() =>
-            void runAction("Copying resume command", () => window.sessionSearch.copyResumeCommand(contextMenu.session.sessionKey), "Resume command copied.")
+            void runAction(t("Copying resume command", "正在复制 Resume 命令"), () => window.sessionSearch.copyResumeCommand(contextMenu.session.sessionKey), t("Resume command copied.", "Resume 命令已复制。"))
           }
           onCopyMarkdown={() =>
-            void runAction("Copying markdown", () => window.sessionSearch.copyMarkdown(contextMenu.session.sessionKey), "Markdown copied.")
+            void runAction(t("Copying markdown", "正在复制 Markdown"), () => window.sessionSearch.copyMarkdown(contextMenu.session.sessionKey), t("Markdown copied.", "Markdown 已复制。"))
           }
-          onCopyPlain={() =>
-            void runAction("Copying plain text", () => window.sessionSearch.copyPlainText(contextMenu.session.sessionKey), "Plain text copied.")
-          }
+          onExportMarkdown={() => void exportMarkdown(contextMenu.session.sessionKey)}
           onReveal={() =>
             void runAction(
               `Opening ${FILE_MANAGER_LABEL}`,
@@ -1032,6 +1095,7 @@ export function App(): ReactElement {
         <CommandDialog
           dialog={dialog}
           tags={tags}
+          language={language}
           onChange={(value) => setDialog({ ...dialog, value })}
           onSubmit={(value) => void submitDialog(value)}
           onCancel={() => setDialog(null)}
@@ -1041,6 +1105,7 @@ export function App(): ReactElement {
       {deleteTagName ? (
         <DeleteTagDialog
           tagName={deleteTagName}
+          language={language}
           onConfirm={() => void deleteTagGlobally(deleteTagName)}
           onCancel={() => setDeleteTagName(null)}
         />
@@ -1049,8 +1114,12 @@ export function App(): ReactElement {
       {settingsOpen ? (
         <SettingsDialog
           settings={appSettings}
+          theme={theme}
+          language={language}
           feedback={settingsFeedback}
           onSettingsChange={(next) => void updateSettings(next)}
+          onThemeChange={setTheme}
+          onLanguageChange={setLanguage}
           onDefaultTerminalChange={(terminal) => void updateDefaultTerminal(terminal)}
           onGlobalShortcutChange={(shortcut) => void updateGlobalShortcut(shortcut)}
           onClose={() => setSettingsOpen(false)}
@@ -1067,6 +1136,7 @@ function QuotaPanel({
   expanded,
   onToggle,
   onRefresh,
+  language,
 }: {
   snapshot: UsageQuotaSnapshot;
   loading: boolean;
@@ -1074,17 +1144,19 @@ function QuotaPanel({
   expanded: boolean;
   onToggle: () => void;
   onRefresh: () => void;
+  language: LanguageMode;
 }): ReactElement {
   const updatedAt = snapshot.generatedAt ? formatRelativeTime(Date.parse(snapshot.generatedAt)) : "";
+  const l = (en: string, zh: string) => localize(language, en, zh);
   return (
     <div className="quota-panel">
       <div className="quota-header">
         <button className="quota-section-toggle" onClick={onToggle} aria-expanded={expanded}>
-          <span>Remaining</span>
+          <span>{l("Remaining", "剩余额度")}</span>
           {updatedAt ? <em>{updatedAt}</em> : null}
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </button>
-        <button className="quota-refresh" onClick={onRefresh} disabled={loading} title="Refresh usage limits" aria-label="Refresh usage limits">
+        <button className="quota-refresh" onClick={onRefresh} disabled={loading} title={l("Refresh usage limits", "刷新额度")} aria-label={l("Refresh usage limits", "刷新额度")}>
           <RefreshCw size={13} />
         </button>
       </div>
@@ -1092,9 +1164,9 @@ function QuotaPanel({
         <>
           <div className="quota-list">
             {snapshot.providers.map((card) => (
-              <QuotaProviderCard key={card.provider} card={card} />
+              <QuotaProviderCard key={card.provider} card={card} language={language} />
             ))}
-            {snapshot.providers.length === 0 ? <div className="quota-empty">{loading ? "Checking usage limits..." : "Usage limits unavailable."}</div> : null}
+            {snapshot.providers.length === 0 ? <div className="quota-empty">{loading ? l("Checking usage limits...", "正在检查额度...") : l("Usage limits unavailable.", "额度不可用。")}</div> : null}
           </div>
           {feedback ? <div className={`quota-feedback ${feedback.kind}`}>{feedback.message}</div> : null}
         </>
@@ -1103,14 +1175,15 @@ function QuotaPanel({
   );
 }
 
-function QuotaProviderCard({ card }: { card: UsageQuotaCard }): ReactElement {
+function QuotaProviderCard({ card, language }: { card: UsageQuotaCard; language: LanguageMode }): ReactElement {
   const supported = card.status === "supported" && card.quotas.length > 0;
   const meta = card.plan;
+  const l = (en: string, zh: string) => localize(language, en, zh);
   return (
     <div className={`quota-card ${card.provider}`}>
       <div className="quota-provider-head">
         <span className="quota-provider-name">{card.displayName}</span>
-        <span className={`quota-status ${card.status}`}>{quotaStatusLabel(card.status)}</span>
+        <span className={`quota-status ${card.status}`}>{quotaStatusLabel(card.status, language)}</span>
       </div>
       {meta ? <div className="quota-meta">{meta}</div> : null}
       {supported ? (
@@ -1119,17 +1192,17 @@ function QuotaProviderCard({ card }: { card: UsageQuotaCard }): ReactElement {
             <div className="quota-window" key={quota.key}>
               <div className="quota-window-top">
                 <span>{quota.label}</span>
-                <strong>{quota.remainingDisplay} left</strong>
+                <strong>{l(`${quota.remainingDisplay} left`, `剩余 ${quota.remainingDisplay}`)}</strong>
               </div>
               <div className="quota-track" aria-hidden="true">
                 <div className="quota-fill" style={{ width: `${quota.remainingPercent}%` } as CSSProperties} />
               </div>
-              <div className="quota-reset">{quota.stale ? "stale" : formatQuotaReset(quota.resetsAt)}</div>
+              <div className="quota-reset">{quota.stale ? l("stale", "已过期") : formatQuotaReset(quota.resetsAt, language)}</div>
             </div>
           ))}
         </div>
       ) : (
-        <p className="quota-detail">{card.detail || "Quota data unavailable."}</p>
+        <p className="quota-detail">{card.detail || l("Quota data unavailable.", "额度数据不可用。")}</p>
       )}
     </div>
   );
@@ -1156,6 +1229,7 @@ function SessionRow({
   session,
   selected,
   liveState,
+  language,
   onSelect,
   onOpen,
   onRename,
@@ -1165,12 +1239,14 @@ function SessionRow({
   session: SessionSearchResult;
   selected: boolean;
   liveState: LiveSessionState;
+  language: LanguageMode;
   onSelect: () => void;
   onOpen: () => void;
   onRename: () => void;
   onFavorite: () => void;
   onContextMenu: MouseEventHandler;
 }): ReactElement {
+  const l = (en: string, zh: string) => localize(language, en, zh);
   return (
     <article
       className={`session-row ${selected ? "selected" : ""}`}
@@ -1180,15 +1256,14 @@ function SessionRow({
     >
       <div className="session-main">
         <div className="session-title">
-          <span className={`source-dot ${sourceUiFamily(session.source)}`} />
           <button
             className={`favorite-button ${session.favorited ? "active" : ""}`}
             onClick={(event) => {
               event.stopPropagation();
               onFavorite();
             }}
-            aria-label={session.favorited ? "Remove from favorites" : "Add to favorites"}
-            title={session.favorited ? "Remove from favorites" : "Add to favorites"}
+            aria-label={session.favorited ? l("Remove from favorites", "取消收藏") : l("Add to favorites", "加入收藏")}
+            title={session.favorited ? l("Remove from favorites", "取消收藏") : l("Add to favorites", "加入收藏")}
           >
             <Star size={14} fill={session.favorited ? "currentColor" : "none"} />
           </button>
@@ -1201,8 +1276,8 @@ function SessionRow({
               event.stopPropagation();
               onRename();
             }}
-            aria-label="Rename session"
-            title="Rename session"
+            aria-label={l("Rename session", "重命名会话")}
+            title={l("Rename session", "重命名会话")}
           >
             <Edit3 size={13} />
           </button>
@@ -1210,16 +1285,16 @@ function SessionRow({
         <div className="session-meta">
           <span className={`live-status ${liveState}`}>
             <span className="live-status-dot" />
-            {liveStateLabel(liveState)}
+            {localizedLiveStateLabel(liveState, language)}
           </span>
           <span className={`source-badge ${sourceUiFamily(session.source)}`}>
-            {sourceUiFamily(session.source) === "claude" ? <Code2 size={13} /> : <Terminal size={13} />}
+            {sourceUiFamily(session.source) === "claude" ? <Code2 size={13} /> : <TerminalIcon size={13} />}
             {SOURCE_LABEL[session.source]}
           </span>
-          <span>{session.projectPath || "No project path"}</span>
+          <span>{session.projectPath || l("No project path", "无项目路径")}</span>
           <span>{formatRelativeTime(session.timestamp)}</span>
-          <span>{session.messageCount} messages</span>
-          <span>{formatTokenCount(session.tokenUsage.totalTokens)} tokens</span>
+          <span>{l(`${session.messageCount} messages`, `${session.messageCount} 条消息`)}</span>
+          <span>{l(`${formatTokenCount(session.tokenUsage.totalTokens)} tokens`, `${formatTokenCount(session.tokenUsage.totalTokens)} token`)}</span>
         </div>
         {session.matchSnippet ? <div className="snippet">{session.matchSnippet}</div> : null}
       </div>
@@ -1241,6 +1316,7 @@ function DetailPanel({
   actionStatus,
   query,
   liveState,
+  language,
   revealLabel,
   showItermAction,
   onClose,
@@ -1252,8 +1328,10 @@ function DetailPanel({
   onFavorite,
   onResume,
   onResumeIterm,
+  onFocusTerminal,
   onCopyResume,
   onCopyMarkdown,
+  onExportMarkdown,
   onCopyPlain,
   onReveal,
 }: {
@@ -1263,6 +1341,7 @@ function DetailPanel({
   actionStatus: ActionStatus | null;
   query: string;
   liveState: LiveSessionState;
+  language: LanguageMode;
   revealLabel: string;
   showItermAction: boolean;
   onClose: () => void;
@@ -1274,8 +1353,10 @@ function DetailPanel({
   onFavorite: () => void;
   onResume: () => void;
   onResumeIterm: () => void;
+  onFocusTerminal: () => void;
   onCopyResume: () => void;
   onCopyMarkdown: () => void;
+  onExportMarkdown: () => void;
   onCopyPlain: () => void;
   onReveal: () => void;
 }): ReactElement {
@@ -1284,6 +1365,7 @@ function DetailPanel({
     : -1;
   const context = matchIndex >= 0 ? messages.slice(Math.max(0, matchIndex - 1), Math.min(messages.length, matchIndex + 2)) : [];
   const actionRunning = actionStatus?.kind === "running";
+  const l = (en: string, zh: string) => localize(language, en, zh);
   const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -1334,30 +1416,30 @@ function DetailPanel({
             </div>
             <span className={`live-status ${liveState}`}>
               <span className="live-status-dot" />
-              {liveStateLabel(liveState)}
+              {localizedLiveStateLabel(liveState, language)}
             </span>
           </div>
           <div className="detail-title-row">
             <h2>{session.displayTitle}</h2>
-            <button className="title-edit-button detail-title-edit" onClick={onRenameTitle} aria-label="Rename session" title="Rename session">
+            <button className="title-edit-button detail-title-edit" onClick={onRenameTitle} aria-label={l("Rename session", "重命名会话")} title={l("Rename session", "重命名会话")}>
               <Edit3 size={14} />
             </button>
           </div>
           <p>
-            {session.projectPath || "No project"} · {new Date(session.timestamp).toLocaleString()} · {messages.length} messages ·{" "}
-            {formatTokenCount(session.tokenUsage.totalTokens)} tokens
+            {session.projectPath || l("No project", "无项目")} · {new Date(session.timestamp).toLocaleString()} · {l(`${messages.length} messages`, `${messages.length} 条消息`)} ·{" "}
+            {l(`${formatTokenCount(session.tokenUsage.totalTokens)} tokens`, `${formatTokenCount(session.tokenUsage.totalTokens)} token`)}
           </p>
         </div>
         <div className="detail-header-actions">
           <button
             className={`icon-button favorite-button ${session.favorited ? "active" : ""}`}
             onClick={onFavorite}
-            aria-label={session.favorited ? "Remove from favorites" : "Add to favorites"}
-            title={session.favorited ? "Remove from favorites" : "Add to favorites"}
+            aria-label={session.favorited ? l("Remove from favorites", "取消收藏") : l("Add to favorites", "加入收藏")}
+            title={session.favorited ? l("Remove from favorites", "取消收藏") : l("Add to favorites", "加入收藏")}
           >
             <Star size={17} fill={session.favorited ? "currentColor" : "none"} />
           </button>
-          <button className="icon-button" onClick={onClose} aria-label="Close">
+          <button className="icon-button" onClick={onClose} aria-label={l("Close", "关闭")}>
             <X size={17} />
           </button>
         </div>
@@ -1368,20 +1450,26 @@ function DetailPanel({
         </button>
         {showItermAction ? (
           <button onClick={onResumeIterm} disabled={actionRunning}>
-            <Terminal size={15} /> iTerm
+            <TerminalIcon size={15} /> iTerm
           </button>
         ) : null}
+        <button onClick={onFocusTerminal} disabled={actionRunning || liveState !== "open"}>
+          <BringToFront size={15} /> {l("Bring to Front", "前置终端")}
+        </button>
         <button onClick={onRename} disabled={actionRunning}>
-          <Clipboard size={15} /> Rename
+          <Clipboard size={15} /> {l("Rename", "重命名")}
         </button>
         <button onClick={onAddTag} disabled={actionRunning}>
-          <Tag size={15} /> Add Tag
+          <Tag size={15} /> {l("Add Tag", "添加标签")}
         </button>
         <button onClick={onCopyResume} disabled={actionRunning}>
-          <Copy size={15} /> Copy Cmd
+          <Copy size={15} /> {l("Copy Cmd", "复制命令")}
         </button>
         <button onClick={onCopyMarkdown} disabled={actionRunning}>Markdown</button>
-        <button onClick={onCopyPlain} disabled={actionRunning}>Plain Text</button>
+        <button onClick={onExportMarkdown} disabled={actionRunning}>
+          <Download size={15} /> {l("Export MD", "导出 MD")}
+        </button>
+        <button onClick={onCopyPlain} disabled={actionRunning}>{l("Plain Text", "纯文本")}</button>
         <button onClick={onReveal} disabled={actionRunning}>
           <FolderOpen size={15} /> {revealLabel}
         </button>
@@ -1396,22 +1484,22 @@ function DetailPanel({
       <div className="detail-body" ref={bodyRef}>
         {context.length > 0 ? (
           <section className="matched">
-            <h3>Matched Context</h3>
+            <h3>{l("Matched Context", "命中上下文")}</h3>
             {context.map((message) => (
-              <MessageBlock key={message.index} message={message} query={query} />
+              <MessageBlock key={message.index} message={message} query={query} language={language} />
             ))}
           </section>
         ) : null}
         <section className="conversation">
-          <h3>Full Conversation</h3>
-          {loading ? <div className="loading-state">Loading conversation...</div> : null}
-          {!loading && messages.length === 0 ? <div className="loading-state">No visible messages indexed for this session.</div> : null}
+          <h3>{l("Full Conversation", "完整会话")}</h3>
+          {loading ? <div className="loading-state">{l("Loading conversation...", "正在加载会话...")}</div> : null}
+          {!loading && messages.length === 0 ? <div className="loading-state">{l("No visible messages indexed for this session.", "这个会话没有可见消息被索引。")}</div> : null}
           {messages.map((message) => (
-            <MessageBlock key={message.index} message={message} query={query} />
+            <MessageBlock key={message.index} message={message} query={query} language={language} />
           ))}
           {!loading && messages.length < session.messageCount ? (
             <button className="show-more" onClick={onShowMore}>
-              Show {Math.min(MESSAGE_PAGE_SIZE, session.messageCount - messages.length)} more messages
+              {l(`Show ${Math.min(MESSAGE_PAGE_SIZE, session.messageCount - messages.length)} more messages`, `再显示 ${Math.min(MESSAGE_PAGE_SIZE, session.messageCount - messages.length)} 条消息`)}
             </button>
           ) : null}
         </section>
@@ -1421,17 +1509,20 @@ function DetailPanel({
   );
 }
 
-function MessageBlock({ message, query }: { message: SessionMessage; query: string }): ReactElement {
+function MessageBlock({ message, query, language }: { message: SessionMessage; query: string; language: LanguageMode }): ReactElement {
   const content = useMemo(() => {
-    const text = message.content.length > 3000 ? `${message.content.slice(0, 3000)}\n\n...(truncated)` : message.content;
+    const text =
+      message.content.length > 3000
+        ? `${message.content.slice(0, 3000)}\n\n${localize(language, "...(truncated)", "...（已截断）")}`
+        : message.content;
     if (!query) return text;
     return text;
-  }, [message.content, query]);
+  }, [message.content, query, language]);
 
   return (
     <div className={`message ${message.role}`}>
       <div className="message-head">
-        <strong>{message.role === "user" ? "User" : "Assistant"}</strong>
+        <strong>{message.role === "user" ? localize(language, "User", "用户") : localize(language, "Assistant", "助手")}</strong>
         <span>{formatMessageTime(message.timestamp)}</span>
       </div>
       <pre>{content}</pre>
@@ -1450,6 +1541,7 @@ function ActionToast({ status }: { status: ActionStatus }): ReactElement {
 function ContextMenu({
   state,
   liveState,
+  language,
   revealLabel,
   showMacActions,
   onRename,
@@ -1463,11 +1555,12 @@ function ContextMenu({
   onOpenApp,
   onCopyResume,
   onCopyMarkdown,
-  onCopyPlain,
+  onExportMarkdown,
   onReveal,
 }: {
   state: ContextMenuState;
   liveState: LiveSessionState;
+  language: LanguageMode;
   revealLabel: string;
   showMacActions: boolean;
   onRename: () => void;
@@ -1481,36 +1574,37 @@ function ContextMenu({
   onOpenApp: () => void;
   onCopyResume: () => void;
   onCopyMarkdown: () => void;
-  onCopyPlain: () => void;
+  onExportMarkdown: () => void;
   onReveal: () => void;
 }): ReactElement {
+  const l = (en: string, zh: string) => localize(language, en, zh);
   return (
     <div className="context-menu" style={{ left: state.x, top: state.y }} onClick={(event) => event.stopPropagation()}>
       <button onClick={onRename}>
-        <Clipboard size={14} /> Rename
+        <Clipboard size={14} /> {l("Rename", "重命名")}
       </button>
       <button onClick={onAddTag}>
-        <Tag size={14} /> Add Tag
+        <Tag size={14} /> {l("Add Tag", "添加标签")}
       </button>
       <button onClick={onFavorite}>
         <Star size={14} fill={state.session.favorited ? "currentColor" : "none"} />{" "}
-        {state.session.favorited ? "Unfavorite" : "Favorite"}
+        {state.session.favorited ? l("Unfavorite", "取消收藏") : l("Favorite", "收藏")}
       </button>
-      <button onClick={onPin}>{state.session.pinned ? <PinOff size={14} /> : <Pin size={14} />} {state.session.pinned ? "Unpin" : "Pin"}</button>
+      <button onClick={onPin}>{state.session.pinned ? <PinOff size={14} /> : <Pin size={14} />} {state.session.pinned ? l("Unpin", "取消置顶") : l("Pin", "置顶")}</button>
       <button onClick={onHide}>
-        {state.session.hidden ? <Eye size={14} /> : <Archive size={14} />} {state.session.hidden ? "Unhide" : "Hide"}
+        {state.session.hidden ? <Eye size={14} /> : <Archive size={14} />} {state.session.hidden ? l("Unhide", "取消隐藏") : l("Hide", "隐藏")}
       </button>
       <hr />
       <button onClick={onResume}>
-        <Play size={14} /> Resume in Terminal
+        <Play size={14} /> {l("Resume in Terminal", "在终端恢复")}
       </button>
       {showMacActions ? (
         <button onClick={onResumeIterm}>
-          <Terminal size={14} /> Resume in iTerm
+          <TerminalIcon size={14} /> Resume in iTerm
         </button>
       ) : null}
-      {showMacActions && liveState === "open" ? (
-        <button onClick={onFocusTerminal}>
+      {showMacActions ? (
+        <button onClick={onFocusTerminal} disabled={liveState !== "open"}>
           <BringToFront size={14} /> Bring to Front
         </button>
       ) : null}
@@ -1520,10 +1614,12 @@ function ContextMenu({
         </button>
       ) : null}
       <button onClick={onCopyResume}>
-        <Copy size={14} /> Copy Resume Cmd
+        <Copy size={14} /> {l("Copy Resume Cmd", "复制 Resume 命令")}
       </button>
-      <button onClick={onCopyMarkdown}>Copy Markdown</button>
-      <button onClick={onCopyPlain}>Copy Plain Text</button>
+      <button onClick={onCopyMarkdown}>{l("Copy Markdown", "复制 Markdown")}</button>
+      <button onClick={onExportMarkdown}>
+        <Download size={14} /> {l("Export Markdown", "导出 Markdown")}
+      </button>
       <button onClick={onReveal}>
         <FolderOpen size={14} /> Show in {revealLabel}
       </button>
@@ -1533,15 +1629,23 @@ function ContextMenu({
 
 function SettingsDialog({
   settings,
+  theme,
+  language,
   feedback,
   onSettingsChange,
+  onThemeChange,
+  onLanguageChange,
   onDefaultTerminalChange,
   onGlobalShortcutChange,
   onClose,
 }: {
   settings: AppSettings | null;
+  theme: ThemeMode;
+  language: LanguageMode;
   feedback: SettingsFeedback;
   onSettingsChange: (settings: Partial<AppSettings>) => void;
+  onThemeChange: (theme: ThemeMode) => void;
+  onLanguageChange: (language: LanguageMode) => void;
   onDefaultTerminalChange: (terminal: AppSettings["defaultTerminal"]) => void;
   onGlobalShortcutChange: (shortcut: AppSettings["globalShortcut"]) => void;
   onClose: () => void;
@@ -1549,43 +1653,48 @@ function SettingsDialog({
   const defaultTerminal = settings?.defaultTerminal ?? (RUNTIME_PLATFORM === "win32" ? "WindowsTerminal" : "Terminal");
   const globalShortcut = settings?.globalShortcut ?? (RUNTIME_PLATFORM === "win32" ? "Ctrl+Alt+Space" : "Alt+Space");
   const saving = feedback?.kind === "running";
-  const [activeSection, setActiveSection] = useState<"terminal" | "shortcut" | "sources">("terminal");
+  const l = (en: string, zh: string) => localize(language, en, zh);
+  const [activeSection, setActiveSection] = useState<"terminal" | "shortcut" | "sources" | "appearance">("terminal");
 
   return (
     <div className="dialog-backdrop" onMouseDown={onClose}>
       <section className="command-dialog settings-dialog" onMouseDown={(event) => event.stopPropagation()}>
         <div className="dialog-title">
-          <span>Settings</span>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
+          <span>{l("Settings", "设置")}</span>
+          <button type="button" className="icon-button" onClick={onClose} aria-label={l("Close", "关闭")}>
             <X size={16} />
           </button>
         </div>
         <div className="settings-shell">
-          <nav className="settings-sidebar" aria-label="Settings sections">
+          <nav className="settings-sidebar" aria-label={l("Settings sections", "设置分区")}>
             <button className={activeSection === "terminal" ? "active" : ""} onClick={() => setActiveSection("terminal")}>
-              <Terminal size={15} />
-              <span>Default terminal</span>
+              <TerminalIcon size={15} />
+              <span>{l("Default terminal", "默认终端")}</span>
             </button>
             <button className={activeSection === "shortcut" ? "active" : ""} onClick={() => setActiveSection("shortcut")}>
               <Keyboard size={15} />
-              <span>Global shortcut</span>
+              <span>{l("Global shortcut", "全局快捷键")}</span>
             </button>
             <button className={activeSection === "sources" ? "active" : ""} onClick={() => setActiveSection("sources")}>
               <Folder size={15} />
-              <span>Personal sources</span>
+              <span>{l("Personal sources", "个人来源")}</span>
+            </button>
+            <button className={activeSection === "appearance" ? "active" : ""} onClick={() => setActiveSection("appearance")}>
+              <Sun size={15} />
+              <span>{l("Appearance", "外观")}</span>
             </button>
           </nav>
           <div className="settings-content">
             {activeSection === "terminal" ? (
               <section className="settings-pane">
                 <header className="settings-pane-head">
-                  <h3>Default terminal</h3>
-                  <p>Choose which terminal app Resume and the selected-session shortcut use to reopen a session.</p>
+                  <h3>{l("Default terminal", "默认终端")}</h3>
+                  <p>{l("Choose which terminal app Resume and the selected-session shortcut use to reopen a session.", "选择 Resume 和选中会话快捷键用于恢复会话的终端应用。")}</p>
                 </header>
                 <div className="settings-field">
                   <div className="settings-field-text">
-                    <span className="settings-field-title">Terminal app</span>
-                    <span className="settings-field-sub">Applies to Resume and the selected-session shortcut.</span>
+                    <span className="settings-field-title">{l("Terminal app", "终端应用")}</span>
+                    <span className="settings-field-sub">{l("Applies to Resume and the selected-session shortcut.", "应用于 Resume 和选中会话快捷键。")}</span>
                   </div>
                   <select
                     id="default-terminal"
@@ -1605,13 +1714,13 @@ function SettingsDialog({
             {activeSection === "shortcut" ? (
               <section className="settings-pane">
                 <header className="settings-pane-head">
-                  <h3>Global shortcut</h3>
-                  <p>Choose the system-wide shortcut used to open or hide the search window.</p>
+                  <h3>{l("Global shortcut", "全局快捷键")}</h3>
+                  <p>{l("Choose the system-wide shortcut used to open or hide the search window.", "选择用于打开或隐藏搜索窗口的系统级快捷键。")}</p>
                 </header>
                 <div className="settings-field">
                   <div className="settings-field-text">
-                    <span className="settings-field-title">Open search window</span>
-                    <span className="settings-field-sub">If another app owns the shortcut, this setting will fail to save.</span>
+                    <span className="settings-field-title">{l("Open search window", "打开搜索窗口")}</span>
+                    <span className="settings-field-sub">{l("If another app owns the shortcut, this setting will fail to save.", "如果快捷键被其他应用占用，保存会失败。")}</span>
                   </div>
                   <select
                     id="global-shortcut"
@@ -1631,13 +1740,13 @@ function SettingsDialog({
             {activeSection === "sources" ? (
               <section className="settings-pane">
                 <header className="settings-pane-head">
-                  <h3>Personal sources</h3>
-                  <p>Personal sources stay separate from the normal Claude and Codex filters.</p>
+                  <h3>{l("Personal sources", "个人来源")}</h3>
+                  <p>{l("Personal sources stay separate from the normal Claude and Codex filters.", "个人来源会和普通 Claude/Codex 过滤项分开显示。")}</p>
                 </header>
                 <label className="settings-field settings-toggle">
                   <div className="settings-field-text">
                     <span className="settings-field-title">Include ~/.claude-internal</span>
-                    <span className="settings-field-sub">Adds a separate Claude Internal source filter.</span>
+                    <span className="settings-field-sub">{l("Adds a separate Claude Internal source filter.", "添加独立的 Claude Internal 来源过滤项。")}</span>
                   </div>
                   <input
                     type="checkbox"
@@ -1650,7 +1759,7 @@ function SettingsDialog({
                 <label className="settings-field settings-toggle">
                   <div className="settings-field-text">
                     <span className="settings-field-title">Include ~/.codex-internal</span>
-                    <span className="settings-field-sub">Adds a separate Codex Internal source filter.</span>
+                    <span className="settings-field-sub">{l("Adds a separate Codex Internal source filter.", "添加独立的 Codex Internal 来源过滤项。")}</span>
                   </div>
                   <input
                     type="checkbox"
@@ -1663,7 +1772,7 @@ function SettingsDialog({
                 <label className="settings-field settings-toggle">
                   <div className="settings-field-text">
                     <span className="settings-field-title">Include ~/.codebuddy</span>
-                    <span className="settings-field-sub">Adds a separate CodeBuddy CLI source filter.</span>
+                    <span className="settings-field-sub">{l("Adds a separate CodeBuddy CLI source filter.", "添加独立的 CodeBuddy CLI 来源过滤项。")}</span>
                   </div>
                   <input
                     type="checkbox"
@@ -1673,6 +1782,46 @@ function SettingsDialog({
                     onChange={(event) => onSettingsChange({ includeCodeBuddyCli: event.currentTarget.checked })}
                   />
                 </label>
+              </section>
+            ) : null}
+            {activeSection === "appearance" ? (
+              <section className="settings-pane">
+                <header className="settings-pane-head">
+                  <h3>{l("Appearance", "外观")}</h3>
+                  <p>{l("Choose the color theme and language used by the session search window.", "选择会话搜索窗口使用的颜色主题和语言。")}</p>
+                </header>
+                <div className="settings-field">
+                  <div className="settings-field-text">
+                    <span className="settings-field-title">{l("Theme", "主题")}</span>
+                    <span className="settings-field-sub">{l("Saved on this device.", "保存在当前设备。")}</span>
+                  </div>
+                  <div className="theme-setting-toggle" role="group" aria-label={l("Theme", "主题")}>
+                    <button className={theme === "light" ? "active" : ""} onClick={() => onThemeChange("light")}>
+                      <Sun size={14} />
+                      <span>{l("Light", "浅色")}</span>
+                    </button>
+                    <button className={theme === "dark" ? "active" : ""} onClick={() => onThemeChange("dark")}>
+                      <Moon size={14} />
+                      <span>{l("Dark", "深色")}</span>
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-field">
+                  <div className="settings-field-text">
+                    <span className="settings-field-title">{l("Language", "语言")}</span>
+                    <span className="settings-field-sub">{l("Controls app chrome and settings text.", "控制应用界面和设置文案。")}</span>
+                  </div>
+                  <div className="language-setting-toggle" role="group" aria-label={l("Language", "语言")}>
+                    <button className={language === "en" ? "active" : ""} onClick={() => onLanguageChange("en")}>
+                      <Languages size={14} />
+                      <span>English</span>
+                    </button>
+                    <button className={language === "zh" ? "active" : ""} onClick={() => onLanguageChange("zh")}>
+                      <Languages size={14} />
+                      <span>中文</span>
+                    </button>
+                  </div>
+                </div>
               </section>
             ) : null}
           </div>
@@ -1687,31 +1836,34 @@ function SettingsDialog({
 
 function DeleteTagDialog({
   tagName,
+  language,
   onConfirm,
   onCancel,
 }: {
   tagName: string;
+  language: LanguageMode;
   onConfirm: () => void;
   onCancel: () => void;
 }): ReactElement {
+  const l = (en: string, zh: string) => localize(language, en, zh);
   return (
     <div className="dialog-backdrop" onMouseDown={onCancel}>
       <div className="command-dialog" onMouseDown={(event) => event.stopPropagation()}>
         <div className="dialog-title">
-          <span>Delete Tag</span>
-          <button type="button" className="icon-button" onClick={onCancel} aria-label="Close">
+          <span>{l("Delete Tag", "删除标签")}</span>
+          <button type="button" className="icon-button" onClick={onCancel} aria-label={l("Close", "关闭")}>
             <X size={16} />
           </button>
         </div>
         <p className="dialog-copy">
-          Delete <strong>#{tagName}</strong> from all sessions?
+          {l("Delete", "从所有会话中删除")} <strong>#{tagName}</strong>{l(" from all sessions?", "？")}
         </p>
         <div className="dialog-actions">
           <button type="button" onClick={onCancel}>
-            Cancel
+            {l("Cancel", "取消")}
           </button>
           <button type="button" className="danger-action" onClick={onConfirm}>
-            Delete
+            {l("Delete", "删除")}
           </button>
         </div>
       </div>
@@ -1722,17 +1874,20 @@ function DeleteTagDialog({
 function CommandDialog({
   dialog,
   tags,
+  language,
   onChange,
   onSubmit,
   onCancel,
 }: {
   dialog: NonNullable<DialogState>;
   tags: string[];
+  language: LanguageMode;
   onChange: (value: string) => void;
   onSubmit: (value?: string) => void;
   onCancel: () => void;
 }): ReactElement {
   const inputRef = useRef<HTMLInputElement>(null);
+  const l = (en: string, zh: string) => localize(language, en, zh);
   const matchingTags = dialog.kind === "tag" ? tags.filter((tagName) => tagName.includes(dialog.value.trim())).slice(0, 6) : [];
 
   useEffect(() => {
@@ -1751,8 +1906,8 @@ function CommandDialog({
         }}
       >
         <div className="dialog-title">
-          <span>{dialog.kind === "rename" ? "Rename Session" : "Add Tag"}</span>
-          <button type="button" className="icon-button" onClick={onCancel} aria-label="Close">
+          <span>{dialog.kind === "rename" ? l("Rename Session", "重命名会话") : l("Add Tag", "添加标签")}</span>
+          <button type="button" className="icon-button" onClick={onCancel} aria-label={l("Close", "关闭")}>
             <X size={16} />
           </button>
         </div>
@@ -1760,7 +1915,7 @@ function CommandDialog({
           ref={inputRef}
           value={dialog.value}
           onChange={(event) => onChange(event.target.value)}
-          placeholder={dialog.kind === "rename" ? "Session title" : "Tag name"}
+          placeholder={dialog.kind === "rename" ? l("Session title", "会话标题") : l("Tag name", "标签名")}
         />
         {matchingTags.length > 0 ? (
           <div className="tag-suggestions">
@@ -1773,10 +1928,10 @@ function CommandDialog({
         ) : null}
         <div className="dialog-actions">
           <button type="button" onClick={onCancel}>
-            Cancel
+            {l("Cancel", "取消")}
           </button>
           <button type="submit" className="primary-action">
-            Save
+            {l("Save", "保存")}
           </button>
         </div>
       </form>
@@ -1784,26 +1939,28 @@ function CommandDialog({
   );
 }
 
-function quotaStatusLabel(status: UsageQuotaCard["status"]): string {
-  if (status === "supported") return "Live";
-  if (status === "unsupported_api_key") return "Unsupported";
-  if (status === "error") return "Error";
-  return "Setup";
+function quotaStatusLabel(status: UsageQuotaCard["status"], language: LanguageMode): string {
+  if (status === "supported") return localize(language, "Live", "可用");
+  if (status === "unsupported_api_key") return localize(language, "Unsupported", "不支持");
+  if (status === "error") return localize(language, "Error", "错误");
+  return localize(language, "Setup", "设置");
 }
 
-function formatQuotaReset(resetsAt?: string): string {
+function formatQuotaReset(resetsAt: string | undefined, language: LanguageMode): string {
   if (!resetsAt) return "";
   const timestamp = Date.parse(resetsAt);
   if (!Number.isFinite(timestamp)) return "";
   const diff = timestamp - Date.now();
-  if (diff <= 0) return "reset due";
+  if (diff <= 0) return localize(language, "reset due", "应重置");
   const minutes = Math.ceil(diff / 60_000);
-  if (minutes < 60) return `resets in ${minutes}m`;
+  if (minutes < 60) return localize(language, `resets in ${minutes}m`, `${minutes} 分钟后重置`);
   const hours = Math.floor(minutes / 60);
   if (hours < 24) {
     const remainingMinutes = minutes - hours * 60;
-    return remainingMinutes > 0 ? `resets in ${hours}h ${remainingMinutes}m` : `resets in ${hours}h`;
+    return remainingMinutes > 0
+      ? localize(language, `resets in ${hours}h ${remainingMinutes}m`, `${hours} 小时 ${remainingMinutes} 分钟后重置`)
+      : localize(language, `resets in ${hours}h`, `${hours} 小时后重置`);
   }
   const days = Math.ceil(hours / 24);
-  return `resets in ${days}d`;
+  return localize(language, `resets in ${days}d`, `${days} 天后重置`);
 }

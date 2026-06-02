@@ -13,6 +13,13 @@ export { type TerminalChoice, defaultTerminalFor, normalizeTerminal, terminalOpt
 
 type ProcessRunner = (command: string, args: string[]) => Promise<void>;
 
+export interface ResumeProcessSpec {
+  command: string;
+  args: string[];
+  cwd?: string;
+  displayCommand: string;
+}
+
 export interface AppSettings {
   defaultTerminal: TerminalChoice;
   globalShortcut: GlobalShortcut;
@@ -133,6 +140,37 @@ function spawnDetached(command: string, args: string[], cwd?: string): Promise<v
       resolve();
     });
   });
+}
+
+export function getResumeProcessSpec(
+  session: SessionSearchResult,
+  settings: AppSettings = defaultSettings,
+  opts: { skipPermissions?: boolean; platform?: NodeJS.Platform } = {},
+): ResumeProcessSpec {
+  const { skipPermissions = false, platform = process.platform } = opts;
+  const family = sourceFamily(session.source);
+  let command: string;
+  let args: string[];
+
+  if (family === "claude") {
+    command = settings.claudeBinary;
+    args = ["--resume", session.rawId];
+    if (skipPermissions) args.push("--dangerously-skip-permissions");
+  } else if (family === "codebuddy") {
+    command = settings.codeBuddyBinary;
+    args = ["--resume", session.rawId];
+  } else {
+    command = settings.codexBinary;
+    args = ["resume", session.rawId];
+    if (skipPermissions) args.push("--dangerously-bypass-approvals-and-sandbox");
+  }
+
+  return {
+    command,
+    args,
+    cwd: session.projectPath || undefined,
+    displayCommand: getResumeCommand(session, settings, { withCwd: true, skipPermissions, platform }),
+  };
 }
 
 export async function openResumeInTerminal(session: SessionSearchResult, settings: AppSettings): Promise<void> {
