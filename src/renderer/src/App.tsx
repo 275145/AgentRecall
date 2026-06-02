@@ -34,6 +34,7 @@ import type { IndexStatus } from "../../core/indexer";
 import { formatMessageTime, formatRelativeTime } from "../../core/format-session";
 import type { AppSettings } from "../../core/platform";
 import { globalShortcutOptions } from "../../core/shortcuts";
+import { terminalSelectOptions } from "../../core/terminal-options";
 import type {
   LiveSessionSnapshot,
   ProjectSummary,
@@ -108,23 +109,7 @@ const STATS_PERIOD_OPTIONS: Array<{ label: string; value: SessionStatsPeriod }> 
 
 const RUNTIME_PLATFORM: NodeJS.Platform = window.sessionSearch.platform;
 
-const TERMINAL_LABELS: Record<AppSettings["defaultTerminal"], string> = {
-  Terminal: "Terminal",
-  iTerm: "iTerm",
-  Ghostty: "Ghostty",
-  WezTerm: "WezTerm",
-  Warp: "Warp",
-  WindowsTerminal: "Windows Terminal",
-  PowerShell: "PowerShell",
-  Cmd: "Command Prompt",
-};
-
-const MAC_TERMINAL_VALUES: Array<AppSettings["defaultTerminal"]> = ["Terminal", "iTerm", "Ghostty", "WezTerm", "Warp"];
-const WINDOWS_TERMINAL_VALUES: Array<AppSettings["defaultTerminal"]> = ["WindowsTerminal", "PowerShell", "Cmd"];
-
-const DEFAULT_TERMINAL_OPTIONS: Array<{ label: string; value: AppSettings["defaultTerminal"] }> = (
-  RUNTIME_PLATFORM === "win32" ? WINDOWS_TERMINAL_VALUES : MAC_TERMINAL_VALUES
-).map((value) => ({ label: TERMINAL_LABELS[value], value }));
+const DEFAULT_TERMINAL_OPTIONS = terminalSelectOptions(RUNTIME_PLATFORM);
 
 const LIVE_STATUS_FILTERS: Array<{ label: string; value: LiveStatusFilter }> = [
   { label: "All", value: "all" },
