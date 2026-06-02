@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getResumeCommand, resolveMacApplicationName, defaultTerminalFor, terminalOptionsFor, normalizeTerminal, defaultSettings } from "./platform";
+import { getResumeCommand, resolveMacApplicationName, defaultTerminalFor, terminalOptionsFor, normalizeTerminal, defaultSettings, buildWindowsLaunchPlan } from "./platform";
 import type { SessionSearchResult } from "./types";
 
 describe("platform application resolution", () => {
@@ -74,5 +74,35 @@ describe("terminal options per platform", () => {
     expect(normalizeTerminal("Terminal", "win32")).toBe("WindowsTerminal");
     expect(normalizeTerminal("Cmd", "darwin")).toBe("Terminal");
     expect(normalizeTerminal("PowerShell", "win32")).toBe("PowerShell");
+  });
+});
+
+describe("buildWindowsLaunchPlan", () => {
+  const cmd = "claude --resume abc";
+  const cwd = "C:\\my repo";
+
+  it("Windows Terminal first, then powershell shells, then cmd", () => {
+    const plan = buildWindowsLaunchPlan("WindowsTerminal", cmd, cwd);
+    expect(plan.map((p) => p.file)).toEqual(["wt.exe", "pwsh.exe", "powershell.exe", "cmd.exe"]);
+    expect(plan[0].args).toEqual(["-d", cwd, "pwsh.exe", "-NoExit", "-Command", cmd]);
+  });
+
+  it("PowerShell prefers pwsh then powershell then cmd", () => {
+    const plan = buildWindowsLaunchPlan("PowerShell", cmd, cwd);
+    expect(plan.map((p) => p.file)).toEqual(["pwsh.exe", "powershell.exe", "cmd.exe"]);
+    expect(plan[0].args).toEqual(["-NoExit", "-Command", cmd]);
+    expect(plan[0].cwd).toBe(cwd);
+  });
+
+  it("Cmd uses cmd.exe /K", () => {
+    const plan = buildWindowsLaunchPlan("Cmd", cmd, cwd);
+    expect(plan.map((p) => p.file)).toEqual(["cmd.exe"]);
+    expect(plan[0].args).toEqual(["/K", cmd]);
+    expect(plan[0].cwd).toBe(cwd);
+  });
+
+  it("omits wt start-dir flag when cwd is empty", () => {
+    const plan = buildWindowsLaunchPlan("WindowsTerminal", cmd, "");
+    expect(plan[0].args).toEqual(["pwsh.exe", "-NoExit", "-Command", cmd]);
   });
 });

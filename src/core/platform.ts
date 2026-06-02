@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { DEFAULT_GLOBAL_SHORTCUT, type GlobalShortcut } from "./shortcuts";
 import type { SessionSearchResult, SessionSource } from "./types";
 
@@ -77,10 +77,68 @@ export function getResumeCommand(
   return cmd;
 }
 
+interface WindowsLaunch {
+  file: string;
+  args: string[];
+  cwd?: string;
+}
+
+// Ordered candidate launches. The caller tries each until one spawns (ENOENT -> next).
+export function buildWindowsLaunchPlan(terminal: TerminalChoice, command: string, cwd: string): WindowsLaunch[] {
+  const wt = (): WindowsLaunch => {
+    const inner = ["pwsh.exe", "-NoExit", "-Command", command];
+    return { file: "wt.exe", args: cwd ? ["-d", cwd, ...inner] : inner };
+  };
+  const pwsh = (): WindowsLaunch => ({ file: "pwsh.exe", args: ["-NoExit", "-Command", command], cwd: cwd || undefined });
+  const powershell = (): WindowsLaunch => ({ file: "powershell.exe", args: ["-NoExit", "-Command", command], cwd: cwd || undefined });
+  const cmd = (): WindowsLaunch => ({ file: "cmd.exe", args: ["/K", command], cwd: cwd || undefined });
+
+  if (terminal === "Cmd") return [cmd()];
+  if (terminal === "PowerShell") return [pwsh(), powershell(), cmd()];
+  // WindowsTerminal (default): wt first, then fall back through shells.
+  return [wt(), pwsh(), powershell(), cmd()];
+}
+
+async function openResumeInWindowsTerminal(session: SessionSearchResult, settings: AppSettings): Promise<void> {
+  const command = getResumeCommand(session, settings, { withCwd: false, platform: "win32" });
+  const terminal = normalizeTerminal(settings.defaultTerminal, "win32");
+  const plan = buildWindowsLaunchPlan(terminal, command, session.projectPath ?? "");
+
+  let lastError: Error | null = null;
+  for (const launch of plan) {
+    try {
+      await spawnDetached(launch.file, launch.args, launch.cwd);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (code === "ENOENT") continue; // terminal not installed; try the next candidate
+      throw lastError;
+    }
+  }
+  throw new Error(`No Windows terminal could be launched. ${lastError?.message ?? ""}`.trim());
+}
+
+function spawnDetached(command: string, args: string[], cwd?: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, detached: true, stdio: "ignore", windowsHide: false });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
+}
+
 export async function openResumeInTerminal(session: SessionSearchResult, settings: AppSettings): Promise<void> {
   const command = getResumeCommand(session, settings, { withCwd: true });
+  if (process.platform === "win32") {
+    await openResumeInWindowsTerminal(session, settings);
+    return;
+  }
   if (process.platform !== "darwin") {
-    await runProcess(settings.defaultTerminal === "WezTerm" ? "wezterm" : "sh", ["-lc", command]);
+    // Linux / other: best-effort POSIX shell.
+    await runProcess("sh", ["-lc", command]);
     return;
   }
 
