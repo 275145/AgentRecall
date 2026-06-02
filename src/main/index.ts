@@ -27,6 +27,7 @@ import { loadUsageQuotaSnapshot } from "../core/quota";
 import { loadLiveSessionSnapshot } from "../core/session-activity";
 import { SessionStore } from "../core/session-store";
 import { AUTO_INDEX_REFRESH_INTERVAL_MS, INITIAL_INDEX_DELAY_MS } from "../core/refresh-policy";
+import { globalShortcutLabel, normalizeGlobalShortcut } from "../core/shortcuts";
 import type { AppSettings } from "../core/platform";
 import type { SearchOptions, SessionStatsOptions } from "../core/types";
 
@@ -42,13 +43,15 @@ let store: SessionStore;
 let indexStatus: IndexStatus = { running: false, indexed: 0, total: 0, lastIndexedAt: null, error: null };
 let activeIndexRun: Promise<IndexStatus> | null = null;
 let autoIndexTimer: ReturnType<typeof setInterval> | null = null;
+let registeredGlobalShortcut: string | null = null;
 
 const settingsStore = new Store<AppSettings>({
   defaults: defaultSettings,
 });
 
 function getSettings(): AppSettings {
-  return { ...defaultSettings, ...settingsStore.store };
+  const settings = { ...defaultSettings, ...settingsStore.store };
+  return { ...settings, globalShortcut: normalizeGlobalShortcut(settings.globalShortcut) };
 }
 
 function getPreferredWindowBounds(): { width: number; height: number; x: number; y: number } {
@@ -110,15 +113,43 @@ function createWindow(): void {
 }
 
 function toggleWindow(): void {
+  if (mainWindow?.isVisible() && mainWindow.isFocused()) {
+    mainWindow.hide();
+    return;
+  }
+  showWindow();
+}
+
+function showWindow(): void {
   if (!mainWindow) createWindow();
   if (!mainWindow) return;
-  if (mainWindow.isVisible() && mainWindow.isFocused()) mainWindow.hide();
-  else {
-    mainWindow.setBounds(getPreferredWindowBounds(), false);
-    mainWindow.show();
-    mainWindow.focus();
-    mainWindow.webContents.send("focus-search");
+  mainWindow.setBounds(getPreferredWindowBounds(), false);
+  mainWindow.show();
+  mainWindow.focus();
+  mainWindow.webContents.send("focus-search");
+}
+
+function registerAppGlobalShortcut(accelerator: string): boolean {
+  if (registeredGlobalShortcut === accelerator) return true;
+
+  const previous = registeredGlobalShortcut;
+  if (previous) {
+    globalShortcut.unregister(previous);
+    registeredGlobalShortcut = null;
   }
+
+  if (!accelerator) return true;
+
+  const registered = globalShortcut.register(accelerator, toggleWindow);
+  if (registered) {
+    registeredGlobalShortcut = accelerator;
+    return true;
+  }
+
+  if (previous && globalShortcut.register(previous, toggleWindow)) {
+    registeredGlobalShortcut = previous;
+  }
+  return false;
 }
 
 function createTray(): void {
@@ -130,12 +161,13 @@ function createTray(): void {
   tray.setToolTip(PRODUCT_NAME);
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: `Open ${PRODUCT_NAME}`, click: toggleWindow },
+      { label: `Open ${PRODUCT_NAME}`, click: showWindow },
       { label: "Refresh Now", click: () => void runIndexSync() },
       { type: "separator" },
       { label: "Quit", click: () => app.quit() },
     ]),
   );
+  tray.on("click", showWindow);
 }
 
 function createApplicationMenu(): void {
@@ -285,8 +317,13 @@ function registerIpc(): void {
   ipcMain.handle("settings:get", () => getSettings());
   ipcMain.handle("settings:set", (_event, settings: Partial<AppSettings>) => {
     const previous = getSettings();
-    settingsStore.set({ ...getSettings(), ...settings });
-    const next = getSettings();
+    const next = { ...previous, ...settings, globalShortcut: normalizeGlobalShortcut(settings.globalShortcut ?? previous.globalShortcut) };
+    if (next.globalShortcut !== previous.globalShortcut && !registerAppGlobalShortcut(next.globalShortcut)) {
+      throw new Error(
+        `Shortcut ${globalShortcutLabel(next.globalShortcut)} could not be registered. It may be used by another app.`,
+      );
+    }
+    settingsStore.set(next);
     if (previous.includeClaudeInternal && !next.includeClaudeInternal) store.deleteSessionsBySource(["claude-internal"]);
     if (previous.includeCodexInternal && !next.includeCodexInternal) store.deleteSessionsBySource(["codex-internal"]);
     return next;
@@ -335,13 +372,20 @@ app.whenReady().then(() => {
   createApplicationMenu();
   createWindow();
   createTray();
-  globalShortcut.register("Alt+Space", toggleWindow);
+  const shortcut = getSettings().globalShortcut;
+  if (!registerAppGlobalShortcut(shortcut)) {
+    console.error(`Global shortcut ${globalShortcutLabel(shortcut)} could not be registered.`);
+  }
   setTimeout(() => void runIndexSync(), INITIAL_INDEX_DELAY_MS);
   startAutoIndexRefresh();
 });
 
 app.on("window-all-closed", () => {
   // Keep the menu bar app alive; users can quit from the tray/menu.
+});
+
+app.on("activate", () => {
+  showWindow();
 });
 
 app.on("before-quit", () => {

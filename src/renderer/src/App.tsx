@@ -14,6 +14,7 @@ import {
   Folder,
   FolderOpen,
   GitBranch,
+  Keyboard,
   Moon,
   Pin,
   PinOff,
@@ -31,6 +32,7 @@ import {
 import type { IndexStatus } from "../../core/indexer";
 import { formatMessageTime, formatRelativeTime } from "../../core/format-session";
 import type { AppSettings } from "../../core/platform";
+import { GLOBAL_SHORTCUT_OPTIONS } from "../../core/shortcuts";
 import type {
   LiveSessionSnapshot,
   ProjectSummary,
@@ -45,6 +47,13 @@ import type {
   UsageQuotaSnapshot,
 } from "../../core/types";
 import { formatCompactNumber, formatTokenCount } from "./format-count";
+import {
+  filterSessionsByLiveStatus,
+  getLiveSessionState,
+  liveStateLabel,
+  type LiveSessionState,
+  type LiveStatusFilter,
+} from "./live-filter";
 import {
   readSidebarSections,
   serializeSidebarSections,
@@ -102,6 +111,12 @@ const DEFAULT_TERMINAL_OPTIONS: Array<{ label: string; value: AppSettings["defau
   { label: "Warp", value: "Warp" },
 ];
 
+const LIVE_STATUS_FILTERS: Array<{ label: string; value: LiveStatusFilter }> = [
+  { label: "All", value: "all" },
+  { label: "Open", value: "open" },
+  { label: "Closed", value: "closed" },
+];
+
 type ViewMode = "default" | "favorites" | "pinned" | "hidden";
 const INITIAL_MESSAGE_LIMIT = 20;
 const MESSAGE_PAGE_SIZE = 80;
@@ -136,18 +151,6 @@ const EMPTY_LIVE_SESSIONS: LiveSessionSnapshot = {
 
 function isBranchTag(tagName: string): boolean {
   return tagName.startsWith("branch:");
-}
-
-type LiveSessionState = "open" | "closed" | "unknown";
-
-function liveSessionKey(session: SessionSearchResult): string {
-  return `${session.source.startsWith("claude") ? "claude" : "codex"}:${session.rawId}`;
-}
-
-function liveStateLabel(state: LiveSessionState): string {
-  if (state === "open") return "Open";
-  if (state === "closed") return "Closed";
-  return "Unknown";
 }
 
 type ActionStatus = {
@@ -190,6 +193,7 @@ export function App(): ReactElement {
   const [projectPath, setProjectPath] = useState<string | undefined>();
   const [visibility, setVisibility] = useState<ViewMode>("default");
   const [sortBy, setSortBy] = useState<SessionSortBy>("created");
+  const [liveStatus, setLiveStatus] = useState<LiveStatusFilter>("all");
   const [results, setResults] = useState<SessionSearchResult[]>([]);
   const [tags, setTags] = useState<string[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -340,6 +344,20 @@ export function App(): ReactElement {
     };
   }, [load]);
 
+  const liveSessionKeys = useMemo(
+    () => new Set(liveSessions.sessions.map((session) => `${session.family}:${session.rawId}`)),
+    [liveSessions],
+  );
+  const liveDetectionFailed = Boolean(liveSessions.error);
+  const displayedResults = useMemo(
+    () => filterSessionsByLiveStatus(results, liveSessionKeys, liveStatus, liveDetectionFailed),
+    [results, liveSessionKeys, liveStatus, liveDetectionFailed],
+  );
+  const selected = useMemo(
+    () => displayedResults.find((session) => session.sessionKey === selectedKey) || null,
+    [displayedResults, selectedKey],
+  );
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -367,7 +385,7 @@ export function App(): ReactElement {
       if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
         event.preventDefault();
         if (actionStatus?.kind === "running" || !selectedKey) return;
-        const session = results.find((item) => item.sessionKey === selectedKey);
+        const session = displayedResults.find((item) => item.sessionKey === selectedKey);
         if (session) {
           void runAction("Opening terminal", () => window.sessionSearch.resumeSession(session.sessionKey), "Resume command sent to terminal.");
         }
@@ -375,17 +393,17 @@ export function App(): ReactElement {
       }
 
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-        if (results.length === 0) return;
+        if (displayedResults.length === 0) return;
         event.preventDefault();
-        const currentIndex = results.findIndex((session) => session.sessionKey === selectedKey);
+        const currentIndex = displayedResults.findIndex((session) => session.sessionKey === selectedKey);
         const delta = event.key === "ArrowDown" ? 1 : -1;
         const nextIndex =
           currentIndex < 0
             ? delta === 1
               ? 0
-              : results.length - 1
-            : Math.min(results.length - 1, Math.max(0, currentIndex + delta));
-        setSelectedKey(results[nextIndex].sessionKey);
+              : displayedResults.length - 1
+            : Math.min(displayedResults.length - 1, Math.max(0, currentIndex + delta));
+        setSelectedKey(displayedResults[nextIndex].sessionKey);
         return;
       }
 
@@ -393,7 +411,7 @@ export function App(): ReactElement {
         const target = event.target as HTMLElement | null;
         const tag = target?.tagName;
         if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-        const session = results.find((item) => item.sessionKey === selectedKey);
+        const session = displayedResults.find((item) => item.sessionKey === selectedKey);
         if (session) {
           event.preventDefault();
           void openDetail(session);
@@ -402,7 +420,7 @@ export function App(): ReactElement {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [results, selectedKey, detail, dialog, deleteTagName, contextMenu, settingsOpen, actionStatus]);
+  }, [displayedResults, selectedKey, detail, dialog, deleteTagName, contextMenu, settingsOpen, actionStatus]);
 
   useEffect(() => {
     if (!selectedKey) return;
@@ -414,14 +432,6 @@ export function App(): ReactElement {
     return () => document.body.classList.remove("overlay-open");
   }, [detail]);
 
-  const selected = useMemo(
-    () => results.find((session) => session.sessionKey === selectedKey) || null,
-    [results, selectedKey],
-  );
-  const liveSessionKeys = useMemo(
-    () => new Set(liveSessions.sessions.map((session) => `${session.family}:${session.rawId}`)),
-    [liveSessions],
-  );
   const visibleSourceFilters = useMemo(() => {
     if (!appSettings) return sourceFilters(null);
     // Reveal an internal source filter only once its background load has finished.
@@ -440,6 +450,12 @@ export function App(): ReactElement {
     : tag
       ? `Search within #${tag}`
       : "Search titles, first questions, full text, paths, or ids";
+
+  useEffect(() => {
+    setSelectedKey((current) =>
+      current && !displayedResults.some((session) => session.sessionKey === current) ? null : current,
+    );
+  }, [displayedResults]);
 
   function toggleSidebarSectionById(section: SidebarSectionId): void {
     setSidebarSections((current) => toggleSidebarSection(current, section));
@@ -573,6 +589,10 @@ export function App(): ReactElement {
 
   async function updateDefaultTerminal(defaultTerminal: AppSettings["defaultTerminal"]): Promise<void> {
     await updateSettings({ defaultTerminal });
+  }
+
+  async function updateGlobalShortcut(globalShortcut: AppSettings["globalShortcut"]): Promise<void> {
+    await updateSettings({ globalShortcut });
   }
 
   async function updateSettings(next: Partial<AppSettings>): Promise<void> {
@@ -814,6 +834,17 @@ export function App(): ReactElement {
               #{tag} ×
             </button>
           ) : null}
+          <div className="live-filter" role="group" aria-label="Live session status">
+            {LIVE_STATUS_FILTERS.map((option) => (
+              <button
+                key={option.value}
+                className={liveStatus === option.value ? "active" : ""}
+                onClick={() => setLiveStatus(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
           <label className="sort-menu">
             <span>Sort</span>
             <select value={sortBy} onChange={(event) => setSortBy(event.target.value as SessionSortBy)}>
@@ -845,17 +876,21 @@ export function App(): ReactElement {
         </header>
 
         <div className="result-count">
-          <span>{results.length} sessions</span>
+          <span>
+            {displayedResults.length === results.length
+              ? `${results.length} sessions`
+              : `${displayedResults.length} of ${results.length} sessions`}
+          </span>
           {selected ? <span className="selected-path">{selected.projectPath || selected.rawId}</span> : null}
         </div>
 
         <div className="results">
-          {results.map((session) => (
+          {displayedResults.map((session) => (
             <SessionRow
               key={session.sessionKey}
               session={session}
               selected={selected?.sessionKey === session.sessionKey}
-              liveState={liveSessions.error ? "unknown" : liveSessionKeys.has(liveSessionKey(session)) ? "open" : "closed"}
+              liveState={getLiveSessionState(session, liveSessionKeys, liveDetectionFailed)}
               onSelect={() => setSelectedKey(session.sessionKey)}
               onOpen={() => void openDetail(session)}
               onRename={() => beginRename(session)}
@@ -867,7 +902,7 @@ export function App(): ReactElement {
               }}
             />
           ))}
-          {results.length === 0 ? <div className="empty">No sessions found.</div> : null}
+          {displayedResults.length === 0 ? <div className="empty">No sessions found.</div> : null}
         </div>
       </section>
 
@@ -878,7 +913,7 @@ export function App(): ReactElement {
           loading={messagesLoading}
           actionStatus={actionStatus}
           query={query}
-          liveState={liveSessions.error ? "unknown" : liveSessionKeys.has(liveSessionKey(detail)) ? "open" : "closed"}
+          liveState={getLiveSessionState(detail, liveSessionKeys, liveDetectionFailed)}
           onClose={closeDetail}
           onShowMore={() => void loadMoreMessages()}
           onRename={() => beginRename(detail)}
@@ -977,6 +1012,7 @@ export function App(): ReactElement {
           feedback={settingsFeedback}
           onSettingsChange={(next) => void updateSettings(next)}
           onDefaultTerminalChange={(terminal) => void updateDefaultTerminal(terminal)}
+          onGlobalShortcutChange={(shortcut) => void updateGlobalShortcut(shortcut)}
           onClose={() => setSettingsOpen(false)}
         />
       ) : null}
@@ -1437,17 +1473,20 @@ function SettingsDialog({
   feedback,
   onSettingsChange,
   onDefaultTerminalChange,
+  onGlobalShortcutChange,
   onClose,
 }: {
   settings: AppSettings | null;
   feedback: SettingsFeedback;
   onSettingsChange: (settings: Partial<AppSettings>) => void;
   onDefaultTerminalChange: (terminal: AppSettings["defaultTerminal"]) => void;
+  onGlobalShortcutChange: (shortcut: AppSettings["globalShortcut"]) => void;
   onClose: () => void;
 }): ReactElement {
   const defaultTerminal = settings?.defaultTerminal ?? "Terminal";
+  const globalShortcut = settings?.globalShortcut ?? "Alt+Space";
   const saving = feedback?.kind === "running";
-  const [activeSection, setActiveSection] = useState<"terminal" | "sources">("terminal");
+  const [activeSection, setActiveSection] = useState<"terminal" | "shortcut" | "sources">("terminal");
 
   return (
     <div className="dialog-backdrop" onMouseDown={onClose}>
@@ -1464,6 +1503,10 @@ function SettingsDialog({
               <Terminal size={15} />
               <span>Default terminal</span>
             </button>
+            <button className={activeSection === "shortcut" ? "active" : ""} onClick={() => setActiveSection("shortcut")}>
+              <Keyboard size={15} />
+              <span>Global shortcut</span>
+            </button>
             <button className={activeSection === "sources" ? "active" : ""} onClick={() => setActiveSection("sources")}>
               <Folder size={15} />
               <span>Personal sources</span>
@@ -1474,12 +1517,12 @@ function SettingsDialog({
               <section className="settings-pane">
                 <header className="settings-pane-head">
                   <h3>Default terminal</h3>
-                  <p>Choose which terminal app Resume and the list shortcut use to reopen a session.</p>
+                  <p>Choose which terminal app Resume and the selected-session shortcut use to reopen a session.</p>
                 </header>
                 <div className="settings-field">
                   <div className="settings-field-text">
                     <span className="settings-field-title">Terminal app</span>
-                    <span className="settings-field-sub">Applies to Resume and the keyboard shortcut.</span>
+                    <span className="settings-field-sub">Applies to Resume and the selected-session shortcut.</span>
                   </div>
                   <select
                     id="default-terminal"
@@ -1489,6 +1532,32 @@ function SettingsDialog({
                   >
                     {DEFAULT_TERMINAL_OPTIONS.map((option) => (
                       <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </section>
+            ) : null}
+            {activeSection === "shortcut" ? (
+              <section className="settings-pane">
+                <header className="settings-pane-head">
+                  <h3>Global shortcut</h3>
+                  <p>Choose the system-wide shortcut used to open or hide the search window.</p>
+                </header>
+                <div className="settings-field">
+                  <div className="settings-field-text">
+                    <span className="settings-field-title">Open search window</span>
+                    <span className="settings-field-sub">If another app owns the shortcut, this setting will fail to save.</span>
+                  </div>
+                  <select
+                    id="global-shortcut"
+                    value={globalShortcut}
+                    disabled={!settings || saving}
+                    onChange={(event) => onGlobalShortcutChange(event.target.value as AppSettings["globalShortcut"])}
+                  >
+                    {GLOBAL_SHORTCUT_OPTIONS.map((option) => (
+                      <option key={option.label} value={option.value}>
                         {option.label}
                       </option>
                     ))}

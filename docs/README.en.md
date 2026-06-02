@@ -16,7 +16,7 @@ It indexes existing local session files, lets you add your own titles and tags, 
 - Copy resume commands or conversation exports.
 - Show Codex subscription quota; Claude Code quota can be shown through a statusline snapshot bridge.
 - Refresh the local index from the tray menu.
-- Toggle the app with `Option+Space` on macOS.
+- Toggle the app with `Option+Space` on macOS by default; the shortcut can be changed or disabled in Settings.
 
 ## Supported Sources
 
@@ -46,7 +46,7 @@ Requires macOS and Node.js 22.13+ (with npm). From the repository root, run this
 nvm use 22 && rm -rf node_modules && npm ci && npm run build && npm install -g .
 ```
 
-Once installed, run `agent-session-search` from any terminal to launch it. The app stays in the background (with a menu bar icon); press **⌥ Option + Space** anytime to open the search window.
+Once installed, run `agent-session-search` from any terminal to launch it. The app stays in the background (with a menu bar icon); press **⌥ Option + Space** by default to open the search window. If it conflicts with Raycast or another launcher, change or disable the global shortcut in Settings.
 
 See [Install.md](../Install.md) for updating, uninstalling, installing from a fresh clone, and network mirror tips.
 

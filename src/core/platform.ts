@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
+import { DEFAULT_GLOBAL_SHORTCUT, type GlobalShortcut } from "./shortcuts";
 import type { SessionSearchResult, SessionSource } from "./types";
 
 type ProcessRunner = (command: string, args: string[]) => Promise<void>;
 
 export interface AppSettings {
   defaultTerminal: "Terminal" | "iTerm" | "Ghostty" | "WezTerm" | "Warp";
+  globalShortcut: GlobalShortcut;
   claudeBinary: string;
   codexBinary: string;
   includeClaudeInternal: boolean;
@@ -13,6 +15,7 @@ export interface AppSettings {
 
 export const defaultSettings: AppSettings = {
   defaultTerminal: "Terminal",
+  globalShortcut: DEFAULT_GLOBAL_SHORTCUT,
   claudeBinary: "claude",
   codexBinary: "codex",
   includeClaudeInternal: false,
