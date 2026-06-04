@@ -24,7 +24,7 @@ export interface InstalledSkill {
 export interface SkillUsageSummary {
   // Whether the Claude Code PostToolUse hook is installed in ~/.claude/settings.json.
   hookInstalled: boolean;
-  // Whether the usage log exists yet (skills have been used since install).
+  // Whether any usage source has produced records yet.
   logExists: boolean;
   totalEvents: number;
 }

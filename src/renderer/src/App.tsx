@@ -378,18 +378,29 @@ export function App(): ReactElement {
     }
   }, [t]);
 
-  const loadSkills = useCallback(async () => {
+  const loadSkills = useCallback(async (refreshUsage = false) => {
     setSkillsLoading(true);
-    setSkillsFeedback(null);
+    setSkillsFeedback(refreshUsage ? { kind: "running", message: t("Refreshing skill usage...", "正在刷新 Skill 使用统计...") } : null);
     try {
+      const usageStatus = refreshUsage ? await window.sessionSearch.refreshSkillUsage() : null;
       setInstalledSkills(await window.sessionSearch.listSkills());
+      if (usageStatus) {
+        const message = t(
+          `Skill usage refreshed. ${usageStatus.refreshed} changed, ${usageStatus.skipped} skipped.`,
+          `Skill 使用统计已刷新：${usageStatus.refreshed} 个文件有变化，${usageStatus.skipped} 个未变化。`,
+        );
+        setSkillsFeedback({ kind: "success", message });
+        window.setTimeout(() => {
+          setSkillsFeedback((current) => (current?.kind === "success" && current.message === message ? null : current));
+        }, 2200);
+      }
     } catch (error) {
-      setInstalledSkills(EMPTY_SKILLS);
+      if (!refreshUsage) setInstalledSkills(EMPTY_SKILLS);
       setSkillsFeedback({ kind: "error", message: error instanceof Error ? error.message : String(error) });
     } finally {
       setSkillsLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const refreshLiveSessions = useCallback(async () => {
     try {
@@ -1333,7 +1344,7 @@ export function App(): ReactElement {
           feedback={skillsFeedback}
           language={language}
           revealLabel={FILE_MANAGER_LABEL}
-          onRefresh={() => void loadSkills()}
+          onRefresh={() => void loadSkills(true)}
           onCopyPath={(skillPath) =>
             void runUtilityAction(t("Copying skill path", "正在复制 Skill 路径"), () => window.sessionSearch.copySkillPath(skillPath), t("Skill path copied.", "Skill 路径已复制。"))
           }
@@ -1372,11 +1383,9 @@ function SkillsDialog({
   const [query, setQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState<SkillSourceFilter>("all");
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
-  // Usage counts only apply to Claude Code, so sort by most-used only when that
-  // filter is active; every other filter keeps the default alphabetical order.
   const filteredSkills = useMemo(() => {
     const filtered = filterInstalledSkills(snapshot.skills, query, sourceFilter);
-    return sourceFilter === "claude" ? sortInstalledSkills(filtered, "usage") : filtered;
+    return sortInstalledSkills(filtered, "usage");
   }, [snapshot.skills, query, sourceFilter]);
   const selectedSkill =
     filteredSkills.find((skill) => skill.id === selectedSkillId) ??
@@ -1433,7 +1442,7 @@ function SkillsDialog({
               </button>
             ))}
           </div>
-          <button className="stats-refresh" onClick={onRefresh} disabled={loading} title={l("Refresh skills", "刷新 Skills")} aria-label={l("Refresh skills", "刷新 Skills")}>
+          <button className="stats-refresh" onClick={onRefresh} disabled={loading} title={l("Refresh skill usage", "刷新 Skill 使用统计")} aria-label={l("Refresh skill usage", "刷新 Skill 使用统计")}>
             <RefreshCw size={13} />
           </button>
         </div>
@@ -2745,8 +2754,8 @@ function SettingsDialog({
                     <span className="settings-field-title">{l("Track skill usage", "统计 Skill 使用次数")}</span>
                     <span className="settings-field-sub">
                       {l(
-                        "Installs a PostToolUse hook in ~/.claude/settings.json. Claude Code only — Codex and the Claude desktop chat app are not covered.",
-                        "在 ~/.claude/settings.json 安装 PostToolUse hook。仅 Claude Code 生效——Codex 和 Claude 桌面聊天端不支持。",
+                        "Installs a PostToolUse hook in ~/.claude/settings.json for Claude Code. Codex usage is inferred automatically from local ~/.codex/sessions logs.",
+                        "在 ~/.claude/settings.json 安装 Claude Code 的 PostToolUse hook。Codex 使用次数会自动从本地 ~/.codex/sessions 日志推断。",
                       )}
                     </span>
                   </div>

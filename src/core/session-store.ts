@@ -1,5 +1,11 @@
 import { createRequire } from "node:module";
 import type { DatabaseSync as DatabaseSyncType, SQLInputValue } from "node:sqlite";
+import {
+  skillUsageSnapshotFromEvents,
+  type SkillUsageEvent,
+  type SkillUsageSnapshot,
+  type SkillUsageSource,
+} from "./skill-usage";
 import { truncateTraceDetail } from "./trace-detail";
 import type {
   IndexedSession,
@@ -66,6 +72,12 @@ interface TraceEventRow {
   call_id: string | null;
   event_type: string | null;
   status: SessionTraceEvent["status"] | null;
+}
+
+interface SkillUsageEventRow {
+  agent: SkillUsageEvent["agent"];
+  skill: string;
+  timestamp: number;
 }
 
 export class SessionStore {
@@ -358,6 +370,69 @@ export class SessionStore {
     }));
   }
 
+  isSkillUsageSourceFresh(source: SkillUsageSource): boolean {
+    const row = this.db
+      .prepare("SELECT mtime_ms, file_size FROM skill_usage_sources WHERE source_path = ?")
+      .get(source.path) as { mtime_ms: number; file_size: number } | undefined;
+    return Boolean(row && Math.abs(row.mtime_ms - source.mtimeMs) < 0.001 && row.file_size === source.fileSize);
+  }
+
+  upsertSkillUsageSource(source: SkillUsageSource, events: SkillUsageEvent[]): void {
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `
+          INSERT INTO skill_usage_sources (source_path, agent, kind, mtime_ms, file_size, scanned_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(source_path) DO UPDATE SET
+            agent = excluded.agent,
+            kind = excluded.kind,
+            mtime_ms = excluded.mtime_ms,
+            file_size = excluded.file_size,
+            scanned_at = excluded.scanned_at
+        `,
+        )
+        .run(source.path, source.agent, source.kind, source.mtimeMs, source.fileSize, Date.now());
+
+      this.db.prepare("DELETE FROM skill_usage_events WHERE source_path = ?").run(source.path);
+      const insertEvent = this.db.prepare(
+        `
+        INSERT INTO skill_usage_events (source_path, event_index, agent, skill, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+      `,
+      );
+      events.forEach((event, index) => {
+        const skill = event.skill.trim();
+        if (!skill) return;
+        insertEvent.run(source.path, index, event.agent, skill, event.timestamp);
+      });
+    });
+  }
+
+  pruneSkillUsageSources(activePaths: string[]): void {
+    const active = new Set(activePaths);
+    const rows = this.db.prepare("SELECT source_path FROM skill_usage_sources").all() as Array<{ source_path: string }>;
+    this.transaction(() => {
+      for (const row of rows) {
+        if (!active.has(row.source_path)) this.db.prepare("DELETE FROM skill_usage_sources WHERE source_path = ?").run(row.source_path);
+      }
+    });
+  }
+
+  getSkillUsageSnapshot(): SkillUsageSnapshot {
+    const sourceCountRow = this.db.prepare("SELECT COUNT(*) AS count FROM skill_usage_sources").get() as { count: number };
+    const rows = this.db
+      .prepare(
+        `
+        SELECT agent, skill, timestamp
+        FROM skill_usage_events
+        ORDER BY source_path, event_index
+      `,
+      )
+      .all() as unknown as SkillUsageEventRow[];
+    return skillUsageSnapshotFromEvents(rows, "", sourceCountRow.count > 0 || rows.length > 0);
+  }
+
   getStats(options: SessionStatsOptions = {}, now = Date.now()): SessionStats {
     const range = resolveStatsRange(options, now);
     const summariesBySource = new Map<SessionSource, SessionStatsSummary>();
@@ -546,6 +621,25 @@ export class SessionStore {
         FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS skill_usage_sources (
+        source_path TEXT PRIMARY KEY,
+        agent TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        mtime_ms REAL NOT NULL,
+        file_size INTEGER NOT NULL,
+        scanned_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS skill_usage_events (
+        source_path TEXT NOT NULL,
+        event_index INTEGER NOT NULL,
+        agent TEXT NOT NULL,
+        skill TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        PRIMARY KEY (source_path, event_index),
+        FOREIGN KEY (source_path) REFERENCES skill_usage_sources(source_path) ON DELETE CASCADE
+      );
+
       CREATE VIRTUAL TABLE IF NOT EXISTS session_fts USING fts5(
         session_key UNINDEXED,
         title,
@@ -569,6 +663,10 @@ export class SessionStore {
         ON token_events(dedupe_key, total_tokens, timestamp);
       CREATE INDEX IF NOT EXISTS idx_trace_events_session
         ON trace_events(session_key, trace_index);
+      CREATE INDEX IF NOT EXISTS idx_skill_usage_events_agent_skill
+        ON skill_usage_events(agent, skill);
+      CREATE INDEX IF NOT EXISTS idx_skill_usage_events_timestamp
+        ON skill_usage_events(timestamp);
     `);
     this.addColumnIfMissing("sessions", "favorited", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("sessions", "input_tokens", "INTEGER NOT NULL DEFAULT 0");

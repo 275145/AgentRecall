@@ -42,7 +42,12 @@ import { loadLiveSessionSnapshot } from "../core/session-activity";
 import { routeResumeSession } from "../core/resume-router";
 import { SessionStore } from "../core/session-store";
 import { listInstalledSkills, type InstalledSkillsSnapshot } from "../core/skill-manager";
-import { loadSkillUsage, usageForSkill } from "../core/skill-usage";
+import {
+  listSkillUsageSources,
+  readSkillUsageSourceEvents,
+  usageForSkill,
+  type SkillUsageRefreshStatus,
+} from "../core/skill-usage";
 import { AUTO_INDEX_REFRESH_INTERVAL_MS, INITIAL_INDEX_DELAY_MS } from "../core/refresh-policy";
 import { globalShortcutLabel, normalizeGlobalShortcut } from "../core/shortcuts";
 import type { AppSettings, AppSettingsUpdate } from "../core/platform";
@@ -66,13 +71,13 @@ function loadSkillUsageHookSetup(): SkillUsageHookSetup {
   return requireCjs(SKILL_USAGE_HOOK_SETUP_PATH) as SkillUsageHookSetup;
 }
 
-// Merges skill-usage counts (from the hook log) and hook-install state onto the
-// scanned skill list so the renderer can sort by most-used.
+// Merges skill-usage counts and hook-install state onto the scanned skill list
+// so the renderer can sort by most-used.
 function buildSkillsSnapshot(): InstalledSkillsSnapshot {
   const snapshot = listInstalledSkills({ projectDirs: [process.cwd()] });
-  const usage = loadSkillUsage();
+  const usage = store.getSkillUsageSnapshot();
   const skills = snapshot.skills.map((skill) => {
-    const stat = usageForSkill(usage, skill.name);
+    const stat = usageForSkill(usage, skill.name, skill.agent);
     return { ...skill, usageCount: stat?.count ?? 0, lastUsedAt: stat?.lastUsedAt ?? null };
   });
 
@@ -84,6 +89,31 @@ function buildSkillsSnapshot(): InstalledSkillsSnapshot {
   }
 
   return { ...snapshot, skills, usage: { hookInstalled, logExists: usage.exists, totalEvents: usage.totalEvents } };
+}
+
+function refreshSkillUsageIndex(): SkillUsageRefreshStatus {
+  const sources = listSkillUsageSources();
+  let refreshed = 0;
+  let skipped = 0;
+
+  for (const source of sources) {
+    if (store.isSkillUsageSourceFresh(source)) {
+      skipped += 1;
+      continue;
+    }
+    store.upsertSkillUsageSource(source, readSkillUsageSourceEvents(source));
+    refreshed += 1;
+  }
+
+  store.pruneSkillUsageSources(sources.map((source) => source.path));
+  const usage = store.getSkillUsageSnapshot();
+  return {
+    refreshed,
+    skipped,
+    total: sources.length,
+    totalEvents: usage.totalEvents,
+    lastRefreshedAt: Date.now(),
+  };
 }
 
 app.setName(PRODUCT_NAME);
@@ -474,6 +504,7 @@ function registerIpc(): void {
     return next;
   });
   ipcMain.handle("skills:list", () => buildSkillsSnapshot());
+  ipcMain.handle("skills:refresh-usage", () => refreshSkillUsageIndex());
   ipcMain.handle("skills:copy-path", (_event, skillPath: string) => {
     clipboard.writeText(skillPath);
   });

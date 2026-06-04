@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createInMemoryStore } from "./session-store";
 import { TRACE_DETAIL_PREVIEW_MAX_CHARS } from "./trace-detail";
+import type { SkillUsageEvent, SkillUsageSource } from "./skill-usage";
 import type { IndexedSession, SessionMessage, SessionTraceEvent } from "./types";
 
 function sampleSession(overrides: Partial<IndexedSession> = {}): IndexedSession {
@@ -258,6 +259,67 @@ describe("SessionStore", () => {
     expect(stats.total.totalTokens).toBe(170);
     expect(stats.bySource.find((item) => item.source === "codex-cli")?.totalTokens).toBe(170);
     expect(stats.bySource.find((item) => item.source === "codex-app")?.totalTokens).toBe(0);
+  });
+
+  it("stores skill usage events by source and replaces them on rescan", () => {
+    const store = createInMemoryStore();
+    const source: SkillUsageSource = {
+      agent: "codex",
+      kind: "codex-session",
+      path: "/tmp/codex-session.jsonl",
+      mtimeMs: 100,
+      fileSize: 200,
+    };
+    const firstEvents: SkillUsageEvent[] = [
+      { agent: "codex", skill: "brainstorming", timestamp: Date.parse("2026-06-01T10:00:00.000Z") },
+      { agent: "codex", skill: "brainstorming", timestamp: Date.parse("2026-06-02T10:00:00.000Z") },
+    ];
+
+    store.upsertSkillUsageSource(source, firstEvents);
+
+    expect(store.isSkillUsageSourceFresh(source)).toBe(true);
+    expect(store.getSkillUsageSnapshot().stats).toEqual([
+      { skill: "brainstorming", count: 2, lastUsedAt: Date.parse("2026-06-02T10:00:00.000Z") },
+    ]);
+
+    store.upsertSkillUsageSource(
+      { ...source, mtimeMs: 101, fileSize: 220 },
+      [{ agent: "codex", skill: "tdd", timestamp: Date.parse("2026-06-03T10:00:00.000Z") }],
+    );
+
+    const snapshot = store.getSkillUsageSnapshot();
+    expect(store.isSkillUsageSourceFresh(source)).toBe(false);
+    expect(snapshot.totalEvents).toBe(1);
+    expect(snapshot.stats).toEqual([{ skill: "tdd", count: 1, lastUsedAt: Date.parse("2026-06-03T10:00:00.000Z") }]);
+    expect(snapshot.byAgentName["codex:tdd"]?.count).toBe(1);
+  });
+
+  it("prunes skill usage sources that no longer exist", () => {
+    const store = createInMemoryStore();
+    const codexSource: SkillUsageSource = {
+      agent: "codex",
+      kind: "codex-session",
+      path: "/tmp/codex-session.jsonl",
+      mtimeMs: 100,
+      fileSize: 200,
+    };
+    const claudeSource: SkillUsageSource = {
+      agent: "claude",
+      kind: "claude-hook",
+      path: "/tmp/skill-usage.jsonl",
+      mtimeMs: 300,
+      fileSize: 400,
+    };
+    store.upsertSkillUsageSource(codexSource, [{ agent: "codex", skill: "brainstorming", timestamp: 10 }]);
+    store.upsertSkillUsageSource(claudeSource, [{ agent: "claude", skill: "tdd", timestamp: 20 }]);
+
+    store.pruneSkillUsageSources([claudeSource.path]);
+
+    const snapshot = store.getSkillUsageSnapshot();
+    expect(snapshot.totalEvents).toBe(1);
+    expect(snapshot.stats).toEqual([{ skill: "tdd", count: 1, lastUsedAt: 20 }]);
+    expect(store.isSkillUsageSourceFresh(codexSource)).toBe(false);
+    expect(store.isSkillUsageSourceFresh(claudeSource)).toBe(true);
   });
 
   it("dedupes token events after applying the selected stats range", () => {
