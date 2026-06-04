@@ -32,6 +32,7 @@ It indexes existing local session files, lets you add your own titles and tags, 
 - Track message and token usage for Today / 7D / 30D / All time.
 - Show Codex subscription quota; Claude Code quota can be shown through a statusline snapshot bridge.
 - Refresh the local index and usage stats from the tray menu or in-app controls.
+- Count how often each Claude Code skill is used and sort the Skills panel by most used (recorded via a PostToolUse hook in `~/.claude/settings.json`, toggled on/off from the panel).
 - Switch between light/dark themes and English/Chinese UI.
 - Toggle the app with `Option+Space` on macOS by default; the shortcut can be changed or disabled in Settings.
 

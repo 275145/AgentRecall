@@ -80,7 +80,7 @@ import {
   type SidebarSectionsState,
 } from "./sidebar-sections";
 import { LANGUAGE_STORAGE_KEY, localize, readInitialLanguage, type LanguageMode } from "./language";
-import { filterInstalledSkills, skillSourceLabel, type SkillSourceFilter } from "./skill-manager";
+import { filterInstalledSkills, sortInstalledSkills, skillSourceLabel, type SkillSortKey, type SkillSourceFilter } from "./skill-manager";
 import { readInitialTheme, THEME_STORAGE_KEY, type ThemeMode } from "./theme";
 
 const SOURCE_LABEL: Record<SessionSource, string> = {
@@ -1280,6 +1280,18 @@ export function App(): ReactElement {
           onReveal={(skillPath) =>
             void runUtilityAction(`Opening ${FILE_MANAGER_LABEL}`, () => window.sessionSearch.revealSkill(skillPath), `${FILE_MANAGER_LABEL} opened.`)
           }
+          onInstallHook={() =>
+            void runUtilityAction(t("Enabling usage tracking", "正在启用使用统计"), async () => {
+              await window.sessionSearch.installSkillUsageHook();
+              await loadSkills();
+            }, t("Usage tracking enabled. Restart Claude Code to start counting.", "已启用使用统计，重启 Claude Code 后开始计数。"))
+          }
+          onUninstallHook={() =>
+            void runUtilityAction(t("Disabling usage tracking", "正在关闭使用统计"), async () => {
+              await window.sessionSearch.uninstallSkillUsageHook();
+              await loadSkills();
+            }, t("Usage tracking disabled.", "已关闭使用统计。"))
+          }
           onClose={() => setSkillsOpen(false)}
         />
       ) : null}
@@ -1296,6 +1308,8 @@ function SkillsDialog({
   onRefresh,
   onCopyPath,
   onReveal,
+  onInstallHook,
+  onUninstallHook,
   onClose,
 }: {
   snapshot: InstalledSkillsSnapshot;
@@ -1306,15 +1320,18 @@ function SkillsDialog({
   onRefresh: () => void;
   onCopyPath: (skillPath: string) => void;
   onReveal: (skillPath: string) => void;
+  onInstallHook: () => void;
+  onUninstallHook: () => void;
   onClose: () => void;
 }): ReactElement {
   const l = (en: string, zh: string) => localize(language, en, zh);
   const [query, setQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState<SkillSourceFilter>("all");
+  const [sortKey, setSortKey] = useState<SkillSortKey>("usage");
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
   const filteredSkills = useMemo(
-    () => filterInstalledSkills(snapshot.skills, query, sourceFilter),
-    [snapshot.skills, query, sourceFilter],
+    () => sortInstalledSkills(filterInstalledSkills(snapshot.skills, query, sourceFilter), sortKey),
+    [snapshot.skills, query, sourceFilter, sortKey],
   );
   const selectedSkill =
     filteredSkills.find((skill) => skill.id === selectedSkillId) ??
@@ -1371,6 +1388,11 @@ function SkillsDialog({
               </button>
             ))}
           </div>
+          <select className="skills-sort" value={sortKey} onChange={(event) => setSortKey(event.target.value as SkillSortKey)} aria-label={l("Sort skills", "Skill 排序")}>
+            <option value="usage">{l("Most used", "使用最多")}</option>
+            <option value="name">{l("Name", "名称")}</option>
+            <option value="updated">{l("Recently updated", "最近更新")}</option>
+          </select>
           <button className="stats-refresh" onClick={onRefresh} disabled={loading} title={l("Refresh skills", "刷新 Skills")} aria-label={l("Refresh skills", "刷新 Skills")}>
             <RefreshCw size={13} />
           </button>
@@ -1383,6 +1405,27 @@ function SkillsDialog({
               {root.exists ? l(`${root.skillCount} skills`, `${root.skillCount} 个`) : l("Missing", "未找到")}
             </span>
           ))}
+        </div>
+
+        <div className={`skills-usage-banner ${snapshot.usage?.hookInstalled ? "on" : ""}`}>
+          {snapshot.usage?.hookInstalled ? (
+            <>
+              <span>
+                {l("Usage tracking on", "使用统计已开启")}
+                {snapshot.usage.totalEvents > 0 ? l(` · ${snapshot.usage.totalEvents} calls recorded`, ` · 已记录 ${snapshot.usage.totalEvents} 次调用`) : l(" · waiting for skill calls", " · 等待 skill 调用")}
+              </span>
+              <button type="button" className="skills-usage-link" onClick={onUninstallHook} disabled={loading}>
+                {l("Disable", "关闭")}
+              </button>
+            </>
+          ) : (
+            <>
+              <span>{l("Track how often each Claude Code skill is used, then sort by most used.", "统计每个 Claude Code skill 的使用次数，并按使用最多排序。")}</span>
+              <button type="button" className="skills-usage-cta" onClick={onInstallHook} disabled={loading}>
+                {l("Enable usage tracking", "启用使用统计")}
+              </button>
+            </>
+          )}
         </div>
 
         {feedback ? <div className={`skills-feedback ${feedback.kind}`}>{feedback.message}</div> : null}
@@ -1401,6 +1444,7 @@ function SkillsDialog({
                   >
                     <span className="skill-item-head">
                       <strong>{skill.name}</strong>
+                      {skill.usageCount ? <span className="skill-usage-count" title={l("Times used", "使用次数")}>{formatCompactNumber(skill.usageCount)}</span> : null}
                       <SkillSourceBadge source={skill.source} language={language} />
                     </span>
                     <span className="skill-item-desc">{skill.description || l("No description", "无描述")}</span>
@@ -1436,6 +1480,14 @@ function SkillsDialog({
                   <div>
                     <dt>{l("Agent", "Agent")}</dt>
                     <dd>{selectedSkill.agent === "codex" ? "Codex" : "Claude Code"}</dd>
+                  </div>
+                  <div>
+                    <dt>{l("Used", "使用次数")}</dt>
+                    <dd>
+                      {selectedSkill.usageCount
+                        ? l(`${selectedSkill.usageCount} times`, `${selectedSkill.usageCount} 次`) + (selectedSkill.lastUsedAt ? ` · ${new Date(selectedSkill.lastUsedAt).toLocaleString()}` : "")
+                        : l("Not yet", "暂无")}
+                    </dd>
                   </div>
                   <div>
                     <dt>{l("Updated", "更新时间")}</dt>

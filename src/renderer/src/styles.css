@@ -1857,10 +1857,26 @@ select:focus-visible {
 
 .skills-toolbar {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) auto auto;
+  grid-template-columns: minmax(180px, 1fr) auto auto auto;
   gap: 10px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--border-subtle);
+}
+
+.skills-sort {
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.skills-sort:focus {
+  border-color: var(--accent-line);
+  outline: 0;
+  box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
 .skills-search {
@@ -1958,6 +1974,65 @@ select:focus-visible {
   opacity: 0.62;
 }
 
+.skills-usage-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 14px 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--panel-subtle);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.skills-usage-banner.on {
+  border-color: var(--accent-line);
+  background: var(--accent-ring);
+  color: var(--text-dim);
+}
+
+.skills-usage-cta {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.skills-usage-cta:disabled {
+  opacity: 0.6;
+}
+
+.skills-usage-link {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.skill-usage-count {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
 .skills-feedback {
   margin: 0 14px 10px;
   padding: 8px 10px;
@@ -2022,6 +2097,8 @@ select:focus-visible {
 }
 
 .skill-item-head strong {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   color: var(--text);
   font-size: 13px;
