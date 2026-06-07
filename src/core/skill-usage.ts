@@ -202,18 +202,32 @@ function parseCodexUsageLine(line: string): SkillUsageEvent[] {
   const payload = recordField(parsed, "payload");
   if (!payload || payload.type !== "function_call") return [];
 
-  const skillNames = skillNamesFromValue(parseMaybeJson(payload.arguments));
+  if (!isCodexSkillReadFunction(payload.name)) return [];
+  const skillNames = skillNamesFromText(codexCommandText(payload.arguments));
   if (skillNames.length === 0) return [];
   const timestamp = typeof parsed.timestamp === "string" ? Date.parse(parsed.timestamp) : NaN;
   return skillNames.map((skill) => ({ agent: "codex", skill, timestamp: Number.isFinite(timestamp) ? timestamp : 0 }));
 }
 
-function skillNamesFromValue(value: unknown): string[] {
-  const names = new Set<string>();
-  for (const text of stringValues(value)) {
-    for (const name of skillNamesFromText(text)) names.add(name);
+function isCodexSkillReadFunction(name: unknown): boolean {
+  if (typeof name !== "string") return false;
+  const normalized = name.trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized.includes("apply_patch") || normalized.includes("patch") || normalized.includes("write") || normalized.includes("edit")) {
+    return false;
   }
-  return [...names];
+  return normalized.includes("exec") || normalized.includes("command") || normalized.includes("shell");
+}
+
+function codexCommandText(argumentsValue: unknown): string {
+  const args = parseMaybeJson(argumentsValue);
+  if (!isRecord(args)) return "";
+  const cmd = args.cmd;
+  if (typeof cmd === "string" && cmd) return cmd;
+  const command = args.command;
+  if (typeof command === "string") return command;
+  if (Array.isArray(command)) return command.filter((item): item is string => typeof item === "string").join(" ");
+  return "";
 }
 
 function skillNamesFromText(text: string): string[] {
@@ -225,13 +239,6 @@ function skillNamesFromText(text: string): string[] {
     if (match[1]) names.add(match[1]);
   }
   return [...names];
-}
-
-function stringValues(value: unknown): string[] {
-  if (typeof value === "string") return [value];
-  if (Array.isArray(value)) return value.flatMap((item) => stringValues(item));
-  if (!isRecord(value)) return [];
-  return Object.values(value).flatMap((item) => stringValues(item));
 }
 
 function parseMaybeJson(value: unknown): unknown {

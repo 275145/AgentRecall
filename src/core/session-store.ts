@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import * as fs from "node:fs";
 import type { DatabaseSync as DatabaseSyncType, SQLInputValue } from "node:sqlite";
 import {
   skillUsageSnapshotFromEvents,
@@ -243,6 +244,20 @@ export class SessionStore {
 
   setHidden(sessionKey: string, hidden: boolean): void {
     this.db.prepare("UPDATE sessions SET hidden = ? WHERE session_key = ?").run(hidden ? 1 : 0, sessionKey);
+  }
+
+  deleteSession(sessionKey: string): boolean {
+    let deleted = false;
+    this.transaction(() => {
+      const row = this.db.prepare("SELECT file_path FROM sessions WHERE session_key = ?").get(sessionKey) as { file_path: string } | undefined;
+      if (!row) return;
+      this.deleteSessionSourceFile(row.file_path);
+      this.db.prepare("DELETE FROM session_fts WHERE session_key = ?").run(sessionKey);
+      this.db.prepare("DELETE FROM sessions WHERE session_key = ?").run(sessionKey);
+      this.deleteUnusedTags();
+      deleted = true;
+    });
+    return deleted;
   }
 
   markOpened(sessionKey: string): void {
@@ -732,6 +747,19 @@ export class SessionStore {
         "INSERT INTO session_fts (session_key, title, first_question, content_text, project_path) VALUES (?, ?, ?, ?, ?)",
       )
       .run(sessionKey, title, row.first_question, contentText, row.project_path);
+  }
+
+  private deleteSessionSourceFile(filePath: string): void {
+    const normalized = filePath.trim();
+    if (!normalized) throw new Error("Session source file path is missing.");
+    try {
+      const stat = fs.lstatSync(normalized);
+      if (stat.isDirectory()) throw new Error("Refusing to delete a directory as a session file.");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    fs.rmSync(normalized, { force: true });
   }
 
   private deleteUnusedTag(tagName: string): void {

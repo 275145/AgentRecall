@@ -1578,6 +1578,18 @@ select:focus-visible {
   color: var(--text);
 }
 
+.detail-actions button.danger {
+  border-color: var(--danger-soft);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.detail-actions button.danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .detail-actions button.active {
   border-color: var(--border-strong);
   background: var(--panel-hover);
@@ -2853,27 +2865,32 @@ select:focus-visible {
   color: var(--danger);
 }
 
-.delete-skill-dialog {
+.delete-skill-dialog,
+.delete-session-dialog {
   width: min(380px, calc(100vw - 32px));
   padding: 14px;
 }
 
-.delete-skill-dialog .dialog-title {
+.delete-skill-dialog .dialog-title,
+.delete-session-dialog .dialog-title {
   margin-bottom: 8px;
   font-size: 14px;
 }
 
-.delete-skill-dialog .dialog-copy {
+.delete-skill-dialog .dialog-copy,
+.delete-session-dialog .dialog-copy {
   margin: 8px 0 10px;
   font-size: 12.5px;
   line-height: 1.42;
 }
 
-.delete-skill-dialog .dialog-copy.danger-copy {
+.delete-skill-dialog .dialog-copy.danger-copy,
+.delete-session-dialog .dialog-copy.danger-copy {
   margin-top: -4px;
 }
 
-.delete-skill-path {
+.delete-skill-path,
+.delete-session-path {
   overflow: hidden;
   padding: 7px 8px;
   border: 1px solid var(--border-subtle);
@@ -2886,11 +2903,13 @@ select:focus-visible {
   white-space: nowrap;
 }
 
-.delete-skill-dialog .dialog-actions {
+.delete-skill-dialog .dialog-actions,
+.delete-session-dialog .dialog-actions {
   margin-top: 12px;
 }
 
-.delete-skill-dialog .dialog-actions button {
+.delete-skill-dialog .dialog-actions button,
+.delete-session-dialog .dialog-actions button {
   min-width: 68px;
   min-height: 30px;
   padding: 0 11px;

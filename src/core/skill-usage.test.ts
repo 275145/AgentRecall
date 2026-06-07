@@ -73,7 +73,7 @@ describe("skill usage", () => {
         payload: {
           type: "function_call",
           name: "shell_command",
-          arguments: JSON.stringify({ command: "sed -n '1,200p' /Users/me/.codex/skills/brainstorming/SKILL.md" }),
+          arguments: JSON.stringify({ command: "sed -n '1,200p' /tmp/session-search-fixtures/codex/skills/brainstorming/SKILL.md" }),
         },
       }),
       JSON.stringify({
@@ -82,7 +82,16 @@ describe("skill usage", () => {
         payload: {
           type: "function_call",
           name: "read_file",
-          arguments: { path: "/Users/me/.agents/skills/tdd/SKILL.md" },
+          arguments: { path: "/tmp/session-search-fixtures/agents/skills/tdd/SKILL.md" },
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-06-02T10:30:00.000Z",
+        payload: {
+          type: "function_call",
+          name: "apply_patch",
+          arguments: JSON.stringify({ patch: "*** Update File: /tmp/session-search-fixtures/codex/skills/patch-helper/SKILL.md" }),
         },
       }),
       JSON.stringify({
@@ -91,7 +100,7 @@ describe("skill usage", () => {
         payload: {
           type: "function_call",
           name: "shell_command",
-          arguments: JSON.stringify({ command: "cat /Users/me/.codex/skills/brainstorming/SKILL.md" }),
+          arguments: JSON.stringify({ command: "cat /tmp/session-search-fixtures/codex/skills/brainstorming/SKILL.md" }),
         },
       }),
       JSON.stringify({
@@ -110,13 +119,12 @@ describe("skill usage", () => {
     });
 
     expect(snapshot.exists).toBe(true);
-    expect(snapshot.totalEvents).toBe(3);
+    expect(snapshot.totalEvents).toBe(2);
     expect(snapshot.stats).toEqual([
       { skill: "brainstorming", count: 2, lastUsedAt: Date.parse("2026-06-03T10:00:00.000Z") },
-      { skill: "tdd", count: 1, lastUsedAt: Date.parse("2026-06-02T10:00:00.000Z") },
     ]);
-    expect(usageForSkill(snapshot, "TDD")?.count).toBe(1);
-    expect(usageForSkill(snapshot, "TDD", "codex")?.count).toBe(1);
+    expect(usageForSkill(snapshot, "TDD")).toBeNull();
+    expect(usageForSkill(snapshot, "patch-helper")).toBeNull();
     expect(usageForSkill(snapshot, "TDD", "claude")).toBeNull();
 
     fs.rmSync(path.dirname(codexSessionsDir), { recursive: true, force: true });

@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { createInMemoryStore } from "./session-store";
 import { TRACE_DETAIL_PREVIEW_MAX_CHARS } from "./trace-detail";
 import type { SkillUsageEvent, SkillUsageSource } from "./skill-usage";
@@ -427,6 +430,45 @@ describe("SessionStore", () => {
 
     expect(store.searchSessions({ visibility: "favorites" }).map((session) => session.sessionKey)).toEqual(["codex:fav"]);
     expect(store.searchSessions({ visibility: "hidden" }).map((session) => session.sessionKey)).toEqual(["codex:hidden-fav"]);
+  });
+
+  it("hard deletes a session source file and removes indexed data", () => {
+    const store = createInMemoryStore();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-delete-session-"));
+    const filePath = path.join(dir, "rollout.jsonl");
+    fs.writeFileSync(filePath, "{}\n", "utf8");
+    const session = sampleSession({
+      filePath,
+      tokenUsage: {
+        inputTokens: 10,
+        outputTokens: 20,
+        cachedInputTokens: 0,
+        reasoningOutputTokens: 0,
+        totalTokens: 30,
+      },
+    });
+    store.upsertIndexedSession(session, messages);
+    store.addTag("codex:abc", "backend");
+
+    expect(fs.existsSync(filePath)).toBe(true);
+    expect(store.deleteSession("codex:abc")).toBe(true);
+
+    expect(fs.existsSync(filePath)).toBe(false);
+    expect(store.getSession("codex:abc")).toBeNull();
+    expect(store.getMessages("codex:abc")).toEqual([]);
+    expect(store.searchSessions({ query: "" })).toEqual([]);
+    expect(store.searchSessions({ query: "refresh token" })).toEqual([]);
+    expect(store.searchSessions({ visibility: "hidden" })).toEqual([]);
+    expect(store.listTags()).toEqual([]);
+    expect(store.listProjects()).toEqual([]);
+    expect(store.getStats({ period: "allTime" }).total).toMatchObject({
+      sessionCount: 0,
+      messageCount: 0,
+      totalTokens: 0,
+    });
+    expect(store.deleteSession("codex:abc")).toBe(false);
+
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it("does not search tag names from the text search box, but supports explicit tag filtering", () => {

@@ -544,6 +544,7 @@ function registerIpc(): void {
   ipcMain.handle("favorite:set", (_event, sessionKey: string, favorited: boolean) => store.setFavorited(sessionKey, favorited));
   ipcMain.handle("pin:set", (_event, sessionKey: string, pinned: boolean) => store.setPinned(sessionKey, pinned));
   ipcMain.handle("hide:set", (_event, sessionKey: string, hidden: boolean) => store.setHidden(sessionKey, hidden));
+  ipcMain.handle("session:delete", (_event, sessionKey: string) => store.deleteSession(sessionKey));
   ipcMain.handle("index:refresh", () => runIndexSync());
   ipcMain.handle("index:status", () => indexStatus);
   ipcMain.handle("settings:get", () => getHydratedSettings());

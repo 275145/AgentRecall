@@ -286,6 +286,8 @@ export function App(): ReactElement {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dialog, setDialog] = useState<DialogState>(null);
   const [deleteTagName, setDeleteTagName] = useState<string | null>(null);
+  const [deleteSessionCandidate, setDeleteSessionCandidate] = useState<SessionSearchResult | null>(null);
+  const [deletingSession, setDeletingSession] = useState(false);
   const [actionStatus, setActionStatus] = useState<ActionStatus | null>(null);
   const [refreshFeedback, setRefreshFeedback] = useState<RefreshFeedback>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -558,6 +560,7 @@ export function App(): ReactElement {
       // Esc backs out of the frontmost layer, one at a time.
       if (event.key === "Escape") {
         if (dialog) setDialog(null);
+        else if (deleteSessionCandidate && !deletingSession) setDeleteSessionCandidate(null);
         else if (deleteTagName) setDeleteTagName(null);
         else if (contextMenu) setContextMenu(null);
         else if (skillsOpen) setSkillsOpen(false);
@@ -570,7 +573,7 @@ export function App(): ReactElement {
       }
 
       // Leave list navigation alone while an overlay or menu is in front.
-      if (detail || dialog || deleteTagName || contextMenu || skillsOpen || apiConfigOpen || settingsOpen) return;
+      if (detail || dialog || deleteSessionCandidate || deleteTagName || contextMenu || skillsOpen || apiConfigOpen || settingsOpen) return;
 
       if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
         event.preventDefault();
@@ -610,7 +613,7 @@ export function App(): ReactElement {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [displayedResults, selectedKey, detail, dialog, deleteTagName, contextMenu, skillsOpen, apiConfigOpen, settingsOpen, actionStatus, t]);
+  }, [displayedResults, selectedKey, detail, dialog, deleteSessionCandidate, deletingSession, deleteTagName, contextMenu, skillsOpen, apiConfigOpen, settingsOpen, actionStatus, t]);
 
   useEffect(() => {
     if (!selectedKey) return;
@@ -741,6 +744,39 @@ export function App(): ReactElement {
     if (detail) {
       const fresh = await window.sessionSearch.getSession(detail.sessionKey);
       if (fresh) setDetail(fresh);
+    }
+  }
+
+  function requestDeleteSession(session: SessionSearchResult): void {
+    setContextMenu(null);
+    setDeleteSessionCandidate(session);
+  }
+
+  async function confirmDeleteSession(): Promise<void> {
+    if (!deleteSessionCandidate || deletingSession) return;
+    const session = deleteSessionCandidate;
+    setDeletingSession(true);
+    setActionStatus({ kind: "running", message: t("Deleting session...", "正在删除会话...") });
+    try {
+      const removed = await window.sessionSearch.deleteSession(session.sessionKey);
+      setDeleteSessionCandidate(null);
+      if (removed) {
+        if (detail?.sessionKey === session.sessionKey) closeDetail();
+        setSelectedKey((current) => (current === session.sessionKey ? null : current));
+        await load();
+        const message = t("Session file deleted.", "会话文件已删除。");
+        setActionStatus({ kind: "success", message });
+        window.setTimeout(() => {
+          setActionStatus((current) => (current?.kind === "success" && current.message === message ? null : current));
+        }, 1800);
+      } else {
+        setActionStatus({ kind: "error", message: t("Session was already deleted.", "会话已经被删除。") });
+        await load();
+      }
+    } catch (error) {
+      setActionStatus({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setDeletingSession(false);
     }
   }
 
@@ -1244,6 +1280,7 @@ export function App(): ReactElement {
           onCopyPlain={() =>
             void runAction(t("Copying plain text", "正在复制纯文本"), () => window.sessionSearch.copyPlainText(detail.sessionKey), t("Plain text copied.", "纯文本已复制。"))
           }
+          onDelete={() => requestDeleteSession(detail)}
           onReveal={() =>
             void runAction(
               `Opening ${FILE_MANAGER_LABEL}`,
@@ -1295,6 +1332,7 @@ export function App(): ReactElement {
             void runAction(t("Copying markdown", "正在复制 Markdown"), () => window.sessionSearch.copyMarkdown(contextMenu.session.sessionKey), t("Markdown copied.", "Markdown 已复制。"))
           }
           onExportMarkdown={() => void exportMarkdown(contextMenu.session.sessionKey)}
+          onDelete={() => requestDeleteSession(contextMenu.session)}
           onReveal={() =>
             void runAction(
               `Opening ${FILE_MANAGER_LABEL}`,
@@ -1324,6 +1362,18 @@ export function App(): ReactElement {
           language={language}
           onConfirm={() => void deleteTagGlobally(deleteTagName)}
           onCancel={() => setDeleteTagName(null)}
+        />
+      ) : null}
+
+      {deleteSessionCandidate ? (
+        <DeleteSessionDialog
+          session={deleteSessionCandidate}
+          language={language}
+          deleting={deletingSession}
+          onConfirm={() => void confirmDeleteSession()}
+          onCancel={() => {
+            if (!deletingSession) setDeleteSessionCandidate(null);
+          }}
         />
       ) : null}
 
@@ -1995,6 +2045,7 @@ function DetailPanel({
   onCopyMarkdown,
   onExportMarkdown,
   onCopyPlain,
+  onDelete,
   onReveal,
 }: {
   session: SessionSearchResult;
@@ -2020,6 +2071,7 @@ function DetailPanel({
   onCopyMarkdown: () => void;
   onExportMarkdown: () => void;
   onCopyPlain: () => void;
+  onDelete: () => void;
   onReveal: () => void;
 }): ReactElement {
   const matchIndex = query
@@ -2131,6 +2183,9 @@ function DetailPanel({
           <Download size={15} /> {l("Export MD", "导出 MD")}
         </button>
         <button onClick={onCopyPlain} disabled={actionRunning}>{l("Plain Text", "纯文本")}</button>
+        <button className="danger" onClick={onDelete} disabled={actionRunning}>
+          <Trash2 size={15} /> {l("Delete", "删除")}
+        </button>
         <button onClick={onReveal} disabled={actionRunning}>
           <FolderOpen size={15} /> {revealLabel}
         </button>
@@ -2252,6 +2307,7 @@ function ContextMenu({
   onCopyResume,
   onCopyMarkdown,
   onExportMarkdown,
+  onDelete,
   onReveal,
 }: {
   state: ContextMenuState;
@@ -2269,6 +2325,7 @@ function ContextMenu({
   onCopyResume: () => void;
   onCopyMarkdown: () => void;
   onExportMarkdown: () => void;
+  onDelete: () => void;
   onReveal: () => void;
 }): ReactElement {
   const l = (en: string, zh: string) => localize(language, en, zh);
@@ -2311,6 +2368,10 @@ function ContextMenu({
       </button>
       <button onClick={onReveal}>
         <FolderOpen size={14} /> Show in {revealLabel}
+      </button>
+      <hr />
+      <button className="danger" onClick={onDelete}>
+        <Trash2 size={14} /> {l("Delete Session", "删除会话")}
       </button>
     </div>
   );
@@ -3072,6 +3133,54 @@ function DeleteTagDialog({
           </button>
           <button type="button" className="danger-action" onClick={onConfirm}>
             {l("Delete", "删除")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeleteSessionDialog({
+  session,
+  language,
+  deleting,
+  onConfirm,
+  onCancel,
+}: {
+  session: SessionSearchResult;
+  language: LanguageMode;
+  deleting: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}): ReactElement {
+  const l = (en: string, zh: string) => localize(language, en, zh);
+  return (
+    <div className="dialog-backdrop" onMouseDown={onCancel}>
+      <div className="command-dialog delete-session-dialog" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="dialog-title">
+          <span>{l("Delete Session", "删除会话")}</span>
+          <button type="button" className="icon-button" onClick={onCancel} disabled={deleting} aria-label={l("Close", "关闭")}>
+            <X size={16} />
+          </button>
+        </div>
+        <p className="dialog-copy">
+          {l("Delete", "删除")} <strong>{session.displayTitle}</strong>{l(" permanently?", "？")}
+        </p>
+        <p className="dialog-copy danger-copy">
+          {l(
+            "This deletes the original Codex or Claude Code session file and removes it from this app. This cannot be undone.",
+            "这会删除 Codex 或 Claude Code 的原始会话文件，并从本应用移除，无法撤销。",
+          )}
+        </p>
+        <div className="delete-session-path" title={session.filePath}>
+          {session.filePath}
+        </div>
+        <div className="dialog-actions">
+          <button type="button" onClick={onCancel} disabled={deleting}>
+            {l("Cancel", "取消")}
+          </button>
+          <button type="button" className="danger-action" onClick={onConfirm} disabled={deleting}>
+            {deleting ? l("Deleting...", "正在删除...") : l("Delete Permanently", "永久删除")}
           </button>
         </div>
       </div>
