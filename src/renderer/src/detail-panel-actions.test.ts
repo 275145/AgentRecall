@@ -3,8 +3,17 @@ import { describe, expect, it } from "vitest";
 
 const appSource = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const detailPanelSource = readFileSync(new URL("./components/detail-panel.tsx", import.meta.url), "utf8");
+const sessionUiSource = readFileSync(new URL("./session-ui.ts", import.meta.url), "utf8");
 const preloadSource = readFileSync(new URL("../../preload/index.ts", import.meta.url), "utf8");
 const mainSource = readFileSync(new URL("../../main/index.ts", import.meta.url), "utf8");
+
+function mainHandlerSource(channel: string): string {
+  const marker = `ipcMain.handle("${channel}"`;
+  const start = mainSource.indexOf(marker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const next = mainSource.indexOf('  ipcMain.handle("', start + marker.length);
+  return mainSource.slice(start, next === -1 ? mainSource.length : next);
+}
 
 describe("detail panel actions", () => {
   it("keeps resume routed and removes standalone terminal focus from the detail panel", () => {
@@ -61,5 +70,73 @@ describe("detail panel actions", () => {
     expect(detailPanelSource).toContain("<Edit3 size={14} />");
     expect(detailActions).not.toContain("Clipboard size={15}");
     expect(detailActions).not.toContain('l("Rename", "重命名")');
+  });
+
+  it("exposes remote environment management IPC through preload and main", () => {
+    for (const channel of [
+      "environments:list",
+      "ssh-config:list-hosts",
+      "environment:save",
+      "environment:delete",
+      "environment:refresh",
+      "environments-updated",
+    ]) {
+      expect(preloadSource).toContain(channel);
+      expect(mainSource).toContain(channel);
+    }
+    expect(preloadSource).toContain("listEnvironments");
+    expect(preloadSource).toContain("listSshConfigHosts");
+    expect(preloadSource).toContain("saveEnvironment");
+    expect(preloadSource).toContain("deleteEnvironment");
+    expect(preloadSource).toContain("refreshEnvironment");
+    expect(preloadSource).toContain("onEnvironmentsUpdated");
+  });
+
+  it("marks local-only detail actions disabled for remote sessions", () => {
+    const detailPanel = detailPanelSource;
+
+    expect(detailPanel).toContain("isRemoteSession(session)");
+    expect(sessionUiSource).toContain("remote paths cannot be revealed locally");
+    expect(detailPanel).toContain("disabled={actionRunning || localOnlyDisabled}");
+    expect(detailPanel).toContain("environment-badge");
+  });
+
+  it("marks local-only context menu actions disabled for remote sessions", () => {
+    const contextMenu = appSource.slice(appSource.indexOf("function ContextMenu"), appSource.indexOf("function SettingsDialog"));
+
+    expect(contextMenu).toContain("isRemoteSession(state.session)");
+    expect(sessionUiSource).toContain("remote sessions do not open local native apps");
+    expect(sessionUiSource).toContain("remote paths cannot be revealed locally");
+    expect(contextMenu).toContain("disabled={localOnlyDisabled}");
+  });
+
+  it("guards local-only commands and passes ssh args in main command handlers", () => {
+    expect(mainSource).toContain("function sshArgsForSession");
+    expect(mainSource).toContain("buildSshArgs(environment, \"\")");
+    expect(mainSource).toContain("getResumeCommand(session, getSettings(), { sshArgs: requireSshArgsForRemoteSession(session) })");
+    expect(mainSource).toContain("throw new Error(\"SSH environment is not available for this remote session.\")");
+    expect(mainSource).toContain("openResumeInTerminal(session, getSettings(), { sshArgs })");
+    expect(mainSource).toContain("openResumeInSpecificTerminal(session, getSettings(), \"iTerm\", { sshArgs })");
+    expect(mainSource).toContain("if (!isLocalSession(session)) return false");
+    expect(mainSource).toContain("if (!isLocalSession(session)) {");
+    expect(mainSource).toContain("return { route: \"resume\" as const };");
+  });
+
+  it("loads remote session details on demand before returning messages, trace events, or exports", () => {
+    expect(mainSource).toContain("ensureRemoteSessionDetailsLoaded");
+    expect(mainSource).toContain("fetchRemoteSessionFilePayload");
+    expect(mainSource).toContain("loadRemoteSessionDetailPayload");
+    expect(mainSource).toContain("await ensureRemoteSessionDetailsLoaded(sessionKey)");
+  });
+
+  it("loads remote session details before building resume commands", () => {
+    for (const channel of ["command:copy-resume", "command:resume", "command:resume-iterm"]) {
+      const handler = mainHandlerSource(channel);
+      expect(handler).toContain("await ensureRemoteSessionDetailsLoaded(sessionKey)");
+      expect(handler.indexOf("await ensureRemoteSessionDetailsLoaded(sessionKey)")).toBeLessThan(
+        handler.indexOf("const session = store.getSession(sessionKey)"),
+      );
+    }
+    expect(mainHandlerSource("command:copy-resume")).toContain("async (_event, sessionKey: string)");
   });
 });

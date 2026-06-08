@@ -49,4 +49,30 @@ describe("stylesheet theme contract", () => {
     expect(apiField).toMatch(/grid-template-columns:\s*minmax\(140px,\s*180px\)\s+minmax\(0,\s*1fr\)/);
     expect(apiInput).toMatch(/width:\s*100%/);
   });
+
+  it("keeps the SSH dialog viewport-bound with scrollable content", () => {
+    const sshDialog = stylesheet.match(/\.ssh-dialog\s*\{[^}]*\}/)?.[0] ?? "";
+    const sshBody = stylesheet.match(/\.ssh-dialog-body\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(sshDialog).toMatch(/height:\s*min\([^;]*100vh/);
+    expect(sshBody).toMatch(/overflow-y:\s*auto/);
+  });
+
+  it("keeps SSH config selection calm without a hard active border or selection shadow", () => {
+    const sshConfigRow = stylesheet.match(/\.ssh-config-row\s*\{[^}]*\}/)?.[0] ?? "";
+    const activeRow = stylesheet.match(/\.ssh-config-row\.active\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(sshConfigRow).toMatch(/transition:\s*none/);
+    expect(activeRow).not.toMatch(/border-color:\s*var\(--accent-line\)/);
+    expect(activeRow).not.toMatch(/box-shadow/);
+  });
+
+  it("uses a custom SSH checkbox instead of the native focus halo", () => {
+    const sshCheck = stylesheet.match(/\.ssh-check\s*\{[^}]*\}/)?.[0] ?? "";
+    const checked = stylesheet.match(/\.ssh-check:checked\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(sshCheck).toMatch(/appearance:\s*none/);
+    expect(sshCheck).toMatch(/outline:\s*0/);
+    expect(checked).toMatch(/background:\s*var\(--accent\)/);
+  });
 });

@@ -1,13 +1,22 @@
 import { useEffect, useMemo, useRef } from "react";
 import type { ReactElement } from "react";
-import { Copy, Download, Edit3, FolderOpen, Play, Star, Tag, Terminal as TerminalIcon, Trash2, X } from "lucide-react";
+import { Copy, Download, Edit3, FolderOpen, Laptop, Play, Server, Star, Tag, Terminal as TerminalIcon, Trash2, X } from "lucide-react";
 import { formatMessageTime } from "../../../core/format-session";
 import type { SessionMessage, SessionSearchResult, SessionTraceEvent } from "../../../core/types";
 import { formatTokenCount } from "../format-count";
 import { localize, type LanguageMode } from "../language";
 import type { LiveSessionState } from "../live-filter";
 import type { ActionStatus } from "../app-types";
-import { isBranchTag, localizedLiveStateLabel, SOURCE_LABEL, sourceUiFamily } from "../session-ui";
+import {
+  environmentBadgeLabel,
+  environmentBadgeTitle,
+  isBranchTag,
+  isRemoteSession,
+  localizedLiveStateLabel,
+  remoteRevealTitle,
+  SOURCE_LABEL,
+  sourceUiFamily,
+} from "../session-ui";
 
 type ConversationTimelineItem =
   | { kind: "message"; key: string; timestampMs: number | null; order: number; message: SessionMessage }
@@ -121,6 +130,8 @@ export function DetailPanel({
   const l = (en: string, zh: string) => localize(language, en, zh);
   const bodyRef = useRef<HTMLDivElement>(null);
   const timelineItems = useMemo(() => conversationTimeline(messages, traceEvents), [messages, traceEvents]);
+  const localOnlyDisabled = isRemoteSession(session);
+  const revealTitle = localOnlyDisabled ? remoteRevealTitle(language) : l(`Show in ${revealLabel}`, `在${revealLabel}中显示`);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -172,6 +183,10 @@ export function DetailPanel({
                 <span className="live-status-dot" />
                 {localizedLiveStateLabel(liveState, language)}
               </span>
+              <span className={`environment-badge ${session.environmentKind}`} title={environmentBadgeTitle(session, language)}>
+                {isRemoteSession(session) ? <Server size={13} /> : <Laptop size={13} />}
+                {environmentBadgeLabel(session, language)}
+              </span>
             </div>
             <div className="detail-title-row">
               <h2>{session.displayTitle}</h2>
@@ -222,7 +237,7 @@ export function DetailPanel({
           <button className="danger" onClick={onDelete} disabled={actionRunning}>
             <Trash2 size={15} /> {l("Delete", "删除")}
           </button>
-          <button onClick={onReveal} disabled={actionRunning}>
+          <button onClick={onReveal} disabled={actionRunning || localOnlyDisabled} title={revealTitle}>
             <FolderOpen size={15} /> {revealLabel}
           </button>
         </div>

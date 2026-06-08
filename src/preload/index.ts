@@ -7,10 +7,13 @@ import type { IndexStatus } from "../core/indexer";
 import type { ResumeRouteResult } from "../core/resume-router";
 import type { DeleteInstalledSkillResult, InstalledSkillsSnapshot } from "../core/skill-manager";
 import type { SkillUsageRefreshStatus } from "../core/skill-usage";
+import type { SshConfigHost } from "../core/ssh-config";
 import type {
+  EnvironmentUpsertInput,
   LiveSessionSnapshot,
   ProjectSummary,
   SearchOptions,
+  SessionEnvironment,
   SessionMessage,
   SessionSearchResult,
   SessionStats,
@@ -31,6 +34,12 @@ const api = {
   getQuotas: (): Promise<UsageQuotaSnapshot> => ipcRenderer.invoke("quota:get"),
   listTags: (): Promise<string[]> => ipcRenderer.invoke("tags:list"),
   listProjects: (): Promise<ProjectSummary[]> => ipcRenderer.invoke("projects:list"),
+  listEnvironments: (): Promise<SessionEnvironment[]> => ipcRenderer.invoke("environments:list"),
+  listSshConfigHosts: (): Promise<SshConfigHost[]> => ipcRenderer.invoke("ssh-config:list-hosts"),
+  saveEnvironment: (environment: EnvironmentUpsertInput): Promise<SessionEnvironment> =>
+    ipcRenderer.invoke("environment:save", environment),
+  deleteEnvironment: (environmentId: string): Promise<void> => ipcRenderer.invoke("environment:delete", environmentId),
+  refreshEnvironment: (environmentId: string): Promise<void> => ipcRenderer.invoke("environment:refresh", environmentId),
   setCustomTitle: (sessionKey: string, title: string | null): Promise<void> => ipcRenderer.invoke("title:set", sessionKey, title),
   addTag: (sessionKey: string, tagName: string): Promise<void> => ipcRenderer.invoke("tag:add", sessionKey, tagName),
   removeTag: (sessionKey: string, tagName: string): Promise<void> => ipcRenderer.invoke("tag:remove", sessionKey, tagName),
@@ -67,6 +76,11 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, status: IndexStatus) => callback(status);
     ipcRenderer.on("index-status", listener);
     return () => ipcRenderer.removeListener("index-status", listener);
+  },
+  onEnvironmentsUpdated: (callback: (environments: SessionEnvironment[]) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, environments: SessionEnvironment[]) => callback(environments);
+    ipcRenderer.on("environments-updated", listener);
+    return () => ipcRenderer.removeListener("environments-updated", listener);
   },
   onFocusSearch: (callback: () => void): (() => void) => {
     const listener = () => callback();

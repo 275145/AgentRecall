@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mergeApiConfigWithProfileDefaults, mergeClaudeApiConfigWithProfileDefaults } from "./api-config";
 import {
   buildGhosttyOpenArgs,
+  buildWindowsResumeLaunchPlan,
   buildWindowsLaunchPlan,
   defaultApiConfig,
   defaultClaudeApiConfig,
@@ -64,6 +65,18 @@ describe("resume commands", () => {
     );
   });
 
+  it("keeps local Windows non-ssh quoting unchanged for cmd metacharacters", () => {
+    const session = {
+      source: "claude-cli",
+      rawId: "abc",
+      projectPath: "C:\\repo %USERNAME% & tools",
+    } as SessionSearchResult;
+
+    expect(getResumeCommand(session, defaultSettings, { platform: "win32" })).toBe(
+      'cd /d "C:\\repo %USERNAME% & tools" && claude --resume abc',
+    );
+  });
+
   it("omits the cd prefix when withCwd is false", () => {
     const session = {
       source: "claude-cli",
@@ -74,6 +87,97 @@ describe("resume commands", () => {
     expect(getResumeCommand(session, defaultSettings, { platform: "win32", withCwd: false })).toBe(
       "claude --resume abc",
     );
+  });
+
+  it("wraps a remote Codex resume command in ssh with a POSIX remote cd", () => {
+    const session = {
+      source: "codex-cli",
+      rawId: "codex-1",
+      projectPath: "/repo with spaces",
+    } as SessionSearchResult;
+
+    expect(getResumeCommand(session, defaultSettings, { platform: "darwin", sshTarget: "dev@example.com" })).toBe(
+      "ssh -- 'dev@example.com' 'cd '\\''/repo with spaces'\\'' && codex resume codex-1'",
+    );
+  });
+
+  it("honors Claude skip permissions inside remote ssh resume commands", () => {
+    const session = {
+      source: "claude-cli",
+      rawId: "claude-1",
+      projectPath: "/repo",
+    } as SessionSearchResult;
+
+    expect(
+      getResumeCommand(session, defaultSettings, {
+        platform: "darwin",
+        skipPermissions: true,
+        sshTarget: "dev.example.com",
+      }),
+    ).toBe("ssh -- dev.example.com 'cd /repo && claude --resume claude-1 --dangerously-skip-permissions'");
+  });
+
+  it("quotes unsafe remote resume arguments as single shell tokens", () => {
+    const session = {
+      source: "codex-cli",
+      rawId: "codex 1; rm -rf /",
+      projectPath: "/repo",
+    } as SessionSearchResult;
+
+    expect(getResumeCommand(session, defaultSettings, { platform: "darwin", sshTarget: "dev.example.com" })).toBe(
+      "ssh -- dev.example.com 'cd /repo && codex resume '\\''codex 1; rm -rf /'\\'''",
+    );
+  });
+
+  it("uses POSIX remote cd for ssh resume commands even when displaying for Windows", () => {
+    const session = {
+      source: "codex-cli",
+      rawId: "codex-1",
+      projectPath: "/repo with spaces",
+    } as SessionSearchResult;
+
+    const command = getResumeCommand(session, defaultSettings, {
+      platform: "win32",
+      sshTarget: "dev@example.com",
+    });
+
+    expect(command).toBe('ssh -- "dev@example.com" "cd \'/repo with spaces\' ^&^& codex resume codex-1"');
+    expect(command).not.toContain("ssh -- 'dev@example.com'");
+    expect(command).not.toContain("cd /d");
+  });
+
+  it("renders manual ssh args before the separator in copyable display commands", () => {
+    const session = {
+      source: "codex-cli",
+      rawId: "codex-1",
+      projectPath: "/repo",
+    } as SessionSearchResult;
+
+    expect(
+      getResumeCommand(session, defaultSettings, {
+        platform: "darwin",
+        sshArgs: ["-i", "/keys/dev key", "-p", "2222", "--", "alice@example.com"],
+      }),
+    ).toBe("ssh -i '/keys/dev key' -p 2222 -- 'alice@example.com' 'cd /repo && codex resume codex-1'");
+  });
+
+  it("escapes Windows ssh display arguments for cmd without changing remote POSIX text", () => {
+    const session = {
+      source: "codex-cli",
+      rawId: "codex %USERNAME% $HOME",
+      projectPath: "/repo %USERNAME% $HOME",
+    } as SessionSearchResult;
+
+    const command = getResumeCommand(session, defaultSettings, {
+      platform: "win32",
+      sshTarget: "dev@example.com",
+    });
+
+    expect(command).toBe(
+      'ssh -- "dev@example.com" "cd \'/repo ^%USERNAME^% $HOME\' ^&^& codex resume \'codex ^%USERNAME^% $HOME\'"',
+    );
+    expect(command).not.toContain("%USERNAME%");
+    expect(command).toContain("$HOME");
   });
 });
 
@@ -271,6 +375,69 @@ describe("buildWindowsLaunchPlan", () => {
   });
 });
 
+describe("resume terminal launch plans", () => {
+  it("keeps local Windows resume launches rooted in the local project path", () => {
+    const session = {
+      source: "codex-cli",
+      rawId: "codex-1",
+      projectPath: process.cwd(),
+    } as SessionSearchResult;
+
+    const plan = buildWindowsResumeLaunchPlan(session, defaultSettings, {
+      terminal: "WindowsTerminal",
+      platform: "win32",
+    });
+
+    expect(plan[0].args).toEqual(["-d", process.cwd(), "cmd.exe", "/d", "/k", "codex resume codex-1"]);
+    expect(plan[1].cwd).toBe(process.cwd());
+  });
+
+  it("does not use the remote project path as a local Windows terminal cwd", () => {
+    const session = {
+      source: "codex-cli",
+      rawId: "codex-1",
+      projectPath: "/remote repo",
+    } as SessionSearchResult;
+
+    const plan = buildWindowsResumeLaunchPlan(session, defaultSettings, {
+      terminal: "WindowsTerminal",
+      platform: "win32",
+      sshArgs: ["-i", "/keys/dev key", "-p", "2222", "--", "alice@example.com"],
+    });
+
+    expect(plan[0].args).toEqual([
+      "cmd.exe",
+      "/d",
+      "/k",
+      'ssh -i "/keys/dev key" -p "2222" -- "alice@example.com" "cd \'/remote repo\' ^&^& codex resume codex-1"',
+    ]);
+    expect(plan.map((launch) => launch.cwd)).toEqual([undefined, undefined, undefined, undefined]);
+  });
+
+  it("uses a PowerShell-safe remote resume command without cmd caret escapes", () => {
+    const session = {
+      source: "codex-cli",
+      rawId: "codex-1",
+      projectPath: "/remote repo",
+    } as SessionSearchResult;
+
+    const plan = buildWindowsResumeLaunchPlan(session, defaultSettings, {
+      terminal: "WindowsTerminal",
+      platform: "win32",
+      sshArgs: ["-i", "/keys/dev key", "-p", "2222", "--", "alice@example.com"],
+    });
+    const pwshCommand = plan.find((launch) => launch.file === "pwsh.exe")?.args.at(-1);
+    const powershellCommand = plan.find((launch) => launch.file === "powershell.exe")?.args.at(-1);
+
+    expect(pwshCommand).toBe(
+      "ssh -i '/keys/dev key' -p 2222 -- 'alice@example.com' 'cd ''/remote repo'' && codex resume codex-1'",
+    );
+    expect(pwshCommand).not.toContain("^&^&");
+    expect(pwshCommand).toContain("cd ''/remote repo'' && codex resume codex-1");
+    expect(powershellCommand).toBe(pwshCommand);
+  });
+});
+
 describe("resume process specs", () => {
   it("builds Codex resume as binary args with cwd instead of shell text", () => {
     const session = {
@@ -299,5 +466,59 @@ describe("resume process specs", () => {
       args: ["--resume", "claude-1"],
       cwd: "/repo",
     });
+  });
+
+  it("builds remote resume as ssh argv without a local cwd", () => {
+    const session = {
+      source: "codex-cli",
+      rawId: "codex-1",
+      projectPath: "/repo with spaces",
+    } as SessionSearchResult;
+
+    expect(getResumeProcessSpec(session, defaultSettings, { platform: "darwin", sshTarget: "dev@example.com" })).toEqual(
+      {
+        command: "ssh",
+        args: ["--", "dev@example.com", "cd '/repo with spaces' && codex resume codex-1"],
+        cwd: undefined,
+        displayCommand: "ssh -- 'dev@example.com' 'cd '\\''/repo with spaces'\\'' && codex resume codex-1'",
+      },
+    );
+  });
+
+  it("preserves manual ssh args separately in remote process specs", () => {
+    const session = {
+      source: "codex-cli",
+      rawId: "codex-1",
+      projectPath: "/repo",
+    } as SessionSearchResult;
+
+    expect(
+      getResumeProcessSpec(session, defaultSettings, {
+        platform: "darwin",
+        sshArgs: ["-i", "/keys/dev key", "-p", "2222", "--", "alice@example.com"],
+      }),
+    ).toEqual({
+      command: "ssh",
+      args: ["-i", "/keys/dev key", "-p", "2222", "--", "alice@example.com", "cd /repo && codex resume codex-1"],
+      cwd: undefined,
+      displayCommand: "ssh -i '/keys/dev key' -p 2222 -- 'alice@example.com' 'cd /repo && codex resume codex-1'",
+    });
+  });
+
+  it("quotes unsafe remote process spec arguments in the ssh inner command", () => {
+    const session = {
+      source: "codex-cli",
+      rawId: "codex 1; rm -rf /",
+      projectPath: "/repo",
+    } as SessionSearchResult;
+
+    expect(getResumeProcessSpec(session, defaultSettings, { platform: "darwin", sshTarget: "dev.example.com" })).toEqual(
+      {
+        command: "ssh",
+        args: ["--", "dev.example.com", "cd /repo && codex resume 'codex 1; rm -rf /'"],
+        cwd: undefined,
+        displayCommand: "ssh -- dev.example.com 'cd /repo && codex resume '\\''codex 1; rm -rf /'\\'''",
+      },
+    );
   });
 });

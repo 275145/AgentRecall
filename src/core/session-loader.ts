@@ -30,6 +30,11 @@ export interface SessionLoadOptions {
   includeCodeBuddyCli?: boolean;
 }
 
+export interface VirtualSessionFileStat {
+  mtimeMs: number;
+  size: number;
+}
+
 function emptyTokenUsage(): TokenUsage {
   return {
     inputTokens: 0,
@@ -40,41 +45,57 @@ function emptyTokenUsage(): TokenUsage {
   };
 }
 
-export function parseCodexSessionMetaLine(parsed: CodexConversationLine): {
+export function parseCodexSessionMetaLine(parsed: unknown): {
   id: string;
   projectPath: string;
   ts: number;
   gitBranch?: string;
   originator?: string;
 } | null {
-  if (parsed.type === "session_meta" && parsed.payload?.id) {
+  if (!parsed || typeof parsed !== "object") return null;
+
+  const line = parsed as CodexConversationLine;
+  if (line.type === "session_meta" && line.payload?.id) {
     return {
-      id: parsed.payload.id,
-      projectPath: parsed.payload.cwd || "",
-      ts: parsed.timestamp ? new Date(parsed.timestamp).getTime() : 0,
-      gitBranch: parsed.payload.git?.branch,
-      originator: parsed.payload.originator,
+      id: line.payload.id,
+      projectPath: line.payload.cwd || "",
+      ts: line.timestamp ? new Date(line.timestamp).getTime() : 0,
+      gitBranch: line.payload.git?.branch,
+      originator: line.payload.originator,
     };
   }
 
-  if (parsed.id && parsed.timestamp && !parsed.type) {
+  if (line.id && line.timestamp && !line.type) {
     return {
-      id: parsed.id,
-      projectPath: parsed.git?.cwd || "",
-      ts: new Date(parsed.timestamp).getTime(),
+      id: line.id,
+      projectPath: line.git?.cwd || "",
+      ts: new Date(line.timestamp).getTime(),
     };
   }
 
   return null;
 }
 
-function safeStat(filePath: string): { mtimeMs: number; size: number } {
+function safeStat(filePath: string): VirtualSessionFileStat {
   try {
     const stat = fs.statSync(filePath);
     return { mtimeMs: stat.mtimeMs, size: stat.size };
   } catch {
     return { mtimeMs: 0, size: 0 };
   }
+}
+
+export function parseJsonlText(content: string): unknown[] {
+  const rows: unknown[] = [];
+  for (const line of content.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      rows.push(JSON.parse(line));
+    } catch {
+      // Keep parsing the rest of the JSONL text.
+    }
+  }
+  return rows;
 }
 
 function readJsonl(filePath: string): unknown[] {
@@ -85,16 +106,7 @@ function readJsonl(filePath: string): unknown[] {
     return [];
   }
 
-  const rows: unknown[] = [];
-  for (const line of content.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      rows.push(JSON.parse(line));
-    } catch {
-      // Keep parsing the rest of the JSONL file.
-    }
-  }
-  return rows;
+  return parseJsonlText(content);
 }
 
 function extractMessages(rows: unknown[], format: SessionFormat): SessionMessage[] {
@@ -595,8 +607,9 @@ function createIndexedSession(input: {
   prNumber?: number | null;
   gitBranch?: string | null;
   tokenUsage?: TokenUsage;
+  stat?: VirtualSessionFileStat;
 }): IndexedSession {
-  const stat = safeStat(input.filePath);
+  const stat = input.stat ?? safeStat(input.filePath);
   return {
     sessionKey: `${input.keyPrefix}:${input.rawId}`,
     rawId: input.rawId,
@@ -647,8 +660,11 @@ function firstCodeBuddyAiTitle(rows: unknown[]): string {
   return "";
 }
 
-export function loadCodexSessionFile(filePath: string, title?: string, updatedAt?: string): LoadedSession | null {
-  const rows = readJsonl(filePath);
+export function loadCodexSessionRows(
+  filePath: string,
+  rows: unknown[],
+  options: { title?: string; updatedAt?: string; sourceOverride?: SessionSource; stat?: VirtualSessionFileStat } = {},
+): LoadedSession | null {
   if (rows.length === 0) return null;
 
   const meta = parseCodexSessionMetaLine(rows[0] as CodexConversationLine);
@@ -659,21 +675,26 @@ export function loadCodexSessionFile(filePath: string, title?: string, updatedAt
   const traceEvents = extractTraceEvents(rows, "codex");
   const tokenUsage = tokenUsageFromEvents(tokenEvents);
   const question = firstQuestion(messages);
-  const source: SessionSource = meta.originator === CODEX_APP_ORIGINATOR ? "codex-app" : "codex-cli";
+  const source: SessionSource = options.sourceOverride || (meta.originator === CODEX_APP_ORIGINATOR ? "codex-app" : "codex-cli");
   const session = createIndexedSession({
-    keyPrefix: "codex",
+    keyPrefix: source === "codex-internal" ? "codex-internal" : "codex",
     rawId: meta.id,
     source,
     projectPath: meta.projectPath,
     filePath,
-    originalTitle: title || cleanTitle(question) || "Untitled Session",
+    originalTitle: options.title || cleanTitle(question) || "Untitled Session",
     firstQuestion: question ? cleanTitle(question) : "",
-    timestamp: updatedAt ? new Date(updatedAt).getTime() : meta.ts,
+    timestamp: options.updatedAt ? new Date(options.updatedAt).getTime() : meta.ts,
     gitBranch: meta.gitBranch,
     tokenUsage,
+    stat: options.stat,
   });
 
   return { session, messages, tokenEvents, traceEvents };
+}
+
+export function loadCodexSessionFile(filePath: string, title?: string, updatedAt?: string): LoadedSession | null {
+  return loadCodexSessionRows(filePath, readJsonl(filePath), { title, updatedAt });
 }
 
 function walkJsonlFiles(dir: string): string[] {
@@ -714,29 +735,12 @@ export function* loadCodexSessionsIterator(codexDir = path.join(os.homedir(), ".
     const meta = rows.length > 0 ? parseCodexSessionMetaLine(rows[0] as CodexConversationLine) : null;
     if (!meta) continue;
     const indexedTitle = titleMap.get(meta.id);
-    const messages = extractMessages(rows, "codex");
-    const tokenEvents = extractCodexTokenEvents(rows);
-    const traceEvents = extractTraceEvents(rows, "codex");
-    const tokenUsage = tokenUsageFromEvents(tokenEvents);
-    const question = firstQuestion(messages);
-    const source: SessionSource = sourceOverride || (meta.originator === CODEX_APP_ORIGINATOR ? "codex-app" : "codex-cli");
-    yield {
-      session: createIndexedSession({
-        keyPrefix: source === "codex-internal" ? "codex-internal" : "codex",
-        rawId: meta.id,
-        source,
-        projectPath: meta.projectPath,
-        filePath,
-        originalTitle: indexedTitle?.title || cleanTitle(question) || "Untitled Session",
-        firstQuestion: question ? cleanTitle(question) : "",
-        timestamp: indexedTitle?.updatedAt ? new Date(indexedTitle.updatedAt).getTime() : meta.ts,
-        gitBranch: meta.gitBranch,
-        tokenUsage,
-      }),
-      messages,
-      tokenEvents,
-      traceEvents,
-    };
+    const loaded = loadCodexSessionRows(filePath, rows, {
+      title: indexedTitle?.title,
+      updatedAt: indexedTitle?.updatedAt,
+      sourceOverride,
+    });
+    if (loaded) yield loaded;
   }
 }
 
@@ -746,6 +750,39 @@ function encodeClaudeProjectDir(cwd: string): string {
 
 function loadClaudeMessages(filePath: string): SessionMessage[] {
   return extractMessages(readJsonl(filePath), "claude");
+}
+
+export function loadClaudeCliSessionRows(
+  filePath: string,
+  rows: unknown[],
+  options: { rawId?: string; cwd?: string; startedAt?: number; source?: SessionSource; stat?: VirtualSessionFileStat } = {},
+): LoadedSession | null {
+  const rawId = options.rawId || path.basename(filePath, ".jsonl");
+  const messages = extractMessages(rows, "claude");
+  const tokenEvents = extractClaudeTokenEvents(rows);
+  const traceEvents = extractTraceEvents(rows, "claude");
+  const tokenUsage = tokenUsageFromEvents(tokenEvents);
+  const question = firstQuestion(messages);
+  const embeddedCwd = (rows.find((row) => row && typeof row === "object" && "cwd" in row) as ClaudeConversationLine | undefined)?.cwd;
+  const gitBranch = firstClaudeGitBranch(rows);
+  return {
+    session: createIndexedSession({
+      keyPrefix: options.source === "claude-internal" ? "claude-internal" : "claude",
+      rawId,
+      source: options.source ?? "claude-cli",
+      projectPath: options.cwd || embeddedCwd || "",
+      filePath,
+      originalTitle: cleanTitle(question) || "Untitled Session",
+      firstQuestion: cleanTitle(question),
+      timestamp: options.startedAt || 0,
+      gitBranch,
+      tokenUsage,
+      stat: options.stat,
+    }),
+    messages,
+    tokenEvents,
+    traceEvents,
+  };
 }
 
 export function loadClaudeCliSessions(claudeDir = path.join(os.homedir(), ".claude"), source: SessionSource = "claude-cli"): LoadedSession[] {
@@ -777,33 +814,13 @@ export function* loadClaudeCliSessionsIterator(claudeDir = path.join(os.homedir(
       if (!file.endsWith(".jsonl")) continue;
       const rawId = file.replace(/\.jsonl$/, "");
       const filePath = path.join(projectPath, file);
-      const rows = readJsonl(filePath);
-      const messages = extractMessages(rows, "claude");
-      const tokenEvents = extractClaudeTokenEvents(rows);
-      const traceEvents = extractTraceEvents(rows, "claude");
-      const tokenUsage = tokenUsageFromEvents(tokenEvents);
-      const question = firstQuestion(messages);
-      const embeddedCwd = (rows.find((row) => row && typeof row === "object" && "cwd" in row) as
-        | ClaudeConversationLine
-        | undefined)?.cwd;
-      const gitBranch = firstClaudeGitBranch(rows);
-      yield {
-        session: createIndexedSession({
-          keyPrefix: source === "claude-internal" ? "claude-internal" : "claude",
-          rawId,
-          source,
-          projectPath: index.get(rawId)?.cwd || embeddedCwd || "",
-          filePath,
-          originalTitle: cleanTitle(question) || "Untitled Session",
-          firstQuestion: cleanTitle(question),
-          timestamp: index.get(rawId)?.startedAt || 0,
-          gitBranch,
-          tokenUsage,
-        }),
-        messages,
-        tokenEvents,
-        traceEvents,
-      };
+      const loaded = loadClaudeCliSessionRows(filePath, readJsonl(filePath), {
+        rawId,
+        cwd: index.get(rawId)?.cwd,
+        startedAt: index.get(rawId)?.startedAt,
+        source,
+      });
+      if (loaded) yield loaded;
     }
   }
 }

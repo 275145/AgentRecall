@@ -1,0 +1,121 @@
+import * as path from "node:path";
+import { loadClaudeCliSessionRows, loadCodexSessionRows, parseCodexSessionMetaLine, parseJsonlText } from "./session-loader";
+import type { CodexConversationLine, LoadedSession, SessionEnvironment, SessionSearchResult } from "./types";
+
+export type RemoteSessionFileKind = "codex-session" | "codex-index" | "claude-project" | "claude-session-index";
+
+export interface RemoteSessionFilePayload {
+  kind: RemoteSessionFileKind;
+  path: string;
+  mtimeMs: number;
+  size: number;
+  content: string;
+}
+
+export function loadRemoteSessionPayloads(environment: SessionEnvironment, payloads: RemoteSessionFilePayload[]): LoadedSession[] {
+  const codexTitleMap = readCodexTitleMap(payloads);
+  const claudeIndexMap = readClaudeIndexMap(payloads);
+  const loaded: LoadedSession[] = [];
+
+  for (const payload of payloads) {
+    if (payload.kind === "codex-session") {
+      const rows = parseJsonlText(payload.content);
+      const meta = rows.length > 0 ? parseCodexSessionMetaLine(rows[0] as CodexConversationLine) : null;
+      const indexedTitle = meta ? codexTitleMap.get(meta.id) : undefined;
+      const candidate = loadCodexSessionRows(payload.path, rows, {
+        stat: { mtimeMs: payload.mtimeMs, size: payload.size },
+        sourceOverride: "codex-cli",
+        title: indexedTitle?.title,
+        updatedAt: indexedTitle?.updatedAt,
+      });
+      if (candidate) loaded.push(scopeRemoteSession(candidate, environment, "codex"));
+    } else if (payload.kind === "claude-project") {
+      const rawId = path.basename(payload.path, ".jsonl");
+      const index = claudeIndexMap.get(rawId);
+      const candidate = loadClaudeCliSessionRows(payload.path, parseJsonlText(payload.content), {
+        rawId,
+        cwd: index?.cwd,
+        startedAt: index?.startedAt,
+        stat: { mtimeMs: payload.mtimeMs, size: payload.size },
+      });
+      if (candidate) loaded.push(scopeRemoteSession(candidate, environment, "claude"));
+    }
+  }
+
+  return loaded;
+}
+
+export function loadRemoteSessionDetailPayload(
+  environment: SessionEnvironment,
+  payload: RemoteSessionFilePayload,
+  summary: SessionSearchResult,
+): LoadedSession | null {
+  if (payload.kind === "codex-session") {
+    const candidate = loadCodexSessionRows(payload.path, parseJsonlText(payload.content), {
+      stat: { mtimeMs: payload.mtimeMs, size: payload.size },
+      sourceOverride: "codex-cli",
+      title: summary.originalTitle,
+    });
+    return candidate ? scopeRemoteSession(candidate, environment, "codex") : null;
+  }
+
+  if (payload.kind === "claude-project") {
+    const rawId = path.basename(payload.path, ".jsonl");
+    const candidate = loadClaudeCliSessionRows(payload.path, parseJsonlText(payload.content), {
+      rawId,
+      cwd: summary.projectPath,
+      startedAt: summary.timestamp,
+      stat: { mtimeMs: payload.mtimeMs, size: payload.size },
+    });
+    return candidate ? scopeRemoteSession(candidate, environment, "claude") : null;
+  }
+
+  return null;
+}
+
+function scopeRemoteSession(loaded: LoadedSession, environment: SessionEnvironment, family: "codex" | "claude"): LoadedSession {
+  return {
+    ...loaded,
+    session: {
+      ...loaded.session,
+      sessionKey: `ssh:${environment.id}:${family}:${loaded.session.rawId}`,
+      environmentId: environment.id,
+      environmentKind: environment.kind,
+      environmentLabel: environment.label,
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readCodexTitleMap(payloads: RemoteSessionFilePayload[]): Map<string, { title: string; updatedAt: string }> {
+  const map = new Map<string, { title: string; updatedAt: string }>();
+  for (const payload of payloads.filter((item) => item.kind === "codex-index")) {
+    for (const row of parseJsonlText(payload.content)) {
+      if (!isRecord(row)) continue;
+      const id = typeof row.id === "string" ? row.id : "";
+      const title = typeof row.thread_name === "string" ? row.thread_name : "";
+      const updatedAt = typeof row.updated_at === "string" ? row.updated_at : "";
+      if (id && title) map.set(id, { title, updatedAt });
+    }
+  }
+  return map;
+}
+
+function readClaudeIndexMap(payloads: RemoteSessionFilePayload[]): Map<string, { cwd: string; startedAt: number }> {
+  const map = new Map<string, { cwd: string; startedAt: number }>();
+  for (const payload of payloads.filter((item) => item.kind === "claude-session-index")) {
+    try {
+      const parsed = JSON.parse(payload.content) as unknown;
+      if (!isRecord(parsed) || typeof parsed.sessionId !== "string") continue;
+      const cwd = typeof parsed.cwd === "string" ? parsed.cwd : "";
+      const startedAt = typeof parsed.startedAt === "number" && Number.isFinite(parsed.startedAt) ? parsed.startedAt : 0;
+      map.set(parsed.sessionId, { cwd, startedAt });
+    } catch {
+      // Ignore malformed remote metadata.
+    }
+  }
+  return map;
+}

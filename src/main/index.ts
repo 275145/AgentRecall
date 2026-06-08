@@ -40,6 +40,10 @@ import { loadUsageQuotaSnapshot } from "../core/quota";
 import { focusLiveSessionTerminal } from "../core/session-focus";
 import { loadLiveSessionSnapshot } from "../core/session-activity";
 import { routeResumeSession } from "../core/resume-router";
+import { fetchRemoteSessionFilePayload, syncRemoteEnvironment } from "../core/remote-sync";
+import { loadRemoteSessionDetailPayload } from "../core/remote-session-loader";
+import { RemoteEnvironmentLifecycle } from "../core/remote-environment-lifecycle";
+import { RemoteWatchManager } from "../core/remote-watch";
 import { SessionStore } from "../core/session-store";
 import { deleteInstalledSkill, listInstalledSkills, type InstalledSkillsSnapshot } from "../core/skill-manager";
 import {
@@ -48,10 +52,11 @@ import {
   usageForSkill,
   type SkillUsageRefreshStatus,
 } from "../core/skill-usage";
+import { buildSshArgs, readUserSshConfig } from "../core/ssh-config";
 import { AUTO_INDEX_REFRESH_INTERVAL_MS, INITIAL_INDEX_DELAY_MS } from "../core/refresh-policy";
 import { globalShortcutLabel, normalizeGlobalShortcut } from "../core/shortcuts";
 import type { AppSettings, AppSettingsUpdate } from "../core/platform";
-import type { SearchOptions, SessionStatsOptions } from "../core/types";
+import type { EnvironmentUpsertInput, SearchOptions, SessionSearchResult, SessionStatsOptions } from "../core/types";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PRODUCT_NAME = "Agent-Session-Search";
@@ -127,6 +132,9 @@ let indexStatus: IndexStatus = { running: false, indexed: 0, total: 0, lastIndex
 let activeIndexRun: Promise<IndexStatus> | null = null;
 let autoIndexTimer: ReturnType<typeof setInterval> | null = null;
 let registeredGlobalShortcut: string | null = null;
+let remoteWatchManager: RemoteWatchManager | null = null;
+let remoteEnvironmentLifecycle: RemoteEnvironmentLifecycle | null = null;
+const remoteDetailLoads = new Map<string, Promise<void>>();
 
 const settingsStore = new Store<AppSettings>({
   defaults: defaultSettings,
@@ -261,6 +269,54 @@ function markdownExportFileName(title: string): string {
     .replace(/\s+/g, " ")
     .trim();
   return `${safeTitle || "session"}.md`;
+}
+
+function isLocalSession(session: SessionSearchResult): boolean {
+  return session.environmentKind === "local" || session.environmentId === "local";
+}
+
+function sshArgsForSession(session: SessionSearchResult): string[] | undefined {
+  if (isLocalSession(session)) return undefined;
+  const environment = store.getEnvironment(session.environmentId);
+  if (!environment || environment.kind !== "ssh") return undefined;
+  try {
+    const args = buildSshArgs(environment, "");
+    return args.slice(0, -1);
+  } catch {
+    return undefined;
+  }
+}
+
+function requireSshArgsForRemoteSession(session: SessionSearchResult): string[] | undefined {
+  const sshArgs = sshArgsForSession(session);
+  if (!isLocalSession(session) && !sshArgs) {
+    throw new Error("SSH environment is not available for this remote session.");
+  }
+  return sshArgs;
+}
+
+async function ensureRemoteSessionDetailsLoaded(sessionKey: string): Promise<void> {
+  const session = store.getSession(sessionKey);
+  if (!session || isLocalSession(session)) return;
+  if (store.getMessages(sessionKey, 0, 1).length > 0) return;
+
+  const active = remoteDetailLoads.get(sessionKey);
+  if (active) return active;
+
+  const load = (async () => {
+    const latest = store.getSession(sessionKey);
+    if (!latest || isLocalSession(latest)) return;
+    const environment = store.getEnvironment(latest.environmentId);
+    if (!environment || environment.kind !== "ssh") throw new Error("SSH environment is not available for this remote session.");
+    const payload = await fetchRemoteSessionFilePayload(environment, latest);
+    const loaded = loadRemoteSessionDetailPayload(environment, payload, latest);
+    if (loaded) store.upsertIndexedSession(loaded.session, loaded.messages, loaded.tokenEvents, loaded.traceEvents);
+  })().finally(() => {
+    remoteDetailLoads.delete(sessionKey);
+  });
+
+  remoteDetailLoads.set(sessionKey, load);
+  return load;
 }
 
 async function chooseMarkdownExportPath(defaultFileName: string): Promise<string | null> {
@@ -462,6 +518,39 @@ function createApplicationMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+function emitEnvironmentsUpdated(): void {
+  mainWindow?.webContents.send("environments-updated", store.listEnvironments());
+}
+
+function remoteSyncErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function ensureRemoteWatchManager(): RemoteWatchManager {
+  if (!remoteWatchManager) {
+    remoteWatchManager = new RemoteWatchManager({
+      syncEnvironment: (environment) => ensureRemoteEnvironmentLifecycle().syncFromWatcher(environment),
+      onSyncError: (environment, error) => {
+        store.updateEnvironmentSyncState(environment.id, "error", { lastError: remoteSyncErrorMessage(error) });
+        emitEnvironmentsUpdated();
+      },
+    });
+  }
+  return remoteWatchManager;
+}
+
+function ensureRemoteEnvironmentLifecycle(): RemoteEnvironmentLifecycle {
+  if (!remoteEnvironmentLifecycle) {
+    remoteEnvironmentLifecycle = new RemoteEnvironmentLifecycle({
+      store,
+      syncEnvironment: (environment) => syncRemoteEnvironment(store, environment).then(() => undefined),
+      watchManager: ensureRemoteWatchManager(),
+      onEnvironmentsUpdated: () => emitEnvironmentsUpdated(),
+    });
+  }
+  return remoteEnvironmentLifecycle;
+}
+
 async function runIndexSync(): Promise<IndexStatus> {
   if (activeIndexRun) return activeIndexRun;
 
@@ -497,6 +586,7 @@ async function runIndexSync(): Promise<IndexStatus> {
       return indexStatus;
     })
     .finally(() => {
+      ensureRemoteEnvironmentLifecycle().startEnabledEnvironments();
       activeIndexRun = null;
     });
 
@@ -522,10 +612,14 @@ function registerIpc(): void {
     store.markOpened(sessionKey);
     return store.getSession(sessionKey);
   });
-  ipcMain.handle("session:messages", (_event, sessionKey: string, offset?: number, limit?: number) =>
-    store.getMessages(sessionKey, offset ?? 0, limit ?? 120),
-  );
-  ipcMain.handle("session:trace-events", (_event, sessionKey: string) => store.getTraceEvents(sessionKey));
+  ipcMain.handle("session:messages", async (_event, sessionKey: string, offset?: number, limit?: number) => {
+    await ensureRemoteSessionDetailsLoaded(sessionKey);
+    return store.getMessages(sessionKey, offset ?? 0, limit ?? 120);
+  });
+  ipcMain.handle("session:trace-events", async (_event, sessionKey: string) => {
+    await ensureRemoteSessionDetailsLoaded(sessionKey);
+    return store.getTraceEvents(sessionKey);
+  });
   ipcMain.handle("sessions:live", () => loadLiveSessionSnapshot());
   ipcMain.handle("stats:get", (_event, options?: SessionStatsOptions) => store.getStats(options));
   ipcMain.handle("quota:get", () => {
@@ -537,6 +631,17 @@ function registerIpc(): void {
   });
   ipcMain.handle("tags:list", () => store.listTags());
   ipcMain.handle("projects:list", () => store.listProjects());
+  ipcMain.handle("environments:list", () => store.listEnvironments());
+  ipcMain.handle("ssh-config:list-hosts", () => readUserSshConfig());
+  ipcMain.handle("environment:save", (_event, input: EnvironmentUpsertInput) =>
+    ensureRemoteEnvironmentLifecycle().saveEnvironment(input),
+  );
+  ipcMain.handle("environment:delete", (_event, environmentId: string) =>
+    ensureRemoteEnvironmentLifecycle().deleteEnvironment(environmentId),
+  );
+  ipcMain.handle("environment:refresh", (_event, environmentId: string) =>
+    ensureRemoteEnvironmentLifecycle().refreshEnvironment(environmentId),
+  );
   ipcMain.handle("title:set", (_event, sessionKey: string, title: string | null) => store.setCustomTitle(sessionKey, title));
   ipcMain.handle("tag:add", (_event, sessionKey: string, tagName: string) => store.addTag(sessionKey, tagName));
   ipcMain.handle("tag:remove", (_event, sessionKey: string, tagName: string) => store.removeTag(sessionKey, tagName));
@@ -594,14 +699,22 @@ function registerIpc(): void {
     if (result.status === "error") throw new Error(result.detail || "Could not remove the skill usage hook.");
     return result.status;
   });
-  ipcMain.handle("command:copy-resume", (_event, sessionKey: string) => {
+  ipcMain.handle("command:copy-resume", async (_event, sessionKey: string) => {
+    await ensureRemoteSessionDetailsLoaded(sessionKey);
     const session = store.getSession(sessionKey);
     if (!session) return;
-    clipboard.writeText(getResumeCommand(session, getSettings()));
+    clipboard.writeText(getResumeCommand(session, getSettings(), { sshArgs: requireSshArgsForRemoteSession(session) }));
   });
   ipcMain.handle("command:resume", async (_event, sessionKey: string) => {
+    await ensureRemoteSessionDetailsLoaded(sessionKey);
     const session = store.getSession(sessionKey);
     if (!session) return { route: "resume" as const };
+    const sshArgs = requireSshArgsForRemoteSession(session);
+    if (!isLocalSession(session)) {
+      await openResumeInTerminal(session, getSettings(), { sshArgs });
+      store.markResumed(sessionKey);
+      return { route: "resume" as const };
+    }
     const snapshot = await loadLiveSessionSnapshot();
     const route = snapshot.error ? { route: "resume" as const } : routeResumeSession(session, snapshot.sessions);
     if (route.route === "focus") {
@@ -609,30 +722,40 @@ function registerIpc(): void {
       store.markResumed(sessionKey);
       return route;
     }
-    await openResumeInTerminal(session, getSettings());
+    await openResumeInTerminal(session, getSettings(), { sshArgs });
     store.markResumed(sessionKey);
     return route;
   });
   ipcMain.handle("command:resume-iterm", async (_event, sessionKey: string) => {
+    await ensureRemoteSessionDetailsLoaded(sessionKey);
     const session = store.getSession(sessionKey);
     if (!session) return;
-    await openResumeInSpecificTerminal(session, getSettings(), "iTerm");
+    const sshArgs = requireSshArgsForRemoteSession(session);
+    await openResumeInSpecificTerminal(session, getSettings(), "iTerm", { sshArgs });
     store.markResumed(sessionKey);
   });
   ipcMain.handle("command:open-app", async (_event, sessionKey: string) => {
     const session = store.getSession(sessionKey);
-    if (session) await openNativeApp(session.source);
+    if (!session) return false;
+    if (!isLocalSession(session)) return false;
+    await openNativeApp(session.source);
+    return true;
   });
   ipcMain.handle("command:reveal", async (_event, sessionKey: string) => {
     const session = store.getSession(sessionKey);
-    if (session) await revealInFileManager(session.projectPath || session.filePath);
+    if (!session) return false;
+    if (!isLocalSession(session)) return false;
+    await revealInFileManager(session.projectPath || session.filePath);
+    return true;
   });
-  ipcMain.handle("command:copy-markdown", (_event, sessionKey: string) => {
+  ipcMain.handle("command:copy-markdown", async (_event, sessionKey: string) => {
+    await ensureRemoteSessionDetailsLoaded(sessionKey);
     const session = store.getSession(sessionKey);
     if (!session) return;
     clipboard.writeText(formatSessionMarkdown(session, store.getAllMessages(sessionKey), store.getTraceEvents(sessionKey)));
   });
   ipcMain.handle("command:export-markdown", async (_event, sessionKey: string) => {
+    await ensureRemoteSessionDetailsLoaded(sessionKey);
     const session = store.getSession(sessionKey);
     if (!session) return false;
     const exportPath = await chooseMarkdownExportPath(markdownExportFileName(session.displayTitle || session.originalTitle || session.rawId));
@@ -640,7 +763,8 @@ function registerIpc(): void {
     await fs.writeFile(exportPath, formatSessionMarkdown(session, store.getAllMessages(sessionKey), store.getTraceEvents(sessionKey)), "utf-8");
     return true;
   });
-  ipcMain.handle("command:copy-plain", (_event, sessionKey: string) => {
+  ipcMain.handle("command:copy-plain", async (_event, sessionKey: string) => {
+    await ensureRemoteSessionDetailsLoaded(sessionKey);
     const session = store.getSession(sessionKey);
     if (!session) return;
     clipboard.writeText(formatSessionPlainText(session, store.getAllMessages(sessionKey), store.getTraceEvents(sessionKey)));
@@ -659,6 +783,7 @@ app.whenReady().then(() => {
   if (!registerAppGlobalShortcut(shortcut)) {
     console.error(`Global shortcut ${globalShortcutLabel(shortcut)} could not be registered.`);
   }
+  ensureRemoteEnvironmentLifecycle().startEnabledEnvironments();
   setTimeout(() => void runIndexSync(), INITIAL_INDEX_DELAY_MS);
   startAutoIndexRefresh();
 });
@@ -673,6 +798,7 @@ app.on("activate", () => {
 
 app.on("before-quit", () => {
   stopAutoIndexRefresh();
+  remoteEnvironmentLifecycle?.stopAll();
   globalShortcut.unregisterAll();
   store?.close();
 });

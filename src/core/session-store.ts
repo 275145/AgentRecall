@@ -9,9 +9,13 @@ import {
 } from "./skill-usage";
 import { truncateTraceDetail } from "./trace-detail";
 import type {
+  EnvironmentKind,
+  EnvironmentSyncState,
+  EnvironmentUpsertInput,
   IndexedSession,
   ProjectSummary,
   SearchOptions,
+  SessionEnvironment,
   SessionMessage,
   SessionSearchResult,
   SessionStats,
@@ -41,6 +45,7 @@ interface SessionRow {
   session_key: string;
   raw_id: string;
   source: SessionSource;
+  environment_id: string;
   project_path: string;
   file_path: string;
   original_title: string;
@@ -62,6 +67,24 @@ interface SessionRow {
   cached_input_tokens: number;
   reasoning_output_tokens: number;
   total_tokens: number;
+}
+
+interface EnvironmentRow {
+  id: string;
+  kind: EnvironmentKind;
+  label: string;
+  host_alias: string | null;
+  host: string | null;
+  user: string | null;
+  port: number | null;
+  auth_mode: SessionEnvironment["authMode"];
+  identity_file: string | null;
+  enabled: 0 | 1;
+  sync_state: EnvironmentSyncState;
+  last_synced_at: number | null;
+  last_error: string | null;
+  created_at: number;
+  updated_at: number;
 }
 
 interface TraceEventRow {
@@ -118,14 +141,15 @@ export class SessionStore {
         .prepare(
           `
           INSERT INTO sessions (
-            session_key, raw_id, source, project_path, file_path, original_title, first_question,
+            session_key, raw_id, source, environment_id, project_path, file_path, original_title, first_question,
             timestamp, file_mtime_ms, file_size, pr_url, pr_number, message_count,
             input_tokens, output_tokens, cached_input_tokens, reasoning_output_tokens, total_tokens
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(session_key) DO UPDATE SET
             raw_id = excluded.raw_id,
             source = excluded.source,
+            environment_id = excluded.environment_id,
             project_path = excluded.project_path,
             file_path = excluded.file_path,
             original_title = excluded.original_title,
@@ -147,6 +171,7 @@ export class SessionStore {
           session.sessionKey,
           session.rawId,
           session.source,
+          session.environmentId ?? "local",
           session.projectPath,
           session.filePath,
           session.originalTitle,
@@ -228,6 +253,67 @@ export class SessionStore {
     });
   }
 
+  upsertIndexedSessionSummary(session: IndexedSession, messageCount: number): void {
+    const tokenUsage = normalizeTokenUsage(session.tokenUsage);
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `
+          INSERT INTO sessions (
+            session_key, raw_id, source, environment_id, project_path, file_path, original_title, first_question,
+            timestamp, file_mtime_ms, file_size, pr_url, pr_number, message_count,
+            input_tokens, output_tokens, cached_input_tokens, reasoning_output_tokens, total_tokens
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(session_key) DO UPDATE SET
+            raw_id = excluded.raw_id,
+            source = excluded.source,
+            environment_id = excluded.environment_id,
+            project_path = excluded.project_path,
+            file_path = excluded.file_path,
+            original_title = excluded.original_title,
+            first_question = excluded.first_question,
+            timestamp = excluded.timestamp,
+            file_mtime_ms = excluded.file_mtime_ms,
+            file_size = excluded.file_size,
+            pr_url = excluded.pr_url,
+            pr_number = excluded.pr_number,
+            message_count = excluded.message_count,
+            input_tokens = excluded.input_tokens,
+            output_tokens = excluded.output_tokens,
+            cached_input_tokens = excluded.cached_input_tokens,
+            reasoning_output_tokens = excluded.reasoning_output_tokens,
+            total_tokens = excluded.total_tokens
+        `,
+        )
+        .run(
+          session.sessionKey,
+          session.rawId,
+          session.source,
+          session.environmentId ?? "local",
+          session.projectPath,
+          session.filePath,
+          session.originalTitle,
+          session.firstQuestion,
+          session.timestamp,
+          session.fileMtimeMs,
+          session.fileSize,
+          session.prUrl,
+          session.prNumber,
+          Math.max(0, Math.floor(messageCount)),
+          tokenUsage.inputTokens,
+          tokenUsage.outputTokens,
+          tokenUsage.cachedInputTokens,
+          tokenUsage.reasoningOutputTokens,
+          tokenUsage.totalTokens,
+        );
+
+      this.refreshFtsForSession(session.sessionKey);
+      const branchTag = branchTagName(session.gitBranch);
+      if (branchTag) this.addTagToSession(session.sessionKey, branchTag);
+    });
+  }
+
   setCustomTitle(sessionKey: string, title: string | null): void {
     const normalized = title?.trim() || null;
     this.db.prepare("UPDATE sessions SET custom_title = ? WHERE session_key = ?").run(normalized, sessionKey);
@@ -301,34 +387,185 @@ export class SessionStore {
     );
   }
 
+  listEnvironments(): SessionEnvironment[] {
+    return (this.db.prepare("SELECT * FROM environments ORDER BY kind, lower(label), id").all() as unknown as EnvironmentRow[]).map(
+      hydrateEnvironmentRow,
+    );
+  }
+
+  upsertEnvironment(input: EnvironmentUpsertInput): SessionEnvironment {
+    const now = Date.now();
+    const id = input.id ?? this.findEnvironmentIdByHostAlias(input) ?? this.createUniqueEnvironmentId(input.label);
+    const existing = this.getEnvironment(id);
+    if (input.id === "local") {
+      const current = existing ?? localEnvironment();
+      const environment = {
+        ...localEnvironment(),
+        syncState: current.syncState,
+        lastSyncedAt: current.lastSyncedAt,
+        lastError: current.lastError,
+        createdAt: current.createdAt,
+        updatedAt: now,
+      };
+      this.writeEnvironment(environment);
+      return environment;
+    }
+    const environment: SessionEnvironment = {
+      id,
+      kind: input.kind,
+      label: input.label,
+      hostAlias: input.hostAlias ?? null,
+      host: input.host ?? null,
+      user: input.user ?? null,
+      port: input.port ?? null,
+      authMode: input.authMode ?? "none",
+      identityFile: input.identityFile ?? null,
+      enabled: input.enabled ?? true,
+      syncState: existing?.syncState ?? "idle",
+      lastSyncedAt: existing?.lastSyncedAt ?? null,
+      lastError: existing?.lastError ?? null,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    this.writeEnvironment(environment);
+    return environment;
+  }
+
+  private findEnvironmentIdByHostAlias(input: EnvironmentUpsertInput): string | null {
+    if (input.kind !== "ssh" || !input.hostAlias) return null;
+    const row = this.db.prepare("SELECT id FROM environments WHERE kind = 'ssh' AND host_alias = ? ORDER BY created_at, id LIMIT 1").get(
+      input.hostAlias,
+    ) as { id: string } | undefined;
+    return row?.id ?? null;
+  }
+
+  private createUniqueEnvironmentId(label: string): string {
+    const base = generatedEnvironmentIdBase(label);
+    let candidate = base;
+    let suffix = 2;
+    while (this.getEnvironment(candidate)) {
+      candidate = `${base}-${suffix}`;
+      suffix += 1;
+    }
+    return candidate;
+  }
+
+  private writeEnvironment(environment: SessionEnvironment): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO environments (
+          id, kind, label, host_alias, host, user, port, auth_mode, identity_file,
+          enabled, sync_state, last_synced_at, last_error, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          kind = excluded.kind,
+          label = excluded.label,
+          host_alias = excluded.host_alias,
+          host = excluded.host,
+          user = excluded.user,
+          port = excluded.port,
+          auth_mode = excluded.auth_mode,
+          identity_file = excluded.identity_file,
+          enabled = excluded.enabled,
+          updated_at = excluded.updated_at
+      `,
+      )
+      .run(
+        environment.id,
+        environment.kind,
+        environment.label,
+        environment.hostAlias,
+        environment.host,
+        environment.user,
+        environment.port,
+        environment.authMode,
+        environment.identityFile,
+        environment.enabled ? 1 : 0,
+        environment.syncState,
+        environment.lastSyncedAt,
+        environment.lastError,
+        environment.createdAt,
+        environment.updatedAt,
+      );
+  }
+
+  getEnvironment(id: string): SessionEnvironment | null {
+    const row = this.db.prepare("SELECT * FROM environments WHERE id = ?").get(id) as EnvironmentRow | undefined;
+    return row ? hydrateEnvironmentRow(row) : null;
+  }
+
+  updateEnvironmentSyncState(
+    id: string,
+    state: EnvironmentSyncState,
+    options: { lastSyncedAt?: number | null; lastError?: string | null } = {},
+  ): void {
+    const existing = this.getEnvironment(id);
+    const hasLastSyncedAt = Object.prototype.hasOwnProperty.call(options, "lastSyncedAt");
+    const hasLastError = Object.prototype.hasOwnProperty.call(options, "lastError");
+    const lastSyncedAt = hasLastSyncedAt ? (options.lastSyncedAt ?? null) : existing?.lastSyncedAt ?? null;
+    const lastError = hasLastError ? (options.lastError ?? null) : existing?.lastError ?? null;
+    this.db
+      .prepare(
+        `
+        UPDATE environments
+        SET sync_state = ?,
+          last_synced_at = ?,
+          last_error = ?,
+          updated_at = ?
+        WHERE id = ?
+      `,
+      )
+      .run(state, lastSyncedAt, lastError, Date.now(), id);
+  }
+
   listProjects(): ProjectSummary[] {
     const rows = this.db
       .prepare(
         `
-        SELECT project_path, COUNT(*) AS session_count
+        SELECT sessions.project_path, sessions.environment_id, environments.label AS environment_label, COUNT(*) AS session_count
         FROM sessions
+        LEFT JOIN environments ON environments.id = sessions.environment_id
         WHERE trim(project_path) != ''
-        GROUP BY project_path
+        GROUP BY sessions.project_path, sessions.environment_id
       `,
       )
-      .all() as Array<{ project_path: string; session_count: number }>;
+      .all() as Array<{ project_path: string; environment_id: string; environment_label: string | null; session_count: number }>;
     const summaries = rows.map((row) => ({
       path: row.project_path,
       label: projectLabel(row.project_path),
       sessionCount: row.session_count,
+      environmentId: row.environment_id,
+      environmentLabel: row.environment_label ?? localEnvironment().label,
     }));
     const basenameCounts = new Map<string, number>();
+    const environmentsByPath = new Map<string, Set<string>>();
     for (const summary of summaries) {
       const basename = projectBasename(summary.path);
       basenameCounts.set(basename, (basenameCounts.get(basename) || 0) + 1);
+      const environmentIds = environmentsByPath.get(summary.path) ?? new Set<string>();
+      environmentIds.add(summary.environmentId);
+      environmentsByPath.set(summary.path, environmentIds);
     }
 
     return summaries
       .map((summary) => ({
         ...summary,
-        label: (basenameCounts.get(projectBasename(summary.path)) || 0) > 1 ? projectParentLabel(summary.path) : summary.label,
+        label:
+          (environmentsByPath.get(summary.path)?.size ?? 0) > 1
+            ? `${summary.label} · ${summary.environmentLabel}`
+            : (basenameCounts.get(projectBasename(summary.path)) || 0) > 1
+              ? projectParentLabel(summary.path)
+              : summary.label,
       }))
-      .sort((a, b) => b.sessionCount - a.sessionCount || a.label.localeCompare(b.label));
+      .sort(
+        (a, b) =>
+          b.sessionCount - a.sessionCount ||
+          a.path.localeCompare(b.path) ||
+          environmentSortValue(a.environmentId) - environmentSortValue(b.environmentId) ||
+          a.label.localeCompare(b.label),
+      );
   }
 
   getSession(sessionKey: string): SessionSearchResult | null {
@@ -581,6 +818,22 @@ export class SessionStore {
     });
   }
 
+  deleteEnvironment(environmentId: string): void {
+    if (environmentId === "local") throw new Error("Local environment cannot be deleted.");
+    this.transaction(() => {
+      this.deleteEnvironmentSessionsInTransaction(environmentId);
+      this.db.prepare("DELETE FROM environments WHERE id = ?").run(environmentId);
+      this.deleteUnusedTags();
+    });
+  }
+
+  deleteEnvironmentSessions(environmentId: string): void {
+    this.transaction(() => {
+      this.deleteEnvironmentSessionsInTransaction(environmentId);
+      this.deleteUnusedTags();
+    });
+  }
+
   private migrate(): void {
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.exec(`
@@ -588,6 +841,7 @@ export class SessionStore {
         session_key TEXT PRIMARY KEY,
         raw_id TEXT NOT NULL,
         source TEXT NOT NULL,
+        environment_id TEXT NOT NULL DEFAULT 'local',
         project_path TEXT NOT NULL,
         file_path TEXT NOT NULL,
         original_title TEXT NOT NULL,
@@ -609,6 +863,24 @@ export class SessionStore {
         cached_input_tokens INTEGER NOT NULL DEFAULT 0,
         reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
         total_tokens INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS environments (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        label TEXT NOT NULL,
+        host_alias TEXT,
+        host TEXT,
+        user TEXT,
+        port INTEGER,
+        auth_mode TEXT NOT NULL,
+        identity_file TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        sync_state TEXT NOT NULL DEFAULT 'idle',
+        last_synced_at INTEGER,
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS messages (
@@ -723,6 +995,14 @@ export class SessionStore {
     this.addColumnIfMissing("sessions", "cached_input_tokens", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("sessions", "reasoning_output_tokens", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("sessions", "total_tokens", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumnIfMissing("sessions", "environment_id", "TEXT NOT NULL DEFAULT 'local'");
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_sessions_environment
+        ON sessions(environment_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_environment_source
+        ON sessions(environment_id, source);
+    `);
+    this.ensureLocalEnvironment();
   }
 
   private addColumnIfMissing(tableName: string, columnName: string, definition: string): void {
@@ -730,6 +1010,17 @@ export class SessionStore {
     if (!columns.some((column) => column.name === columnName)) {
       this.db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
     }
+  }
+
+  private ensureLocalEnvironment(): void {
+    this.upsertEnvironment(localEnvironment());
+  }
+
+  private deleteEnvironmentSessionsInTransaction(environmentId: string): void {
+    this.db
+      .prepare("DELETE FROM session_fts WHERE session_key IN (SELECT session_key FROM sessions WHERE environment_id = ?)")
+      .run(environmentId);
+    this.db.prepare("DELETE FROM sessions WHERE environment_id = ?").run(environmentId);
   }
 
   private refreshFtsForSession(sessionKey: string): void {
@@ -992,6 +1283,11 @@ export class SessionStore {
       args.push(options.projectPath);
     }
 
+    if (options.environmentId && options.environmentId !== "all") {
+      where.push("environment_id = ?");
+      args.push(options.environmentId);
+    }
+
     if (options.source && options.source !== "all") {
       if (options.source === "claude") {
         where.push("source IN ('claude-cli', 'claude-app')");
@@ -1118,10 +1414,14 @@ export class SessionStore {
 
   private hydrateRow(row: SessionRow, snippet: string | null, tags = this.getTagsForSession(row.session_key)): SessionSearchResult {
     const displayTitle = row.custom_title || row.first_question || row.original_title || "Untitled Session";
+    const environment = this.getEnvironment(row.environment_id) ?? localEnvironment();
     return {
       sessionKey: row.session_key,
       rawId: row.raw_id,
       source: row.source,
+      environmentId: environment.id,
+      environmentKind: environment.kind,
+      environmentLabel: environment.label,
       projectPath: row.project_path,
       filePath: row.file_path,
       originalTitle: row.original_title,
@@ -1175,6 +1475,80 @@ export class SessionStore {
 
 export function createInMemoryStore(): SessionStore {
   return new SessionStore(new DatabaseSync(":memory:"));
+}
+
+function hydrateEnvironmentRow(row: EnvironmentRow): SessionEnvironment {
+  return {
+    id: row.id,
+    kind: row.kind,
+    label: row.label,
+    hostAlias: row.host_alias,
+    host: row.host,
+    user: row.user,
+    port: row.port,
+    authMode: row.auth_mode,
+    identityFile: row.identity_file,
+    enabled: row.enabled === 1,
+    syncState: row.sync_state,
+    lastSyncedAt: row.last_synced_at,
+    lastError: truncateEnvironmentError(row.last_error),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function truncateEnvironmentError(error: string | null): string | null {
+  if (!error) return error;
+  const bytes = Buffer.byteLength(error);
+  if (error.length <= 600) return error;
+  if (/^\s*\{"kind":\s*"(?:codex-session|codex-index|claude-project|claude-session-index)"/.test(error)) {
+    return `Remote sync error output was truncated (${formatEnvironmentErrorBytes(bytes)}). The hidden output looked like session payload data, not a readable error.`;
+  }
+  return `${error.slice(0, 520)}... truncated ${formatEnvironmentErrorBytes(bytes)}`;
+}
+
+function formatEnvironmentErrorBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+function localEnvironment(): SessionEnvironment {
+  return {
+    id: "local",
+    kind: "local",
+    label: "Local",
+    hostAlias: null,
+    host: null,
+    user: null,
+    port: null,
+    authMode: "none",
+    identityFile: null,
+    enabled: true,
+    syncState: "idle",
+    lastSyncedAt: null,
+    lastError: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+}
+
+function createEnvironmentId(label: string): string {
+  const normalized = label
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || "environment";
+}
+
+function generatedEnvironmentIdBase(label: string): string {
+  const id = createEnvironmentId(label);
+  return id === "local" ? "ssh-local" : id;
+}
+
+function environmentSortValue(environmentId: string): number {
+  return environmentId === "local" ? 0 : 1;
 }
 
 function emptyStatsSummary(): SessionStatsSummary {

@@ -1,4 +1,4 @@
-import type { SearchOptions, SessionSource, SessionStatsPeriod } from "../../core/types";
+import type { SearchOptions, SessionSearchResult, SessionSource, SessionStatsPeriod } from "../../core/types";
 import type { AppSettings } from "../../core/platform";
 import type { ResumeRouteResult } from "../../core/resume-router";
 import { localize, type LanguageMode } from "./language";
@@ -68,4 +68,34 @@ export function resumeRouteMessage(result: ResumeRouteResult, language: Language
   return result.route === "focus"
     ? localize(language, "Terminal brought to front.", "终端已前置。")
     : localize(language, "Resume command sent to terminal.", "Resume 命令已发送到终端。");
+}
+
+export function isRemoteSession(session: Pick<SessionSearchResult, "environmentId" | "environmentKind">): boolean {
+  return session.environmentKind === "ssh" && session.environmentId !== "local";
+}
+
+export function environmentBadgeLabel(
+  session: Pick<SessionSearchResult, "environmentKind" | "environmentLabel">,
+  language: LanguageMode,
+): string {
+  if (session.environmentKind === "ssh") return `SSH · ${session.environmentLabel}`;
+  return localize(language, "Local", "本地");
+}
+
+export function environmentBadgeTitle(
+  session: Pick<SessionSearchResult, "environmentKind" | "environmentLabel">,
+  language: LanguageMode,
+): string {
+  if (session.environmentKind === "ssh") {
+    return localize(language, `Remote SSH environment: ${session.environmentLabel}`, `远程 SSH 环境：${session.environmentLabel}`);
+  }
+  return localize(language, "Local session on this computer", "这台电脑上的本地会话");
+}
+
+export function remoteRevealTitle(language: LanguageMode): string {
+  return localize(language, "remote paths cannot be revealed locally.", "远程路径不能在本机显示。");
+}
+
+export function remoteOpenAppTitle(language: LanguageMode): string {
+  return localize(language, "remote sessions do not open local native apps.", "远程会话不能打开本机原生应用。");
 }

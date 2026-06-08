@@ -8,6 +8,40 @@ export type SessionSource =
   | "codebuddy-cli";
 export type SessionFormat = "claude" | "codex" | "codebuddy";
 export type SessionSortBy = "activity" | "created" | "updated";
+export type EnvironmentKind = "local" | "ssh";
+export type EnvironmentSyncState = "idle" | "syncing" | "watching" | "disconnected" | "error";
+export type SshAuthMode = "none" | "identityFile";
+
+export interface SessionEnvironment {
+  id: string;
+  kind: EnvironmentKind;
+  label: string;
+  hostAlias: string | null;
+  host: string | null;
+  user: string | null;
+  port: number | null;
+  authMode: SshAuthMode;
+  identityFile: string | null;
+  enabled: boolean;
+  syncState: EnvironmentSyncState;
+  lastSyncedAt: number | null;
+  lastError: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface EnvironmentUpsertInput {
+  id?: string;
+  kind: EnvironmentKind;
+  label: string;
+  hostAlias?: string | null;
+  host?: string | null;
+  user?: string | null;
+  port?: number | null;
+  authMode?: SshAuthMode;
+  identityFile?: string | null;
+  enabled?: boolean;
+}
 
 export interface SessionMessage {
   role: "user" | "assistant";
@@ -58,6 +92,9 @@ export interface IndexedSession {
   prNumber: number | null;
   gitBranch?: string | null;
   tokenUsage?: TokenUsage;
+  environmentId?: string;
+  environmentKind?: EnvironmentKind;
+  environmentLabel?: string;
 }
 
 export interface LoadedSession {
@@ -71,6 +108,7 @@ export interface SearchOptions {
   query?: string;
   tag?: string;
   projectPath?: string;
+  environmentId?: string | "all";
   source?: SessionSource | "claude" | "codex" | "all";
   visibility?: "default" | "favorites" | "hidden" | "pinned";
   sortBy?: SessionSortBy;
@@ -81,9 +119,14 @@ export interface ProjectSummary {
   path: string;
   label: string;
   sessionCount: number;
+  environmentId: string;
+  environmentLabel: string;
 }
 
 export interface SessionSearchResult extends IndexedSession {
+  environmentId: string;
+  environmentKind: EnvironmentKind;
+  environmentLabel: string;
   tokenUsage: TokenUsage;
   customTitle: string | null;
   displayTitle: string;

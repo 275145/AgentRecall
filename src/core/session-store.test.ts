@@ -1,11 +1,15 @@
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createInMemoryStore } from "./session-store";
+import { createInMemoryStore, SessionStore } from "./session-store";
 import { TRACE_DETAIL_PREVIEW_MAX_CHARS } from "./trace-detail";
 import type { SkillUsageEvent, SkillUsageSource } from "./skill-usage";
 import type { IndexedSession, SessionMessage, SessionTraceEvent } from "./types";
+
+const require = createRequire(import.meta.url);
+const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: new (path: string) => import("node:sqlite").DatabaseSync };
 
 function sampleSession(overrides: Partial<IndexedSession> = {}): IndexedSession {
   return {
@@ -54,6 +58,77 @@ const traceEvents: SessionTraceEvent[] = [
 ];
 
 describe("SessionStore", () => {
+  it("migrates old sessions tables before creating environment indexes", () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(`
+      CREATE TABLE sessions (
+        session_key TEXT PRIMARY KEY,
+        raw_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        project_path TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        original_title TEXT NOT NULL,
+        first_question TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        file_mtime_ms REAL NOT NULL,
+        file_size INTEGER NOT NULL,
+        pr_url TEXT,
+        pr_number INTEGER,
+        custom_title TEXT,
+        favorited INTEGER NOT NULL DEFAULT 0,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        hidden INTEGER NOT NULL DEFAULT 0,
+        last_opened_at INTEGER,
+        last_resumed_at INTEGER,
+        message_count INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+        reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    db.prepare(
+      `
+      INSERT INTO sessions (
+        session_key, raw_id, source, project_path, file_path, original_title, first_question,
+        timestamp, file_mtime_ms, file_size, pr_url, pr_number, message_count,
+        input_tokens, output_tokens, cached_input_tokens, reasoning_output_tokens, total_tokens
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    ).run(
+      "codex:old",
+      "old",
+      "codex-cli",
+      "/repo",
+      "/tmp/old.jsonl",
+      "Old title",
+      "Old question",
+      1,
+      2,
+      3,
+      null,
+      null,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+    );
+
+    const store = new SessionStore(db);
+
+    expect(store.getSession("codex:old")).toMatchObject({
+      sessionKey: "codex:old",
+      environmentId: "local",
+      environmentKind: "local",
+      environmentLabel: "Local",
+    });
+    expect(store.listEnvironments()).toEqual([expect.objectContaining({ id: "local", label: "Local" })]);
+  });
+
   it("indexes sessions, searches full text, and returns match snippets", () => {
     const store = createInMemoryStore();
     store.upsertIndexedSession(sampleSession(), messages);
@@ -544,8 +619,8 @@ describe("SessionStore", () => {
     store.upsertIndexedSession(sampleSession({ sessionKey: "codex:no-project", rawId: "no-project", projectPath: "" }), messages);
 
     expect(store.listProjects()).toEqual([
-      { path: "/work/team-a/app", label: "team-a/app", sessionCount: 2 },
-      { path: "/work/team-b/app", label: "team-b/app", sessionCount: 1 },
+      { path: "/work/team-a/app", label: "team-a/app", sessionCount: 2, environmentId: "local", environmentLabel: "Local" },
+      { path: "/work/team-b/app", label: "team-b/app", sessionCount: 1, environmentId: "local", environmentLabel: "Local" },
     ]);
   });
 
@@ -672,5 +747,307 @@ describe("SessionStore", () => {
     expect(stored.detail.length).toBeLessThanOrEqual(TRACE_DETAIL_PREVIEW_MAX_CHARS);
     expect(stored.detail).toContain("Indexed preview truncated");
     expect(stored.detail).toContain("characters omitted");
+  });
+
+  it("creates a local environment and stores environment metadata on sessions", () => {
+    const store = createInMemoryStore();
+
+    store.upsertIndexedSession(sampleSession(), messages);
+
+    expect(store.listEnvironments()).toEqual([
+      expect.objectContaining({
+        id: "local",
+        kind: "local",
+        label: "Local",
+        enabled: true,
+        syncState: "idle",
+      }),
+    ]);
+    expect(store.getSession("codex:abc")).toMatchObject({
+      environmentId: "local",
+      environmentKind: "local",
+      environmentLabel: "Local",
+    });
+  });
+
+  it("updates environment sync state while preserving omitted values and clearing explicit nulls", () => {
+    const store = createInMemoryStore();
+    store.upsertEnvironment({
+      id: "ssh-devbox",
+      kind: "ssh",
+      label: "devbox",
+      hostAlias: "devbox",
+      host: "devbox.example.com",
+      enabled: true,
+    });
+
+    store.updateEnvironmentSyncState("ssh-devbox", "syncing", { lastSyncedAt: 123, lastError: "boom" });
+    store.updateEnvironmentSyncState("ssh-devbox", "watching");
+
+    expect(store.getEnvironment("ssh-devbox")).toMatchObject({
+      syncState: "watching",
+      lastSyncedAt: 123,
+      lastError: "boom",
+    });
+
+    store.updateEnvironmentSyncState("ssh-devbox", "idle", { lastSyncedAt: null, lastError: null });
+
+    expect(store.getEnvironment("ssh-devbox")).toMatchObject({
+      syncState: "idle",
+      lastSyncedAt: null,
+      lastError: null,
+    });
+  });
+
+  it("truncates large stored environment errors before returning them to the renderer", () => {
+    const store = createInMemoryStore();
+    store.upsertEnvironment({
+      id: "ssh-devbox",
+      kind: "ssh",
+      label: "devbox",
+      hostAlias: "devbox",
+      enabled: true,
+    });
+
+    store.updateEnvironmentSyncState("ssh-devbox", "error", {
+      lastError: `${JSON.stringify({ kind: "codex-session", path: "/secret/path", contentBase64: "AAAA" })}\n`.repeat(1000),
+    });
+
+    const environment = store.getEnvironment("ssh-devbox");
+    expect(environment?.lastError?.length).toBeLessThan(700);
+    expect(environment?.lastError).toContain("truncated");
+    expect(environment?.lastError).not.toContain("/secret/path");
+  });
+
+  it("does not allow public environment upserts to mutate the built-in local environment", () => {
+    const store = createInMemoryStore();
+
+    store.upsertEnvironment({
+      id: "local",
+      kind: "ssh",
+      label: "not-local",
+      hostAlias: "remote",
+      host: "remote.example.com",
+      user: "you",
+      port: 22,
+      authMode: "identityFile",
+      identityFile: "~/.ssh/id_ed25519",
+      enabled: false,
+    });
+
+    expect(store.getEnvironment("local")).toMatchObject({
+      id: "local",
+      kind: "local",
+      label: "Local",
+      hostAlias: null,
+      host: null,
+      user: null,
+      port: null,
+      authMode: "none",
+      identityFile: null,
+      enabled: true,
+      syncState: "idle",
+    });
+  });
+
+  it("generates distinct ids for ssh environments with duplicate labels", () => {
+    const store = createInMemoryStore();
+
+    const first = store.upsertEnvironment({
+      kind: "ssh",
+      label: "devbox",
+      hostAlias: "devbox-a",
+      host: "devbox-a.example.com",
+    });
+    const second = store.upsertEnvironment({
+      kind: "ssh",
+      label: "devbox",
+      hostAlias: "devbox-b",
+      host: "devbox-b.example.com",
+    });
+
+    expect(first.id).toBe("devbox");
+    expect(second.id).toBe("devbox-2");
+    expect(first.id).not.toBe(second.id);
+    expect(
+      store
+        .listEnvironments()
+        .filter((environment) => environment.kind === "ssh" && environment.label === "devbox")
+        .map((environment) => environment.id),
+    ).toEqual(["devbox", "devbox-2"]);
+  });
+
+  it("updates an existing ssh config environment when host alias is saved again", () => {
+    const store = createInMemoryStore();
+
+    const first = store.upsertEnvironment({
+      kind: "ssh",
+      label: "dev",
+      hostAlias: "dev",
+      host: "old.example.com",
+      enabled: true,
+    });
+    const second = store.upsertEnvironment({
+      kind: "ssh",
+      label: "dev",
+      hostAlias: "dev",
+      host: "new.example.com",
+      enabled: true,
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(store.listEnvironments().filter((environment) => environment.kind === "ssh" && environment.hostAlias === "dev")).toEqual([
+      expect.objectContaining({ id: first.id, host: "new.example.com" }),
+    ]);
+  });
+
+  it("does not route generated local-like ids through the built-in local environment", () => {
+    const store = createInMemoryStore();
+
+    const generated = store.upsertEnvironment({
+      kind: "ssh",
+      label: "Local",
+      hostAlias: "local-devbox",
+      host: "local-devbox.example.com",
+    });
+
+    expect(generated).toMatchObject({
+      id: "ssh-local",
+      kind: "ssh",
+      label: "Local",
+      hostAlias: "local-devbox",
+    });
+    expect(store.getEnvironment("local")).toMatchObject({
+      id: "local",
+      kind: "local",
+      label: "Local",
+    });
+  });
+
+  it("filters sessions by environment and composes with source, project, and tag filters", () => {
+    const store = createInMemoryStore();
+    store.upsertEnvironment({
+      id: "ssh-devbox",
+      kind: "ssh",
+      label: "devbox",
+      hostAlias: "devbox",
+      host: "devbox.example.com",
+      user: "you",
+      port: 22,
+      authMode: "identityFile",
+      identityFile: "~/.ssh/id_ed25519",
+      enabled: true,
+    });
+    store.upsertIndexedSession(sampleSession(), messages);
+    store.upsertIndexedSession(
+      sampleSession({
+        sessionKey: "ssh:ssh-devbox:claude:remote-1",
+        rawId: "remote-1",
+        source: "claude-cli",
+        projectPath: "/work/app",
+        environmentId: "ssh-devbox",
+        environmentKind: "ssh",
+        environmentLabel: "devbox",
+      }),
+      messages,
+    );
+    store.addTag("ssh:ssh-devbox:claude:remote-1", "remote");
+
+    expect(store.searchSessions({ environmentId: "local" }).map((session) => session.sessionKey)).toEqual(["codex:abc"]);
+    expect(store.searchSessions({ environmentId: "ssh-devbox" }).map((session) => session.sessionKey)).toEqual([
+      "ssh:ssh-devbox:claude:remote-1",
+    ]);
+    expect(
+      store.searchSessions({ environmentId: "ssh-devbox", source: "claude", projectPath: "/work/app", tag: "remote" }).map(
+        (session) => session.sessionKey,
+      ),
+    ).toEqual(["ssh:ssh-devbox:claude:remote-1"]);
+  });
+
+  it("lists project labels with environment hints when paths repeat across environments", () => {
+    const store = createInMemoryStore();
+    store.upsertEnvironment({
+      id: "ssh-devbox",
+      kind: "ssh",
+      label: "devbox",
+      hostAlias: "devbox",
+      host: "devbox.example.com",
+      user: null,
+      port: null,
+      authMode: "none",
+      identityFile: null,
+      enabled: true,
+    });
+    store.upsertIndexedSession(sampleSession({ sessionKey: "codex:local", rawId: "local", projectPath: "/work/app" }), messages);
+    store.upsertIndexedSession(
+      sampleSession({
+        sessionKey: "ssh:ssh-devbox:codex:remote",
+        rawId: "remote",
+        projectPath: "/work/app",
+        environmentId: "ssh-devbox",
+        environmentKind: "ssh",
+        environmentLabel: "devbox",
+      }),
+      messages,
+    );
+
+    expect(store.listProjects()).toEqual([
+      { path: "/work/app", label: "app · Local", sessionCount: 1, environmentId: "local", environmentLabel: "Local" },
+      { path: "/work/app", label: "app · devbox", sessionCount: 1, environmentId: "ssh-devbox", environmentLabel: "devbox" },
+    ]);
+  });
+
+  it("deletes an ssh environment with its sessions and unused tags", () => {
+    const store = createInMemoryStore();
+    store.upsertEnvironment({
+      id: "ssh-devbox",
+      kind: "ssh",
+      label: "devbox",
+      hostAlias: "devbox",
+      host: "devbox.example.com",
+      enabled: true,
+    });
+    store.upsertIndexedSession(sampleSession({ sessionKey: "codex:local", rawId: "local" }), messages, [], traceEvents);
+    store.addTag("codex:local", "shared");
+    store.upsertIndexedSession(
+      sampleSession({
+        sessionKey: "ssh:ssh-devbox:codex:remote",
+        rawId: "remote",
+        projectPath: "/work/app",
+        environmentId: "ssh-devbox",
+      }),
+      messages,
+      [
+        {
+          dedupeKey: "remote-token",
+          timestamp: 123,
+          inputTokens: 1,
+          outputTokens: 2,
+          cachedInputTokens: 0,
+          reasoningOutputTokens: 0,
+          totalTokens: 3,
+        },
+      ],
+      traceEvents,
+    );
+    store.addTag("ssh:ssh-devbox:codex:remote", "shared");
+    store.addTag("ssh:ssh-devbox:codex:remote", "remote-only");
+
+    store.deleteEnvironment("ssh-devbox");
+
+    expect(store.getEnvironment("ssh-devbox")).toBeNull();
+    expect(store.searchSessions({ environmentId: "ssh-devbox" })).toEqual([]);
+    expect(store.getSession("ssh:ssh-devbox:codex:remote")).toBeNull();
+    expect(store.getMessages("ssh:ssh-devbox:codex:remote")).toEqual([]);
+    expect(store.getTraceEvents("ssh:ssh-devbox:codex:remote")).toEqual([]);
+    expect(store.getSession("codex:local")).toMatchObject({ environmentId: "local", tags: ["shared"] });
+    expect(store.listTags()).toEqual(["shared"]);
+  });
+
+  it("rejects deleting the built-in local environment", () => {
+    const store = createInMemoryStore();
+
+    expect(() => store.deleteEnvironment("local")).toThrow(/local environment cannot be deleted/i);
+    expect(store.getEnvironment("local")).toMatchObject({ id: "local", kind: "local" });
   });
 });

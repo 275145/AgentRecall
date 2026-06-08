@@ -39,6 +39,16 @@ export interface ResumeProcessSpec {
   displayCommand: string;
 }
 
+interface ResumeOptions {
+  withCwd?: boolean;
+  skipPermissions?: boolean;
+  platform?: NodeJS.Platform;
+  sshTarget?: string;
+  sshArgs?: string[];
+}
+
+type ResumeOpenOptions = Pick<ResumeOptions, "skipPermissions" | "platform" | "sshTarget" | "sshArgs">;
+
 export interface AppSettings {
   defaultTerminal: TerminalChoice;
   globalShortcut: GlobalShortcut;
@@ -92,33 +102,61 @@ export function sourceFamily(source: SessionSource): "claude" | "codex" | "codeb
   return source === "claude-cli" || source === "claude-app" || source === "claude-internal" ? "claude" : "codex";
 }
 
-export function getResumeCommand(
+function buildResumeProcessArgs(
   session: SessionSearchResult,
-  settings: AppSettings = defaultSettings,
-  opts: { withCwd?: boolean; skipPermissions?: boolean; platform?: NodeJS.Platform } = {},
-): string {
-  const { withCwd = true, skipPermissions = false, platform = process.platform } = opts;
-  let cmd: string;
+  settings: AppSettings,
+  skipPermissions: boolean,
+): { command: string; args: string[] } {
   const family = sourceFamily(session.source);
   if (family === "claude") {
-    cmd = `${settings.claudeBinary} --resume ${session.rawId}`;
-    if (skipPermissions) cmd += " --dangerously-skip-permissions";
-  } else if (family === "codebuddy") {
-    cmd = `${settings.codeBuddyBinary} --resume ${session.rawId}`;
-  } else {
-    cmd = `${settings.codexBinary} resume ${session.rawId}`;
-    if (skipPermissions) cmd += " --dangerously-bypass-approvals-and-sandbox";
+    const args = ["--resume", session.rawId];
+    if (skipPermissions) args.push("--dangerously-skip-permissions");
+    return { command: settings.claudeBinary, args };
   }
-  if (withCwd && session.projectPath) {
-    cmd =
-      platform === "win32"
+  if (family === "codebuddy") {
+    return { command: settings.codeBuddyBinary, args: ["--resume", session.rawId] };
+  }
+
+  const args = ["resume", session.rawId];
+  if (skipPermissions) args.push("--dangerously-bypass-approvals-and-sandbox");
+  return { command: settings.codexBinary, args };
+}
+
+function buildResumeShellCommand(
+  session: SessionSearchResult,
+  settings: AppSettings,
+  opts: Required<Pick<ResumeOptions, "withCwd" | "skipPermissions" | "platform">> & { remoteShell: boolean },
+): string {
+  const { command, args } = buildResumeProcessArgs(session, settings, opts.skipPermissions);
+  let cmd = [command, ...args].map((token) => shellCommandTokenQuote(token, opts.platform, opts.remoteShell)).join(" ");
+  if (opts.withCwd && session.projectPath) {
+    cmd = opts.remoteShell
+      ? `cd ${shellQuote(session.projectPath)} && ${cmd}`
+      : opts.platform === "win32"
         ? `cd /d ${winQuote(session.projectPath)} && ${cmd}`
         : `cd ${shellQuote(session.projectPath)} && ${cmd}`;
   }
   return cmd;
 }
 
-interface WindowsLaunch {
+export function getResumeCommand(
+  session: SessionSearchResult,
+  settings: AppSettings = defaultSettings,
+  opts: ResumeOptions = {},
+): string {
+  const { withCwd = true, skipPermissions = false, platform = process.platform } = opts;
+  const sshArgs = resolveSshArgs(opts);
+  const cmd = buildResumeShellCommand(session, settings, {
+    withCwd,
+    skipPermissions,
+    platform,
+    remoteShell: Boolean(sshArgs),
+  });
+  if (!sshArgs) return cmd;
+  return formatSshDisplayCommand(sshArgs, cmd, platform);
+}
+
+export interface WindowsLaunch {
   file: string;
   args: string[];
   cwd?: string;
@@ -144,11 +182,64 @@ export function buildWindowsLaunchPlan(terminal: TerminalChoice, command: string
   return [wt(), pwsh(), powershell(), cmd()];
 }
 
-async function openResumeInWindowsTerminal(session: SessionSearchResult, settings: AppSettings): Promise<void> {
-  const command = getResumeCommand(session, settings, { withCwd: false, platform: "win32" });
-  const terminal = normalizeTerminal(settings.defaultTerminal, "win32");
-  const cwd = existingDirectory(session.projectPath);
-  const plan = buildWindowsLaunchPlan(terminal, command, cwd);
+function buildWindowsShellSpecificLaunchPlan(
+  terminal: TerminalChoice,
+  cmdCommand: string,
+  powershellCommand: string,
+  cwd: string,
+): WindowsLaunch[] {
+  const wt = (): WindowsLaunch => {
+    const inner = ["cmd.exe", "/d", "/k", cmdCommand];
+    return { file: "wt.exe", args: cwd ? ["-d", cwd, ...inner] : inner };
+  };
+  const pwsh = (): WindowsLaunch => ({
+    file: "pwsh.exe",
+    args: ["-NoLogo", "-NoProfile", "-NoExit", "-Command", powershellCommand],
+    cwd: cwd || undefined,
+  });
+  const powershell = (): WindowsLaunch => ({
+    file: "powershell.exe",
+    args: ["-NoLogo", "-NoProfile", "-NoExit", "-Command", powershellCommand],
+    cwd: cwd || undefined,
+  });
+  const cmd = (): WindowsLaunch => ({ file: "cmd.exe", args: ["/d", "/k", cmdCommand], cwd: cwd || undefined });
+
+  if (terminal === "Cmd") return [cmd()];
+  if (terminal === "PowerShell") return [pwsh(), powershell(), cmd()];
+  return [wt(), pwsh(), powershell(), cmd()];
+}
+
+export function buildWindowsResumeLaunchPlan(
+  session: SessionSearchResult,
+  settings: AppSettings,
+  opts: ResumeOpenOptions & { terminal?: TerminalChoice } = {},
+): WindowsLaunch[] {
+  const platform = opts.platform ?? "win32";
+  const sshArgs = resolveSshArgs(opts);
+  const cmdCommand = getResumeCommand(session, settings, {
+    withCwd: Boolean(sshArgs),
+    skipPermissions: opts.skipPermissions,
+    platform,
+    sshTarget: opts.sshTarget,
+    sshArgs: opts.sshArgs,
+  });
+  const terminal = normalizeTerminal(opts.terminal ?? settings.defaultTerminal, "win32");
+  const cwd = sshArgs ? "" : existingDirectory(session.projectPath);
+  if (!sshArgs) return buildWindowsLaunchPlan(terminal, cmdCommand, cwd);
+  return buildWindowsShellSpecificLaunchPlan(
+    terminal,
+    cmdCommand,
+    getResumePowerShellCommand(session, settings, { ...opts, sshArgs }),
+    cwd,
+  );
+}
+
+async function openResumeInWindowsTerminal(
+  session: SessionSearchResult,
+  settings: AppSettings,
+  opts: ResumeOpenOptions = {},
+): Promise<void> {
+  const plan = buildWindowsResumeLaunchPlan(session, settings, opts);
 
   let lastError: Error | null = null;
   for (const launch of plan) {
@@ -188,24 +279,31 @@ function spawnDetached(command: string, args: string[], cwd?: string): Promise<v
 export function getResumeProcessSpec(
   session: SessionSearchResult,
   settings: AppSettings = defaultSettings,
-  opts: { skipPermissions?: boolean; platform?: NodeJS.Platform } = {},
+  opts: { skipPermissions?: boolean; platform?: NodeJS.Platform; sshTarget?: string; sshArgs?: string[] } = {},
 ): ResumeProcessSpec {
   const { skipPermissions = false, platform = process.platform } = opts;
-  const family = sourceFamily(session.source);
-  let command: string;
-  let args: string[];
+  const { command, args } = buildResumeProcessArgs(session, settings, skipPermissions);
+  const sshArgs = resolveSshArgs(opts);
 
-  if (family === "claude") {
-    command = settings.claudeBinary;
-    args = ["--resume", session.rawId];
-    if (skipPermissions) args.push("--dangerously-skip-permissions");
-  } else if (family === "codebuddy") {
-    command = settings.codeBuddyBinary;
-    args = ["--resume", session.rawId];
-  } else {
-    command = settings.codexBinary;
-    args = ["resume", session.rawId];
-    if (skipPermissions) args.push("--dangerously-bypass-approvals-and-sandbox");
+  if (sshArgs) {
+    const innerCommand = buildResumeShellCommand(session, settings, {
+      withCwd: true,
+      skipPermissions,
+      platform,
+      remoteShell: true,
+    });
+    return {
+      command: "ssh",
+      args: [...sshArgs, innerCommand],
+      cwd: undefined,
+      displayCommand: getResumeCommand(session, settings, {
+        withCwd: true,
+        skipPermissions,
+        platform,
+        sshTarget: opts.sshTarget,
+        sshArgs: opts.sshArgs,
+      }),
+    };
   }
 
   return {
@@ -220,15 +318,24 @@ export function getResumeProcessSpec(
 // ignored and the window opened without resuming. The documented way to run a
 // command is the special `-e <command>` argument; run it through the user's
 // shell so the `cd … &&` chain plus PATH/aliases resolve, mirroring WezTerm.
-export function buildGhosttyOpenArgs(session: SessionSearchResult, settings: AppSettings): string[] {
+export function buildGhosttyOpenArgs(
+  session: SessionSearchResult,
+  settings: AppSettings,
+  opts: ResumeOpenOptions = {},
+): string[] {
   const shell = process.env.SHELL || "/bin/zsh";
-  return ["-na", "Ghostty.app", "--args", "-e", shell, "-ic", getResumeCommand(session, settings, { withCwd: true })];
+  return ["-na", "Ghostty.app", "--args", "-e", shell, "-ic", getResumeCommand(session, settings, { ...opts, withCwd: true })];
 }
 
-export async function openResumeInTerminal(session: SessionSearchResult, settings: AppSettings): Promise<void> {
-  const command = getResumeCommand(session, settings, { withCwd: true });
+export async function openResumeInTerminal(
+  session: SessionSearchResult,
+  settings: AppSettings,
+  opts: ResumeOpenOptions = {},
+): Promise<void> {
+  const sshArgs = resolveSshArgs(opts);
+  const command = getResumeCommand(session, settings, { ...opts, withCwd: true });
   if (process.platform === "win32") {
-    await openResumeInWindowsTerminal(session, settings);
+    await openResumeInWindowsTerminal(session, settings, opts);
     return;
   }
   if (process.platform !== "darwin") {
@@ -265,20 +372,33 @@ end tell`);
   }
 
   if (settings.defaultTerminal === "Ghostty") {
-    await runProcess("/usr/bin/open", buildGhosttyOpenArgs(session, settings));
+    await runProcess("/usr/bin/open", buildGhosttyOpenArgs(session, settings, opts));
     return;
   }
 
   if (settings.defaultTerminal === "WezTerm") {
     const args = ["-na", "WezTerm.app", "--args", "start"];
-    if (session.projectPath) args.push("--cwd", session.projectPath);
-    args.push("--", process.env.SHELL || "/bin/zsh", "-ic", getResumeCommand(session, settings, { withCwd: false }));
+    if (!sshArgs && session.projectPath) args.push("--cwd", session.projectPath);
+    args.push(
+      "--",
+      process.env.SHELL || "/bin/zsh",
+      "-ic",
+      getResumeCommand(session, settings, { ...opts, withCwd: Boolean(sshArgs) }),
+    );
     await runProcess("/usr/bin/open", args);
     return;
   }
 
   if (settings.defaultTerminal === "Warp") {
-    await runProcess("/usr/bin/open", session.projectPath ? ["-a", "Warp", session.projectPath] : ["-a", "Warp"]);
+    if (sshArgs) {
+      await runAppleScript(`tell application "Warp"
+  activate
+  delay 0.2
+  tell application "System Events" to keystroke "${escapeAppleScript(command)}" & return
+end tell`);
+    } else {
+      await runProcess("/usr/bin/open", session.projectPath ? ["-a", "Warp", session.projectPath] : ["-a", "Warp"]);
+    }
     return;
   }
 
@@ -292,8 +412,9 @@ export async function openResumeInSpecificTerminal(
   session: SessionSearchResult,
   settings: AppSettings,
   terminal: AppSettings["defaultTerminal"],
+  opts: ResumeOpenOptions = {},
 ): Promise<void> {
-  await openResumeInTerminal(session, { ...settings, defaultTerminal: terminal });
+  await openResumeInTerminal(session, { ...settings, defaultTerminal: terminal }, opts);
 }
 
 export async function resolveMacApplicationName(names: string[], runner: ProcessRunner = runProcess): Promise<string | null> {
@@ -328,9 +449,60 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
+function shellCommandTokenQuote(s: string, platform: NodeJS.Platform, remoteShell: boolean): string {
+  if (remoteShell || platform !== "win32") return shellQuote(s);
+  if (/^[A-Za-z0-9_\-./]+$/.test(s)) return s;
+  return winQuote(s);
+}
+
+function resolveSshArgs(opts: Pick<ResumeOptions, "sshTarget" | "sshArgs">): string[] | undefined {
+  if (opts.sshArgs) return opts.sshArgs;
+  if (opts.sshTarget) return ["--", opts.sshTarget];
+  return undefined;
+}
+
+function formatSshDisplayCommand(sshArgs: string[], innerCommand: string, platform: NodeJS.Platform): string {
+  const quoteArg = platform === "win32" ? winSshArgQuote : shellQuote;
+  return ["ssh", ...sshArgs.map(quoteArg), quoteArg(innerCommand)].join(" ");
+}
+
+function getResumePowerShellCommand(
+  session: SessionSearchResult,
+  settings: AppSettings,
+  opts: ResumeOpenOptions & { sshArgs: string[] },
+): string {
+  const innerCommand = buildResumeShellCommand(session, settings, {
+    withCwd: true,
+    skipPermissions: opts.skipPermissions ?? false,
+    platform: opts.platform ?? "win32",
+    remoteShell: true,
+  });
+  return ["ssh", ...opts.sshArgs.map(powershellSshArgQuote), powershellQuote(innerCommand)].join(" ");
+}
+
+function powershellSshArgQuote(s: string): string {
+  if (s === "--" || /^-[A-Za-z0-9-]+$/.test(s) || /^\d+$/.test(s)) return s;
+  return powershellQuote(s);
+}
+
+function powershellQuote(s: string): string {
+  return `'${s.replace(/'/g, "''")}'`;
+}
+
+function winSshArgQuote(s: string): string {
+  if (s === "--" || /^-[A-Za-z0-9-]+$/.test(s)) return s;
+  return winSshQuote(s);
+}
+
 function winQuote(s: string): string {
   // cmd.exe quoting: wrap in double quotes, double any embedded quotes.
   return `"${s.replace(/"/g, '""')}"`;
+}
+
+function winSshQuote(s: string): string {
+  // This display command is fed to cmd.exe by WindowsTerminal/Cmd launch paths;
+  // caret escaping keeps cmd from expanding local variables or treating separators as syntax.
+  return `"${s.replace(/"/g, '""').replace(/[\^%&|<>]/g, (ch) => `^${ch}`)}"`;
 }
 
 function escapeAppleScript(s: string): string {

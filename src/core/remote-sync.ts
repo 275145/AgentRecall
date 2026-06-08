@@ -1,0 +1,532 @@
+import { execFile, type ExecFileOptions } from "node:child_process";
+import { loadRemoteSessionPayloads, type RemoteSessionFilePayload } from "./remote-session-loader";
+import type { SessionStore } from "./session-store";
+import { buildSshArgs } from "./ssh-config";
+import type { IndexedSession, SessionEnvironment, SessionSearchResult, SessionSource } from "./types";
+
+export interface RemoteSyncStatus {
+  environmentId: string;
+  indexed: number;
+  error: string | null;
+}
+
+export interface RemoteSyncOptions {
+  runSsh?: (environment: SessionEnvironment, remoteCommand: string) => Promise<string>;
+}
+
+export interface RemoteSessionSummaryPayload {
+  kind: "codex-session" | "claude-project";
+  path: string;
+  mtimeMs: number;
+  size: number;
+  rawId: string;
+  projectPath: string;
+  timestamp: number;
+  originalTitle: string;
+  firstQuestion: string;
+  messageCount: number;
+  gitBranch?: string | null;
+}
+
+export interface RemoteSessionFileFetchOptions {
+  runSsh?: (environment: SessionEnvironment, remoteCommand: string) => Promise<string>;
+}
+
+export const REMOTE_SYNC_EXEC_OPTIONS = {
+  maxBuffer: 128 * 1024 * 1024,
+  timeout: 90_000,
+} satisfies ExecFileOptions;
+
+export async function syncRemoteEnvironment(
+  store: SessionStore,
+  environment: SessionEnvironment,
+  options: RemoteSyncOptions = {},
+): Promise<RemoteSyncStatus> {
+  const runSsh = options.runSsh ?? runSystemSsh;
+  store.updateEnvironmentSyncState(environment.id, "syncing", { lastError: null });
+  try {
+    const output = await runSsh(environment, REMOTE_COLLECTOR_COMMAND);
+    const { payloads, summaries } = decodeRemoteSyncOutput(output);
+    for (const summary of summaries) {
+      store.upsertIndexedSessionSummary(remoteSummaryToIndexedSession(environment, summary), summary.messageCount);
+    }
+    const loaded = loadRemoteSessionPayloads(environment, payloads);
+    for (const item of loaded) store.upsertIndexedSession(item.session, item.messages, item.tokenEvents, item.traceEvents);
+    store.updateEnvironmentSyncState(environment.id, "watching", { lastSyncedAt: Date.now(), lastError: null });
+    return { environmentId: environment.id, indexed: summaries.length + loaded.length, error: null };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    store.updateEnvironmentSyncState(environment.id, "error", { lastError: message });
+    throw error;
+  }
+}
+
+function remoteSummaryToIndexedSession(environment: SessionEnvironment, summary: RemoteSessionSummaryPayload): IndexedSession {
+  const family = summary.kind === "codex-session" ? "codex" : "claude";
+  const source: SessionSource = summary.kind === "codex-session" ? "codex-cli" : "claude-cli";
+  return {
+    sessionKey: `ssh:${environment.id}:${family}:${summary.rawId}`,
+    rawId: summary.rawId,
+    source,
+    projectPath: summary.projectPath,
+    filePath: summary.path,
+    originalTitle: summary.originalTitle || summary.firstQuestion || summary.rawId,
+    firstQuestion: summary.firstQuestion,
+    timestamp: summary.timestamp,
+    fileMtimeMs: summary.mtimeMs,
+    fileSize: summary.size,
+    prUrl: null,
+    prNumber: null,
+    gitBranch: summary.gitBranch,
+    environmentId: environment.id,
+    environmentKind: environment.kind,
+    environmentLabel: environment.label,
+  };
+}
+
+export function encodeRemotePayloadForTest(payloads: RemoteSessionFilePayload[]): string {
+  return payloads
+    .map((payload) =>
+      JSON.stringify({ ...payload, contentBase64: Buffer.from(payload.content, "utf-8").toString("base64"), content: undefined }),
+    )
+    .join("\n");
+}
+
+export function decodeRemotePayload(output: string): RemoteSessionFilePayload[] {
+  return decodeRemoteSyncOutput(output).payloads;
+}
+
+function decodeRemoteSyncOutput(output: string): { payloads: RemoteSessionFilePayload[]; summaries: RemoteSessionSummaryPayload[] } {
+  const payloads: RemoteSessionFilePayload[] = [];
+  const summaries: RemoteSessionSummaryPayload[] = [];
+  for (const [index, line] of output.split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
+    const parsed = parseRemotePayloadLine(line, index + 1);
+    if ("contentBase64" in parsed) {
+      payloads.push({
+        kind: parsed.kind,
+        path: parsed.path,
+        mtimeMs: parsed.mtimeMs,
+        size: parsed.size,
+        content: Buffer.from(parsed.contentBase64 || "", "base64").toString("utf-8"),
+      });
+    } else {
+      summaries.push(parsed);
+    }
+  }
+  return { payloads, summaries };
+}
+
+export function buildRemoteSyncSshArgs(environment: SessionEnvironment, remoteCommand: string): string[] {
+  const baseArgs = buildSshArgs(
+    {
+      hostAlias: environment.hostAlias,
+      host: environment.host,
+      user: environment.user,
+      port: environment.port,
+      authMode: environment.authMode,
+      identityFile: environment.identityFile,
+    },
+    remoteCommand,
+  );
+  const separatorIndex = baseArgs.indexOf("--");
+  if (separatorIndex < 0) return [...REMOTE_SYNC_SSH_OPTIONS, ...baseArgs];
+  return [...baseArgs.slice(0, separatorIndex), ...REMOTE_SYNC_SSH_OPTIONS, ...baseArgs.slice(separatorIndex)];
+}
+
+async function runSystemSsh(environment: SessionEnvironment, remoteCommand: string): Promise<string> {
+  const args = buildRemoteSyncSshArgs(environment, remoteCommand);
+  return new Promise((resolve, reject) => {
+    execFile("ssh", args, REMOTE_SYNC_EXEC_OPTIONS, (error, stdout, stderr) => {
+      if (error) reject(new Error(formatRemoteSyncProcessError(error, stdout, stderr)));
+      else resolve(stdout);
+    });
+  });
+}
+
+export async function fetchRemoteSessionFilePayload(
+  environment: SessionEnvironment,
+  session: SessionSearchResult,
+  options: RemoteSessionFileFetchOptions = {},
+): Promise<RemoteSessionFilePayload> {
+  const runSsh = options.runSsh ?? runSystemSsh;
+  const output = await runSsh(environment, buildRemoteFileFetchCommand(session.filePath));
+  const payloads = decodeRemotePayload(output);
+  const expectedKind = session.source === "codex-cli" || session.source === "codex-app" || session.source === "codex-internal" ? "codex-session" : "claude-project";
+  const payload = payloads.find((item) => item.path === session.filePath && item.kind === expectedKind) ?? payloads[0];
+  if (!payload) throw new Error("Remote session file fetch returned no payload.");
+  return payload;
+}
+
+function buildRemoteFileFetchCommand(filePath: string): string {
+  const script = String.raw`import base64, json
+from pathlib import Path
+
+path = Path(base64.b64decode("__PATH_B64__").decode("utf-8"))
+stat = path.stat()
+content = path.read_bytes()
+suffix = path.suffix.lower()
+kind = "claude-project" if ".claude/projects" in str(path) or suffix == ".json" else "codex-session"
+print(json.dumps({
+  "kind": kind,
+  "path": str(path),
+  "mtimeMs": int(stat.st_mtime * 1000),
+  "size": stat.st_size,
+  "contentBase64": base64.b64encode(content).decode("ascii"),
+}, ensure_ascii=False))`.replace("__PATH_B64__", Buffer.from(filePath, "utf-8").toString("base64"));
+  return buildPythonBase64Command(script);
+}
+
+export function formatRemoteSyncProcessError(error: unknown, stdout: string, stderr: string): string {
+  const processError = error as { code?: string | number | null; killed?: boolean; message?: string; signal?: string | null };
+  const reason = processError.killed
+    ? `SSH remote sync timed out after ${Math.round((REMOTE_SYNC_EXEC_OPTIONS.timeout ?? 0) / 1000)}s.`
+    : `SSH remote sync failed${processError.code ? ` with exit code ${processError.code}` : ""}.`;
+  const cleanStderr = stderr.trim();
+  if (cleanStderr) return `${reason} ${truncateRemoteError(cleanStderr)}`;
+
+  const stdoutBytes = Buffer.byteLength(stdout);
+  if (stdoutBytes > 0) {
+    if (looksLikeRemotePayload(stdout)) {
+      return `${reason} The remote produced ${formatBytes(stdoutBytes)} of session data before failing; the payload output is hidden to avoid flooding the app.`;
+    }
+    return `${reason} stdout: ${truncateRemoteError(stdout.trim())}`;
+  }
+
+  return `${reason} ${truncateRemoteError(processError.message || "No error details were returned.")}`;
+}
+
+function looksLikeRemotePayload(output: string): boolean {
+  return /^\s*\{"kind":\s*"(?:codex-session|codex-index|claude-project|claude-session-index)"/.test(output);
+}
+
+function truncateRemoteError(value: string, maxChars = 1200): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}... truncated ${formatBytes(Buffer.byteLength(value))}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+type RemotePayloadWireRecord = Omit<RemoteSessionFilePayload, "content"> & { contentBase64: string };
+type RemoteSyncWireRecord = RemotePayloadWireRecord | RemoteSessionSummaryPayload;
+
+const REMOTE_SESSION_FILE_KINDS = new Set<RemoteSessionFilePayload["kind"]>([
+  "codex-session",
+  "codex-index",
+  "claude-project",
+  "claude-session-index",
+]);
+
+const REMOTE_SYNC_SSH_OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"];
+
+function parseRemotePayloadLine(line: string, lineNumber: number): RemoteSyncWireRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid remote payload at line ${lineNumber}: ${detail}`);
+  }
+  if (!isRecord(parsed)) throw new Error(`Invalid remote payload at line ${lineNumber}: expected object`);
+
+  const kind = parsed.kind;
+  if (typeof kind !== "string" || !REMOTE_SESSION_FILE_KINDS.has(kind as RemoteSessionFilePayload["kind"])) {
+    throw new Error(`Invalid remote payload at line ${lineNumber}: invalid kind`);
+  }
+  if (typeof parsed.path !== "string") throw new Error(`Invalid remote payload at line ${lineNumber}: missing path`);
+  if (typeof parsed.mtimeMs !== "number" || !Number.isFinite(parsed.mtimeMs)) {
+    throw new Error(`Invalid remote payload at line ${lineNumber}: invalid mtimeMs`);
+  }
+  if (typeof parsed.size !== "number" || !Number.isFinite(parsed.size)) {
+    throw new Error(`Invalid remote payload at line ${lineNumber}: invalid size`);
+  }
+  if (typeof parsed.contentBase64 !== "string") return parseRemoteSummaryRecord(parsed, lineNumber, kind as RemoteSessionSummaryPayload["kind"]);
+  if (!isCanonicalBase64(parsed.contentBase64)) {
+    throw new Error(`Invalid remote payload at line ${lineNumber}: invalid contentBase64`);
+  }
+
+  return {
+    kind: kind as RemoteSessionFilePayload["kind"],
+    path: parsed.path,
+    mtimeMs: parsed.mtimeMs,
+    size: parsed.size,
+    contentBase64: parsed.contentBase64,
+  };
+}
+
+function parseRemoteSummaryRecord(
+  parsed: Record<string, unknown>,
+  lineNumber: number,
+  kind: RemoteSessionSummaryPayload["kind"],
+): RemoteSessionSummaryPayload {
+  if (kind !== "codex-session" && kind !== "claude-project") {
+    throw new Error(`Invalid remote payload at line ${lineNumber}: summaries must be session files`);
+  }
+  const rawId = stringField(parsed, "rawId");
+  const projectPath = stringField(parsed, "projectPath");
+  const originalTitle = stringField(parsed, "originalTitle");
+  const firstQuestion = stringField(parsed, "firstQuestion");
+  const timestamp = numberField(parsed, "timestamp");
+  const messageCount = numberField(parsed, "messageCount");
+  if (!rawId) throw new Error(`Invalid remote payload at line ${lineNumber}: missing rawId`);
+  if (!Number.isFinite(timestamp) || timestamp < 0) throw new Error(`Invalid remote payload at line ${lineNumber}: invalid timestamp`);
+  if (!Number.isFinite(messageCount) || messageCount < 0) throw new Error(`Invalid remote payload at line ${lineNumber}: invalid messageCount`);
+  return {
+    kind,
+    path: stringField(parsed, "path"),
+    mtimeMs: numberField(parsed, "mtimeMs"),
+    size: numberField(parsed, "size"),
+    rawId,
+    projectPath,
+    timestamp,
+    originalTitle: originalTitle || firstQuestion || rawId,
+    firstQuestion,
+    messageCount,
+    gitBranch: stringField(parsed, "gitBranch") || null,
+  };
+}
+
+function stringField(value: Record<string, unknown>, key: string): string {
+  const field = value[key];
+  return typeof field === "string" ? field : "";
+}
+
+function numberField(value: Record<string, unknown>, key: string): number {
+  const field = value[key];
+  return typeof field === "number" && Number.isFinite(field) ? field : 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isCanonicalBase64(value: string): boolean {
+  return /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+}
+
+const REMOTE_COLLECTOR_SCRIPT = String.raw`import json
+from pathlib import Path
+
+MAX_SESSION_FILES = 2500
+
+home = Path.home()
+
+def text_from_blocks(content):
+  if isinstance(content, str):
+    return content
+  if not isinstance(content, list):
+    return ""
+  parts = []
+  for block in content:
+    if not isinstance(block, dict):
+      continue
+    if block.get("type") in {"tool_use", "tool_result", "input_image"}:
+      continue
+    text = block.get("text")
+    if isinstance(text, str) and text:
+      parts.append(text)
+  return "\n".join(parts)
+
+def meaningful(text):
+  value = text.strip()
+  if not value:
+    return False
+  if value.startswith("<") or value.startswith("Caveat:"):
+    return False
+  if value.startswith("[Request interrupted by user") or value.startswith("[Image:"):
+    return False
+  return True
+
+def title_from(text):
+  lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+  return (lines[0] if lines else text.strip())[:120]
+
+def load_codex_titles():
+  titles = {}
+  index_path = home / ".codex" / "session_index.jsonl"
+  try:
+    with index_path.open("r", encoding="utf-8", errors="replace") as handle:
+      for line in handle:
+        try:
+          row = json.loads(line)
+        except Exception:
+          continue
+        if not isinstance(row, dict):
+          continue
+        raw_id = row.get("id")
+        title = row.get("thread_name")
+        updated_at = row.get("updated_at")
+        if isinstance(raw_id, str) and isinstance(title, str) and title:
+          titles[raw_id] = (title, updated_at if isinstance(updated_at, str) else "")
+  except Exception:
+    pass
+  return titles
+
+def load_claude_index():
+  index = {}
+  root = home / ".claude" / "sessions"
+  if not root.exists():
+    return index
+  for path in root.glob("*.json"):
+    try:
+      row = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+      continue
+    if not isinstance(row, dict):
+      continue
+    raw_id = row.get("sessionId")
+    if isinstance(raw_id, str) and raw_id:
+      index[raw_id] = {
+        "cwd": row.get("cwd") if isinstance(row.get("cwd"), str) else "",
+        "startedAt": row.get("startedAt") if isinstance(row.get("startedAt"), (int, float)) else 0,
+      }
+  return index
+
+def emit(record):
+  print(json.dumps(record, ensure_ascii=False))
+
+def emit_codex_summary(path, stat, titles):
+  raw_id = path.stem
+  project_path = ""
+  timestamp = int(stat.st_mtime * 1000)
+  first_question = ""
+  message_count = 0
+  git_branch = ""
+  try:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+      for line in handle:
+        try:
+          row = json.loads(line)
+        except Exception:
+          continue
+        if not isinstance(row, dict):
+          continue
+        if row.get("type") == "session_meta":
+          payload = row.get("payload")
+          if isinstance(payload, dict):
+            raw_id = payload.get("id") if isinstance(payload.get("id"), str) else raw_id
+            project_path = payload.get("cwd") if isinstance(payload.get("cwd"), str) else project_path
+            git = payload.get("git")
+            if isinstance(git, dict) and isinstance(git.get("branch"), str):
+              git_branch = git.get("branch")
+          if isinstance(row.get("timestamp"), str):
+            try:
+              from datetime import datetime
+              timestamp = int(datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00")).timestamp() * 1000)
+            except Exception:
+              pass
+          continue
+        role = None
+        content = None
+        if row.get("type") == "response_item":
+          payload = row.get("payload")
+          if isinstance(payload, dict) and payload.get("type") == "message":
+            role = payload.get("role")
+            content = payload.get("content")
+        elif row.get("type") == "message":
+          role = row.get("role")
+          content = row.get("content")
+        if role in {"user", "assistant"}:
+          text = text_from_blocks(content)
+          if meaningful(text):
+            message_count += 1
+            if role == "user" and not first_question:
+              first_question = text
+  except Exception:
+    return
+  indexed_title = titles.get(raw_id, ("", ""))[0]
+  emit({
+    "kind": "codex-session",
+    "path": str(path),
+    "mtimeMs": int(stat.st_mtime * 1000),
+    "size": stat.st_size,
+    "rawId": raw_id,
+    "projectPath": project_path,
+    "timestamp": timestamp,
+    "originalTitle": indexed_title or title_from(first_question) or raw_id,
+    "firstQuestion": first_question,
+    "messageCount": message_count,
+    "gitBranch": git_branch,
+  })
+
+def emit_claude_summary(path, stat, index):
+  raw_id = path.stem
+  meta = index.get(raw_id, {})
+  project_path = meta.get("cwd", "")
+  timestamp = int(meta.get("startedAt") or stat.st_mtime * 1000)
+  first_question = ""
+  message_count = 0
+  git_branch = ""
+  try:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+      for line in handle:
+        try:
+          row = json.loads(line)
+        except Exception:
+          continue
+        if not isinstance(row, dict) or row.get("type") not in {"user", "assistant"}:
+          continue
+        if not project_path and isinstance(row.get("cwd"), str):
+          project_path = row.get("cwd")
+        if not git_branch and isinstance(row.get("gitBranch"), str):
+          git_branch = row.get("gitBranch")
+        message = row.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        text = text_from_blocks(content)
+        if meaningful(text):
+          message_count += 1
+          if row.get("type") == "user" and not first_question:
+            first_question = text
+  except Exception:
+    return
+  emit({
+    "kind": "claude-project",
+    "path": str(path),
+    "mtimeMs": int(stat.st_mtime * 1000),
+    "size": stat.st_size,
+    "rawId": raw_id,
+    "projectPath": project_path,
+    "timestamp": timestamp,
+    "originalTitle": title_from(first_question) or raw_id,
+    "firstQuestion": first_question,
+    "messageCount": message_count,
+    "gitBranch": git_branch,
+  })
+
+candidates = []
+for kind, root, pattern in [
+  ("codex-session", home / ".codex" / "sessions", "*.jsonl"),
+  ("claude-project", home / ".claude" / "projects", "*.jsonl"),
+]:
+  if not root.exists():
+    continue
+  paths = root.rglob(pattern) if root.is_dir() else []
+  for path in paths:
+    try:
+      stat = path.stat()
+      candidates.append((stat.st_mtime, kind, path, stat.st_size))
+    except Exception:
+      pass
+
+codex_titles = load_codex_titles()
+claude_index = load_claude_index()
+for _mtime, kind, path, _size in sorted(candidates, key=lambda item: item[0], reverse=True)[:MAX_SESSION_FILES]:
+  try:
+    stat = path.stat()
+    if kind == "codex-session":
+      emit_codex_summary(path, stat, codex_titles)
+    else:
+      emit_claude_summary(path, stat, claude_index)
+  except Exception:
+    pass`;
+
+const REMOTE_COLLECTOR_COMMAND = buildPythonBase64Command(REMOTE_COLLECTOR_SCRIPT);
+
+function buildPythonBase64Command(script: string): string {
+  const encoded = Buffer.from(script, "utf-8").toString("base64");
+  return `python3 -c 'import base64; exec(base64.b64decode("${encoded}").decode("utf-8"))'`;
+}

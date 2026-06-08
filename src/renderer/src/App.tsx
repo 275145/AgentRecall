@@ -19,13 +19,16 @@ import {
   KeyRound,
   Keyboard,
   Languages,
+  Laptop,
   Moon,
   PackageSearch,
   Pin,
   PinOff,
   Play,
+  Plus,
   RefreshCw,
   Search,
+  Server,
   Settings,
   Star,
   Sun,
@@ -42,16 +45,21 @@ import type { AppSettings, AppSettingsUpdate } from "../../core/platform";
 import type { InstalledSkill, InstalledSkillsSnapshot } from "../../core/skill-manager";
 import { globalShortcutOptions } from "../../core/shortcuts";
 import { terminalSelectOptions } from "../../core/terminal-options";
+import type { SshConfigHost } from "../../core/ssh-config";
 import type {
+  EnvironmentSyncState,
+  EnvironmentUpsertInput,
   LiveSessionSnapshot,
   ProjectSummary,
   SearchOptions,
+  SessionEnvironment,
   SessionMessage,
   SessionSearchResult,
   SessionSortBy,
   SessionStats,
   SessionStatsPeriod,
   SessionTraceEvent,
+  SshAuthMode,
   UsageQuotaCard,
   UsageQuotaSnapshot,
 } from "../../core/types";
@@ -88,9 +96,14 @@ import { SkillsDialog } from "./components/skills-dialog";
 import { useClampedContextMenuStyle } from "./context-menu-position";
 import {
   SOURCE_LABEL,
+  environmentBadgeLabel,
+  environmentBadgeTitle,
   isBranchTag,
+  isRemoteSession,
   liveStatusFilterLabel,
   localizedLiveStateLabel,
+  remoteOpenAppTitle,
+  remoteRevealTitle,
   resumeRouteMessage,
   sourceFilterLabel,
   sourceFilters,
@@ -169,7 +182,62 @@ function sortLabel(value: SessionSortBy, language: LanguageMode): string {
   return localize(language, "Latest activity", "最近活动");
 }
 
+function environmentStatus(environment: SessionEnvironment): EnvironmentSyncState | "local" {
+  if (environment.kind === "local") return "local";
+  if (!environment.enabled) return "disconnected";
+  return environment.syncState;
+}
+
+function environmentStatusLabel(environment: SessionEnvironment, language: LanguageMode): string {
+  const status = environmentStatus(environment);
+  if (status === "local") return localize(language, "local", "本地");
+  if (status === "syncing") return localize(language, "syncing", "同步中");
+  if (status === "watching") return localize(language, "watching", "监听中");
+  if (status === "error") return localize(language, "error", "错误");
+  if (status === "disconnected") return localize(language, "disconnected", "未连接");
+  return localize(language, "idle", "空闲");
+}
+
+function environmentTarget(environment: SessionEnvironment, language: LanguageMode): string {
+  if (environment.kind === "local") return localize(language, "This computer", "这台电脑");
+  const destination = environment.hostAlias || environment.host || environment.label;
+  const userPrefix = environment.user && !environment.hostAlias ? `${environment.user}@` : "";
+  const portSuffix = environment.port ? `:${environment.port}` : "";
+  return `${userPrefix}${destination}${portSuffix}`;
+}
+
 const SIDEBAR_SECTIONS_STORAGE_KEY = "agent-session-search-sidebar-sections";
+
+export interface ResolvedSearchScope {
+  environmentId: string | "all" | undefined;
+  projectPath: string | undefined;
+  projectEnvironmentConflict: boolean;
+}
+
+export function resolveSearchScope(
+  environmentId: string | "all",
+  projectPath: string | undefined,
+  projectEnvironmentId: string | undefined,
+): ResolvedSearchScope {
+  const selectedProjectEnvironmentId = projectPath ? projectEnvironmentId : undefined;
+  const explicitEnvironmentId = environmentId !== "all" ? environmentId : undefined;
+  return {
+    environmentId: explicitEnvironmentId ?? selectedProjectEnvironmentId,
+    projectPath,
+    projectEnvironmentConflict: Boolean(
+      projectPath && explicitEnvironmentId && selectedProjectEnvironmentId && explicitEnvironmentId !== selectedProjectEnvironmentId,
+    ),
+  };
+}
+
+export function existingSshHostAliases(environments: Array<Pick<SessionEnvironment, "kind" | "label" | "hostAlias">>): Set<string> {
+  const aliases = new Set<string>();
+  for (const environment of environments) {
+    if (environment.kind !== "ssh") continue;
+    if (environment.hostAlias) aliases.add(environment.hostAlias);
+  }
+  return aliases;
+}
 
 function loadInitialSidebarSections(): SidebarSectionsState {
   if (typeof window === "undefined") return readSidebarSections(null);
@@ -182,8 +250,10 @@ export function App(): ReactElement {
   const [sidebarSections, setSidebarSections] = useState<SidebarSectionsState>(() => loadInitialSidebarSections());
   const [query, setQuery] = useState("");
   const [source, setSource] = useState<SearchOptions["source"]>("all");
+  const [environmentId, setEnvironmentId] = useState<string | "all">("all");
   const [tag, setTag] = useState<string | undefined>();
   const [projectPath, setProjectPath] = useState<string | undefined>();
+  const [projectEnvironmentId, setProjectEnvironmentId] = useState<string | undefined>();
   const [visibility, setVisibility] = useState<ViewMode>("default");
   const [sortBy, setSortBy] = useState<SessionSortBy>("created");
   const [liveStatus, setLiveStatus] = useState<LiveStatusFilter>("all");
@@ -192,6 +262,7 @@ export function App(): ReactElement {
   const [results, setResults] = useState<SessionSearchResult[]>([]);
   const [tags, setTags] = useState<string[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [environments, setEnvironments] = useState<SessionEnvironment[]>([]);
   const [stats, setStats] = useState<SessionStats>(EMPTY_STATS);
   const [statsPeriod, setStatsPeriod] = useState<SessionStatsPeriod>("today");
   const [statsRefreshing, setStatsRefreshing] = useState(false);
@@ -215,6 +286,7 @@ export function App(): ReactElement {
   const [actionStatus, setActionStatus] = useState<ActionStatus | null>(null);
   const [refreshFeedback, setRefreshFeedback] = useState<RefreshFeedback>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sshDialogOpen, setSshDialogOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [apiConfigOpen, setApiConfigOpen] = useState(false);
   const [installedSkills, setInstalledSkills] = useState<InstalledSkillsSnapshot>(EMPTY_SKILLS);
@@ -234,25 +306,28 @@ export function App(): ReactElement {
   const searchRef = useRef<HTMLInputElement>(null);
   const t = useCallback((en: string, zh: string) => localize(language, en, zh), [language]);
   const searchScopeKey = useMemo(
-    () => JSON.stringify([query, source, tag ?? "", projectPath ?? "", visibility, sortBy]),
-    [query, source, tag, projectPath, visibility, sortBy],
+    () => JSON.stringify([query, source, environmentId, tag ?? "", projectPath ?? "", projectEnvironmentId ?? "", visibility, sortBy]),
+    [query, source, environmentId, tag, projectPath, projectEnvironmentId, visibility, sortBy],
   );
 
   const load = useCallback(async () => {
     const requestId = ++loadSeqRef.current;
+    const searchScope = resolveSearchScope(environmentId, projectPath, projectEnvironmentId);
     const options: SearchOptions = {
       query,
       source,
       tag,
-      projectPath,
+      projectPath: searchScope.projectPath,
+      environmentId: searchScope.environmentId,
       visibility,
       sortBy,
       limit: sessionLimit + 1,
     };
-    const [rawResults, nextTags, nextProjects, nextStats] = await Promise.all([
-      window.sessionSearch.searchSessions(options),
+    const [rawResults, nextTags, nextProjects, nextEnvironments, nextStats] = await Promise.all([
+      searchScope.projectEnvironmentConflict ? Promise.resolve([]) : window.sessionSearch.searchSessions(options),
       window.sessionSearch.listTags(),
       window.sessionSearch.listProjects(),
+      window.sessionSearch.listEnvironments(),
       window.sessionSearch.getStats({ period: statsPeriod }),
     ]);
     if (requestId !== loadSeqRef.current) return;
@@ -261,11 +336,12 @@ export function App(): ReactElement {
     setHasMoreSessions(rawResults.length > sessionLimit);
     setTags(nextTags);
     setProjects(nextProjects);
+    setEnvironments(nextEnvironments);
     setStats(nextStats);
     setSelectedKey((current) =>
       current && !nextResults.some((session) => session.sessionKey === current) ? null : current,
     );
-  }, [query, source, tag, projectPath, visibility, sortBy, sessionLimit, statsPeriod]);
+  }, [query, source, environmentId, tag, projectPath, projectEnvironmentId, visibility, sortBy, sessionLimit, statsPeriod]);
 
   const refreshStats = useCallback(async () => {
     setStatsRefreshing(true);
@@ -421,6 +497,15 @@ export function App(): ReactElement {
     if (source === "codebuddy-cli" && appSettings && !appSettings.includeCodeBuddyCli) setSource("all");
   }, [source, appSettings]);
 
+  useEffect(() => {
+    if (environmentId !== "all" && environments.length > 0 && !environments.some((environment) => environment.id === environmentId)) {
+      setEnvironmentId("all");
+    }
+    if (projectEnvironmentId && environments.length > 0 && !environments.some((environment) => environment.id === projectEnvironmentId)) {
+      clearProjectFilter();
+    }
+  }, [environmentId, environments, projectEnvironmentId]);
+
   useLayoutEffect(() => {
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
@@ -446,10 +531,25 @@ export function App(): ReactElement {
       setApiConfigOpen(false);
       setSettingsOpen(true);
     });
+    const offEnvironments = window.sessionSearch.onEnvironmentsUpdated((nextEnvironments) => {
+      setEnvironments(nextEnvironments);
+      setEnvironmentId((current) =>
+        current !== "all" && !nextEnvironments.some((environment) => environment.id === current) ? "all" : current,
+      );
+      setProjectEnvironmentId((current) => {
+        if (current && !nextEnvironments.some((environment) => environment.id === current)) {
+          setProjectPath(undefined);
+          return undefined;
+        }
+        return current;
+      });
+      void load();
+    });
     return () => {
       offIndex();
       offFocus();
       offOpenSettings();
+      offEnvironments();
     };
   }, [load]);
 
@@ -487,7 +587,8 @@ export function App(): ReactElement {
 
       // Esc backs out of the frontmost layer, one at a time.
       if (event.key === "Escape") {
-        if (dialog) setDialog(null);
+        if (sshDialogOpen) setSshDialogOpen(false);
+        else if (dialog) setDialog(null);
         else if (deleteSessionCandidate && !deletingSession) setDeleteSessionCandidate(null);
         else if (deleteTagName) setDeleteTagName(null);
         else if (contextMenu) setContextMenu(null);
@@ -501,7 +602,7 @@ export function App(): ReactElement {
       }
 
       // Leave list navigation alone while an overlay or menu is in front.
-      if (detail || dialog || deleteSessionCandidate || deleteTagName || contextMenu || skillsOpen || apiConfigOpen || settingsOpen) return;
+      if (detail || dialog || deleteSessionCandidate || deleteTagName || contextMenu || skillsOpen || apiConfigOpen || settingsOpen || sshDialogOpen) return;
 
       if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
         event.preventDefault();
@@ -541,7 +642,7 @@ export function App(): ReactElement {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [displayedResults, selectedKey, detail, dialog, deleteSessionCandidate, deletingSession, deleteTagName, contextMenu, skillsOpen, apiConfigOpen, settingsOpen, actionStatus, t]);
+  }, [displayedResults, selectedKey, detail, dialog, deleteSessionCandidate, deletingSession, deleteTagName, contextMenu, skillsOpen, apiConfigOpen, settingsOpen, sshDialogOpen, actionStatus, t]);
 
   useEffect(() => {
     if (!selectedKey) return;
@@ -549,9 +650,9 @@ export function App(): ReactElement {
   }, [selectedKey]);
 
   useEffect(() => {
-    document.body.classList.toggle("overlay-open", Boolean(detail || skillsOpen || apiConfigOpen));
+    document.body.classList.toggle("overlay-open", Boolean(detail || skillsOpen || apiConfigOpen || settingsOpen || sshDialogOpen));
     return () => document.body.classList.remove("overlay-open");
-  }, [detail, skillsOpen, apiConfigOpen]);
+  }, [detail, skillsOpen, apiConfigOpen, settingsOpen, sshDialogOpen]);
 
   const visibleSourceFilters = useMemo(() => {
     if (!appSettings) return sourceFilters(null);
@@ -564,8 +665,12 @@ export function App(): ReactElement {
     });
   }, [appSettings, pendingPersonalSources]);
   const selectedProject = useMemo(
-    () => projects.find((project) => project.path === projectPath) || null,
-    [projects, projectPath],
+    () => projects.find((project) => project.path === projectPath && project.environmentId === projectEnvironmentId) || null,
+    [projects, projectPath, projectEnvironmentId],
+  );
+  const selectedEnvironment = useMemo(
+    () => (environmentId === "all" ? null : environments.find((environment) => environment.id === environmentId) ?? null),
+    [environmentId, environments],
   );
   const searchPlaceholder = projectPath
     ? t(`Search within ${selectedProject?.label || "project"}`, `在 ${selectedProject?.label || "项目"} 中搜索`)
@@ -581,6 +686,20 @@ export function App(): ReactElement {
 
   function toggleSidebarSectionById(section: SidebarSectionId): void {
     setSidebarSections((current) => toggleSidebarSection(current, section));
+  }
+
+  function clearProjectFilter(): void {
+    setProjectPath(undefined);
+    setProjectEnvironmentId(undefined);
+  }
+
+  function selectEnvironment(nextEnvironmentId: string | "all"): void {
+    setEnvironmentId(nextEnvironmentId);
+  }
+
+  function selectProject(project: ProjectSummary): void {
+    setProjectPath(project.path);
+    setProjectEnvironmentId(project.environmentId);
   }
 
   async function openDetail(session: SessionSearchResult): Promise<void> {
@@ -868,6 +987,59 @@ export function App(): ReactElement {
     }
   }
 
+  async function reloadEnvironmentData(): Promise<void> {
+    setEnvironments(await window.sessionSearch.listEnvironments());
+    await load();
+  }
+
+  async function refreshEnvironment(environment: SessionEnvironment): Promise<void> {
+    setSettingsFeedback({ kind: "running", message: t(`Refreshing ${environment.label}...`, `正在刷新 ${environment.label}...`) });
+    try {
+      await window.sessionSearch.refreshEnvironment(environment.id);
+      await reloadEnvironmentData();
+      const message = t(`${environment.label} refreshed.`, `${environment.label} 已刷新。`);
+      setSettingsFeedback({ kind: "success", message });
+      window.setTimeout(() => {
+        setSettingsFeedback((current) => (current?.kind === "success" && current.message === message ? null : current));
+      }, 1800);
+    } catch (error) {
+      setSettingsFeedback({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function deleteEnvironment(environment: SessionEnvironment): Promise<void> {
+    setSettingsFeedback({ kind: "running", message: t(`Deleting ${environment.label}...`, `正在删除 ${environment.label}...`) });
+    try {
+      await window.sessionSearch.deleteEnvironment(environment.id);
+      if (environmentId === environment.id) setEnvironmentId("all");
+      if (projectEnvironmentId === environment.id) clearProjectFilter();
+      await reloadEnvironmentData();
+      const message = t(`${environment.label} deleted.`, `${environment.label} 已删除。`);
+      setSettingsFeedback({ kind: "success", message });
+      window.setTimeout(() => {
+        setSettingsFeedback((current) => (current?.kind === "success" && current.message === message ? null : current));
+      }, 1800);
+    } catch (error) {
+      setSettingsFeedback({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function saveSshEnvironment(input: EnvironmentUpsertInput): Promise<void> {
+    setSettingsFeedback({ kind: "running", message: t("Saving SSH environment...", "正在保存 SSH 环境...") });
+    try {
+      await window.sessionSearch.saveEnvironment(input);
+      await reloadEnvironmentData();
+      const message = t("SSH environment saved.", "SSH 环境已保存。");
+      setSettingsFeedback({ kind: "success", message });
+      window.setTimeout(() => {
+        setSettingsFeedback((current) => (current?.kind === "success" && current.message === message ? null : current));
+      }, 1800);
+    } catch (error) {
+      setSettingsFeedback({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
+  }
+
   async function applyApiConfigToCodex(apiConfig: ApiConfig): Promise<void> {
     setSettingsFeedback({ kind: "running", message: t("Applying Codex profile...", "正在应用 Codex 配置...") });
     try {
@@ -1005,6 +1177,27 @@ export function App(): ReactElement {
           </nav>
         ) : null}
 
+        <SidebarSectionHeader title={t("Environments", "环境")} expanded={sidebarSections.environments} onToggle={() => toggleSidebarSectionById("environments")} />
+        {sidebarSections.environments ? (
+          <nav className="environment-list">
+            <button className={environmentId === "all" ? "active" : ""} onClick={() => selectEnvironment("all")}>
+              {t("All Environments", "全部环境")}
+            </button>
+            {environments.map((environment) => (
+              <button
+                key={environment.id}
+                className={`environment-row ${environmentId === environment.id ? "active" : ""} ${environmentStatus(environment)}`}
+                onClick={() => selectEnvironment(environment.id)}
+                title={environmentTarget(environment, language)}
+              >
+                {environment.kind === "local" ? <Laptop size={13} /> : <Server size={13} />}
+                <span>{environment.label}</span>
+                <em>{environmentStatusLabel(environment, language)}</em>
+              </button>
+            ))}
+          </nav>
+        ) : null}
+
         <SidebarSectionHeader title={t("Sources", "来源")} expanded={sidebarSections.sources} onToggle={() => toggleSidebarSectionById("sources")} />
         {sidebarSections.sources ? (
           <nav className="nav-group">
@@ -1019,14 +1212,20 @@ export function App(): ReactElement {
         <SidebarSectionHeader title={t("Projects", "项目")} expanded={sidebarSections.projects} onToggle={() => toggleSidebarSectionById("projects")} />
         {sidebarSections.projects ? (
           <nav className="project-list">
-            <button className={!projectPath ? "active" : ""} onClick={() => setProjectPath(undefined)}>
+            <button
+              className={!projectPath ? "active" : ""}
+              onClick={() => {
+                setProjectPath(undefined);
+                setProjectEnvironmentId(undefined);
+              }}
+            >
               {t("All Projects", "全部项目")}
             </button>
             {projects.map((project) => (
               <button
-                key={project.path}
-                className={`project-row ${projectPath === project.path ? "active" : ""}`}
-                onClick={() => setProjectPath(project.path)}
+                key={`${project.environmentId}:${project.path}`}
+                className={`project-row ${projectPath === project.path && projectEnvironmentId === project.environmentId ? "active" : ""}`}
+                onClick={() => selectProject(project)}
                 title={project.path}
               >
                 <Folder size={13} />
@@ -1089,8 +1288,17 @@ export function App(): ReactElement {
             </span>
           </div>
           {selectedProject ? (
-            <button className="chip clear" onClick={() => setProjectPath(undefined)} title={selectedProject.path}>
+            <button
+              className="chip clear"
+              onClick={clearProjectFilter}
+              title={selectedProject.path}
+            >
               {selectedProject.label} ×
+            </button>
+          ) : null}
+          {selectedEnvironment ? (
+            <button className="chip clear" onClick={() => selectEnvironment("all")} title={environmentTarget(selectedEnvironment, language)}>
+              {selectedEnvironment.label} ×
             </button>
           ) : null}
           {tag ? (
@@ -1349,6 +1557,7 @@ export function App(): ReactElement {
       {settingsOpen ? (
         <SettingsDialog
           settings={appSettings}
+          environments={environments}
           theme={theme}
           language={language}
           feedback={settingsFeedback}
@@ -1360,7 +1569,20 @@ export function App(): ReactElement {
           skillHookInstalled={skillHookInstalled}
           skillHookBusy={skillHookBusy}
           onSkillHookChange={(enabled) => void toggleSkillUsageHook(enabled)}
+          onRefreshEnvironment={(environment) => void refreshEnvironment(environment)}
+          onDeleteEnvironment={(environment) => void deleteEnvironment(environment)}
+          onAddSsh={() => setSshDialogOpen(true)}
           onClose={() => setSettingsOpen(false)}
+        />
+      ) : null}
+
+      {sshDialogOpen ? (
+        <SshEnvironmentDialog
+          environments={environments}
+          language={language}
+          feedback={settingsFeedback}
+          onSaveEnvironment={(input) => saveSshEnvironment(input)}
+          onClose={() => setSshDialogOpen(false)}
         />
       ) : null}
 
@@ -1556,6 +1778,10 @@ function SessionRow({
             {sourceUiFamily(session.source) === "claude" ? <Code2 size={13} /> : <TerminalIcon size={13} />}
             {SOURCE_LABEL[session.source]}
           </span>
+          <span className={`environment-badge ${session.environmentKind}`} title={environmentBadgeTitle(session, language)}>
+            {isRemoteSession(session) ? <Server size={13} /> : <Laptop size={13} />}
+            {environmentBadgeLabel(session, language)}
+          </span>
           <span>{session.projectPath || l("No project path", "无项目路径")}</span>
           <span>{formatRelativeTime(session.timestamp)}</span>
           <span>{l(`${session.messageCount} messages`, `${session.messageCount} 条消息`)}</span>
@@ -1647,6 +1873,9 @@ function ContextMenu({
 }): ReactElement {
   const l = (en: string, zh: string) => localize(language, en, zh);
   const menu = useClampedContextMenuStyle(state);
+  const localOnlyDisabled = isRemoteSession(state.session);
+  const revealTitle = localOnlyDisabled ? remoteRevealTitle(language) : l(`Show in ${revealLabel}`, `在${revealLabel}中显示`);
+  const openAppTitle = localOnlyDisabled ? remoteOpenAppTitle(language) : l("Open native app", "打开原生应用");
   return (
     <div ref={menu.ref} className="context-menu" style={menu.style} onClick={(event) => event.stopPropagation()}>
       <button onClick={onRename}>
@@ -1673,7 +1902,7 @@ function ContextMenu({
         </button>
       ) : null}
       {showMacActions ? (
-        <button onClick={onOpenApp}>
+        <button onClick={onOpenApp} disabled={localOnlyDisabled} title={openAppTitle}>
           <AppWindow size={14} /> Open App
         </button>
       ) : null}
@@ -1684,7 +1913,7 @@ function ContextMenu({
       <button onClick={onExportMarkdown}>
         <Download size={14} /> {l("Export Markdown", "导出 Markdown")}
       </button>
-      <button onClick={onReveal}>
+      <button onClick={onReveal} disabled={localOnlyDisabled} title={revealTitle}>
         <FolderOpen size={14} /> Show in {revealLabel}
       </button>
       <hr />
@@ -1697,6 +1926,7 @@ function ContextMenu({
 
 function SettingsDialog({
   settings,
+  environments,
   theme,
   language,
   feedback,
@@ -1708,9 +1938,13 @@ function SettingsDialog({
   skillHookInstalled,
   skillHookBusy,
   onSkillHookChange,
+  onRefreshEnvironment,
+  onDeleteEnvironment,
+  onAddSsh,
   onClose,
 }: {
   settings: AppSettings | null;
+  environments: SessionEnvironment[];
   theme: ThemeMode;
   language: LanguageMode;
   feedback: SettingsFeedback;
@@ -1722,13 +1956,16 @@ function SettingsDialog({
   skillHookInstalled: boolean | null;
   skillHookBusy: boolean;
   onSkillHookChange: (enabled: boolean) => void;
+  onRefreshEnvironment: (environment: SessionEnvironment) => void;
+  onDeleteEnvironment: (environment: SessionEnvironment) => void;
+  onAddSsh: () => void;
   onClose: () => void;
 }): ReactElement {
   const defaultTerminal = settings?.defaultTerminal ?? (RUNTIME_PLATFORM === "win32" ? "WindowsTerminal" : "Terminal");
   const globalShortcut = settings?.globalShortcut ?? (RUNTIME_PLATFORM === "win32" ? "Ctrl+Alt+Space" : "Alt+Space");
   const saving = feedback?.kind === "running";
   const l = (en: string, zh: string) => localize(language, en, zh);
-  const [activeSection, setActiveSection] = useState<"terminal" | "shortcut" | "sources" | "usage" | "skills" | "appearance">("terminal");
+  const [activeSection, setActiveSection] = useState<"terminal" | "shortcut" | "connections" | "sources" | "usage" | "skills" | "appearance">("terminal");
 
   return (
     <div className="dialog-backdrop" onMouseDown={onClose}>
@@ -1748,6 +1985,10 @@ function SettingsDialog({
             <button className={activeSection === "shortcut" ? "active" : ""} onClick={() => setActiveSection("shortcut")}>
               <Keyboard size={15} />
               <span>{l("Global shortcut", "全局快捷键")}</span>
+            </button>
+            <button className={activeSection === "connections" ? "active" : ""} onClick={() => setActiveSection("connections")}>
+              <Server size={15} />
+              <span>{l("Connections", "连接")}</span>
             </button>
             <button className={activeSection === "sources" ? "active" : ""} onClick={() => setActiveSection("sources")}>
               <Folder size={15} />
@@ -1816,6 +2057,53 @@ function SettingsDialog({
                       </option>
                     ))}
                   </select>
+                </div>
+              </section>
+            ) : null}
+            {activeSection === "connections" ? (
+              <section className="settings-pane connections-pane">
+                <header className="settings-pane-head settings-pane-head-row">
+                  <div>
+                    <h3>{l("Connections", "连接")}</h3>
+                    <p>{l("Local and SSH environments indexed by session search.", "会话搜索索引的本地和 SSH 环境。")}</p>
+                  </div>
+                  <button className="settings-action-button" onClick={onAddSsh}>
+                    <Plus size={14} />
+                    <span>{l("Add SSH", "添加 SSH")}</span>
+                  </button>
+                </header>
+                <div className="connection-list">
+                  {environments.map((environment) => (
+                    <div key={environment.id} className={`connection-row ${environmentStatus(environment)}`}>
+                      <div className="connection-icon">{environment.kind === "local" ? <Laptop size={15} /> : <Server size={15} />}</div>
+                      <div className="connection-main">
+                        <span className="connection-title">{environment.label}</span>
+                        <span className="connection-target">{environmentTarget(environment, language)}</span>
+                        {environment.lastError ? <span className="connection-error">{environment.lastError}</span> : null}
+                      </div>
+                      <span className="connection-status">{environmentStatusLabel(environment, language)}</span>
+                      {environment.kind === "ssh" ? (
+                        <div className="connection-actions">
+                          <button
+                            className="icon-button"
+                            onClick={() => onRefreshEnvironment(environment)}
+                            title={l("Refresh", "刷新")}
+                            aria-label={l(`Refresh ${environment.label}`, `刷新 ${environment.label}`)}
+                          >
+                            <RefreshCw size={14} />
+                          </button>
+                          <button
+                            className="icon-button danger"
+                            onClick={() => onDeleteEnvironment(environment)}
+                            title={l("Delete", "删除")}
+                            aria-label={l(`Delete ${environment.label}`, `删除 ${environment.label}`)}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
                 </div>
               </section>
             ) : null}
@@ -1974,4 +2262,295 @@ function SettingsDialog({
       </section>
     </div>
   );
+}
+
+function SshEnvironmentDialog({
+  environments,
+  language,
+  feedback,
+  onSaveEnvironment,
+  onClose,
+}: {
+  environments: SessionEnvironment[];
+  language: LanguageMode;
+  feedback: SettingsFeedback;
+  onSaveEnvironment: (input: EnvironmentUpsertInput) => Promise<void>;
+  onClose: () => void;
+}): ReactElement {
+  const l = (en: string, zh: string) => localize(language, en, zh);
+  const [mode, setMode] = useState<"config" | "manual">("config");
+  const [hosts, setHosts] = useState<SshConfigHost[]>([]);
+  const [selectedAliases, setSelectedAliases] = useState<Set<string>>(() => new Set());
+  const [loadingHosts, setLoadingHosts] = useState(true);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [manualLabel, setManualLabel] = useState("");
+  const [manualHost, setManualHost] = useState("");
+  const [manualPort, setManualPort] = useState("");
+  const [manualAuthMode, setManualAuthMode] = useState<SshAuthMode>("none");
+  const [manualIdentityFile, setManualIdentityFile] = useState("");
+  const saving = feedback?.kind === "running";
+  const existingAliases = useMemo(() => existingSshHostAliases(environments), [environments]);
+  const selectableAliasCount = [...selectedAliases].filter((alias) => !existingAliases.has(alias)).length;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingHosts(true);
+    window.sessionSearch
+      .listSshConfigHosts()
+      .then((nextHosts) => {
+        if (cancelled) return;
+        setHosts(nextHosts);
+        setSelectedAliases(new Set());
+        setLocalError(null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setHosts([]);
+        setLocalError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingHosts(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function toggleAlias(alias: string): void {
+    if (existingAliases.has(alias)) return;
+    setSelectedAliases((current) => {
+      const next = new Set(current);
+      if (next.has(alias)) next.delete(alias);
+      else next.add(alias);
+      return next;
+    });
+  }
+
+  async function addSelectedHosts(): Promise<void> {
+    const selectedHosts = hosts.filter((host) => selectedAliases.has(host.alias) && !existingAliases.has(host.alias));
+    if (selectedHosts.length === 0) {
+      setLocalError(l("Select at least one SSH config host.", "至少选择一个 SSH 配置主机。"));
+      return;
+    }
+    try {
+      setLocalError(null);
+      for (const host of selectedHosts) {
+        await onSaveEnvironment({
+          kind: "ssh",
+          label: host.alias,
+          hostAlias: host.alias,
+          host: host.hostName,
+          user: host.user,
+          port: host.port,
+          authMode: host.identityFile ? "identityFile" : "none",
+          identityFile: host.identityFile,
+          enabled: true,
+        });
+      }
+      onClose();
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function addManualHost(): Promise<void> {
+    try {
+      const normalized = normalizeManualSshDraft({
+        label: manualLabel,
+        host: manualHost,
+        port: manualPort,
+        authMode: manualAuthMode,
+        identityFile: manualIdentityFile,
+      });
+      setLocalError(null);
+      await onSaveEnvironment({
+        kind: "ssh",
+        label: normalized.label,
+        hostAlias: null,
+        host: normalized.host,
+        user: normalized.user,
+        port: normalized.port,
+        authMode: normalized.authMode,
+        identityFile: normalized.identityFile,
+        enabled: true,
+      });
+      onClose();
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return (
+    <div className="dialog-backdrop" onMouseDown={onClose}>
+      <section className="command-dialog ssh-dialog" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="dialog-title">
+          <span>{l("Add SSH", "添加 SSH")}</span>
+          <button type="button" className="icon-button" onClick={onClose} aria-label={l("Close", "关闭")}>
+            <X size={16} />
+          </button>
+        </div>
+        <div className="ssh-dialog-body">
+          {mode === "config" ? (
+            <div className="ssh-config-panel">
+              <div className="ssh-config-list">
+                {loadingHosts ? <div className="ssh-empty">{l("Loading SSH config hosts...", "正在加载 SSH 配置主机...")}</div> : null}
+                {!loadingHosts && hosts.length === 0 ? <div className="ssh-empty">{l("No SSH config hosts found.", "未找到 SSH 配置主机。")}</div> : null}
+                {hosts.map((host) => {
+                  const existing = existingAliases.has(host.alias);
+                  const checked = existing || selectedAliases.has(host.alias);
+                  return (
+                    <label
+                      key={host.alias}
+                      className={`ssh-config-row ${checked ? "active" : ""} ${existing ? "disabled" : ""}`}
+                      title={sshConfigHostDetail(host)}
+                    >
+                      <span className="ssh-host-main">
+                        <strong>{host.alias}</strong>
+                        <em>{sshConfigHostDetail(host)}</em>
+                      </span>
+                      <input
+                        type="checkbox"
+                        className="ssh-check"
+                        checked={checked}
+                        disabled={existing}
+                        onChange={() => toggleAlias(host.alias)}
+                        aria-label={
+                          existing
+                            ? l(`${host.alias} is already connected`, `${host.alias} 已连接`)
+                            : l(`Select ${host.alias}`, `选择 ${host.alias}`)
+                        }
+                      />
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <form
+              className="ssh-manual-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void addManualHost();
+              }}
+            >
+              <label className="ssh-form-field">
+                <span>{l("Display name", "显示名称")}</span>
+                <input value={manualLabel} onChange={(event) => setManualLabel(event.target.value)} placeholder="devbox" />
+              </label>
+              <label className="ssh-form-field">
+                <span>{l("Host", "主机")}</span>
+                <input value={manualHost} onChange={(event) => setManualHost(event.target.value)} placeholder="user@host.com" autoFocus />
+              </label>
+              <label className="ssh-form-field">
+                <span>{l("SSH port", "SSH 端口")}</span>
+                <input value={manualPort} onChange={(event) => setManualPort(event.target.value)} placeholder="22" inputMode="numeric" />
+              </label>
+              <div className="ssh-form-field">
+                <span>{l("Authentication", "认证")}</span>
+                <div className="ssh-auth-toggle" role="group" aria-label={l("Authentication", "认证")}>
+                  <button type="button" className={manualAuthMode === "none" ? "active" : ""} onClick={() => setManualAuthMode("none")}>
+                    {l("No auth", "无认证")}
+                  </button>
+                  <button
+                    type="button"
+                    className={manualAuthMode === "identityFile" ? "active" : ""}
+                    onClick={() => setManualAuthMode("identityFile")}
+                  >
+                    {l("Identity file", "身份文件")}
+                  </button>
+                </div>
+              </div>
+              {manualAuthMode === "identityFile" ? (
+                <label className="ssh-form-field">
+                  <span>{l("Identity file", "身份文件")}</span>
+                  <input
+                    value={manualIdentityFile}
+                    onChange={(event) => setManualIdentityFile(event.target.value)}
+                    placeholder="~/.ssh/id_ed25519"
+                  />
+                </label>
+              ) : null}
+            </form>
+          )}
+        </div>
+        <div className="ssh-dialog-footer">
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => {
+              setLocalError(null);
+              setMode(mode === "config" ? "manual" : "config");
+            }}
+          >
+            {mode === "config" ? l("Manual add", "手动添加") : l("SSH config", "SSH 配置")}
+          </button>
+          <div className={`settings-feedback inline ${localError ? "error" : feedback?.kind ?? ""}`} aria-live="polite">
+            {localError ?? feedback?.message ?? ""}
+          </div>
+          <button
+            type="button"
+            className="primary"
+            disabled={saving || (mode === "config" && selectableAliasCount === 0)}
+            onClick={() => void (mode === "config" ? addSelectedHosts() : addManualHost())}
+          >
+            <Plus size={14} />
+            <span>{l("Add", "添加")}</span>
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+interface ManualSshDraft {
+  label: string;
+  host: string;
+  port: string;
+  authMode: SshAuthMode;
+  identityFile: string;
+}
+
+function normalizeManualSshDraft(input: ManualSshDraft): {
+  label: string;
+  host: string;
+  user: string | null;
+  port: number | null;
+  authMode: SshAuthMode;
+  identityFile: string | null;
+} {
+  const rawHost = input.host.trim();
+  if (!rawHost) throw new Error("SSH host is required.");
+  const at = rawHost.lastIndexOf("@");
+  const user = at >= 0 ? rawHost.slice(0, at).trim() || null : null;
+  const host = at >= 0 ? rawHost.slice(at + 1).trim() : rawHost;
+  if (!host) throw new Error("SSH host is required.");
+  const port = parseManualSshPort(input.port.trim());
+  return {
+    label: input.label.trim() || host,
+    host,
+    user,
+    port,
+    authMode: input.authMode,
+    identityFile: input.authMode === "identityFile" ? input.identityFile.trim() || null : null,
+  };
+}
+
+function parseManualSshPort(value: string): number | null {
+  if (!value) return null;
+  if (!/^\d+$/.test(value)) throw new Error("SSH port must be a number from 1 to 65535.");
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    throw new Error("SSH port must be a number from 1 to 65535.");
+  }
+  return parsed;
+}
+
+function sshConfigHostDetail(host: SshConfigHost): string {
+  const parts = [
+    host.hostName ? `HostName ${host.hostName}` : null,
+    host.user ? `User ${host.user}` : null,
+    host.port ? `Port ${host.port}` : null,
+    host.identityFile ? `IdentityFile ${host.identityFile}` : null,
+  ].filter((part): part is string => Boolean(part));
+  return parts.join(" · ") || host.alias;
 }
