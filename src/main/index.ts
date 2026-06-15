@@ -41,6 +41,7 @@ import { loadUsageQuotaSnapshot } from "../core/quota";
 import { focusLiveSessionTerminal } from "../core/session-focus";
 import { loadLiveSessionSnapshot } from "../core/session-activity";
 import { type TrackedLiveSession, updateLiveTracker } from "../core/live-transitions";
+import { resolveSummaryEndpoint, summarizeSession, type SummaryEndpoint } from "../core/session-summarizer";
 import { routeResumeSession } from "../core/resume-router";
 import { diagnoseRemoteEnvironment, preflightRemoteSessionResume } from "../core/remote-health";
 import { fetchRemoteSessionFilePayload, syncRemoteEnvironment } from "../core/remote-sync";
@@ -70,7 +71,7 @@ import type {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PRODUCT_NAME = "Agent-Session-Search";
-type ApiProviderKeyTarget = "codex" | "claude";
+type ApiProviderKeyTarget = "codex" | "claude" | "summary";
 
 const OPTIONAL_SOURCE_SETTINGS: Array<{ key: keyof Pick<AppSettings, "includeClaudeInternal" | "includeCodexInternal" | "includeCodeBuddyCli" | "includeOpenClaw" | "includeHermes" | "includeOpenCode" | "includeCursorAgent" | "includeTrae">; sources: SessionSource[] }> = [
   { key: "includeClaudeInternal", sources: ["claude-internal"] },
@@ -208,6 +209,12 @@ function withStoredApiProviderKeys(settings: AppSettings): AppSettings {
       customApiKey: store.getApiProviderKey("claude", next.claudeApiConfig.customProviderId),
     };
   }
+  if (next.summaryApiConfig.activeProvider === "custom") {
+    next.summaryApiConfig = {
+      ...next.summaryApiConfig,
+      customApiKey: store.getApiProviderKey("summary", next.summaryApiConfig.customProviderId),
+    };
+  }
   return next;
 }
 
@@ -216,6 +223,7 @@ function withoutApiProviderKeys(settings: AppSettings): AppSettings {
     ...settings,
     apiConfig: { ...settings.apiConfig, customApiKey: "" },
     claudeApiConfig: { ...settings.claudeApiConfig, customApiKey: "" },
+    summaryApiConfig: { ...settings.summaryApiConfig, customApiKey: "" },
   };
 }
 
@@ -225,6 +233,9 @@ function persistApiProviderKeysFromUpdate(update: AppSettingsUpdate, next: AppSe
   }
   if (update.claudeApiConfig && next.claudeApiConfig.activeProvider === "custom") {
     store.setApiProviderKey("claude", next.claudeApiConfig.customProviderId, next.claudeApiConfig.customApiKey);
+  }
+  if (update.summaryApiConfig && next.summaryApiConfig.activeProvider === "custom") {
+    store.setApiProviderKey("summary", next.summaryApiConfig.customProviderId, next.summaryApiConfig.customApiKey);
   }
 }
 
@@ -249,7 +260,7 @@ function migrateLegacyApiProviderKeys(): void {
 }
 
 function normalizeApiProviderKeyTarget(target: unknown): ApiProviderKeyTarget {
-  if (target === "codex" || target === "claude") return target;
+  if (target === "codex" || target === "claude" || target === "summary") return target;
   throw new Error("Unknown API provider key target.");
 }
 
@@ -631,6 +642,7 @@ async function runIndexSync(): Promise<IndexStatus> {
     .then((status) => {
       indexStatus = status;
       mainWindow?.webContents.send("index-status", indexStatus);
+      void maybeAutoBackfillSummaries();
       return indexStatus;
     })
     .catch((error) => {
@@ -717,6 +729,43 @@ function stopLiveNotifyPolling(): void {
   liveTracker = new Map();
 }
 
+let summaryBackfillRunning = false;
+
+// Candidate order matters: the dedicated summary provider wins, falling back to
+// the existing Codex API config when it is not configured.
+function resolveSummaryEndpointFromSettings(): SummaryEndpoint | null {
+  const settings = withStoredApiProviderKeys(getSettings());
+  return resolveSummaryEndpoint([settings.summaryApiConfig, settings.apiConfig]);
+}
+
+async function summarizeOneSession(sessionKey: string, endpoint: SummaryEndpoint): Promise<void> {
+  const messages = store.getMessages(sessionKey, 0, 40);
+  const result = await summarizeSession(messages, endpoint);
+  store.setAiSummary(sessionKey, result.summary, endpoint.model);
+}
+
+async function maybeAutoBackfillSummaries(): Promise<void> {
+  if (summaryBackfillRunning) return;
+  const settings = getSettings();
+  if (!settings.summaryAutoBackfill) return;
+  const endpoint = resolveSummaryEndpointFromSettings();
+  if (!endpoint) return;
+  summaryBackfillRunning = true;
+  try {
+    const maxAgeMs = settings.summaryMaxAgeDays * 86_400_000;
+    const candidates = store.listSessionsNeedingSummary(Date.now(), maxAgeMs, 25);
+    for (const candidate of candidates) {
+      try {
+        await summarizeOneSession(candidate.sessionKey, endpoint);
+      } catch {
+        // Skip sessions the provider cannot summarize; keep going.
+      }
+    }
+  } finally {
+    summaryBackfillRunning = false;
+  }
+}
+
 function startAutoIndexRefresh(): void {
   if (autoIndexTimer) return;
   autoIndexTimer = setInterval(() => {
@@ -746,6 +795,34 @@ function registerIpc(): void {
     return store.getTraceEvents(sessionKey);
   });
   ipcMain.handle("sessions:live", () => loadLiveSessionSnapshot({ includeTrae: getSettings().includeTrae }));
+  ipcMain.handle("session:summarize", async (_event, sessionKey: string) => {
+    await ensureRemoteSessionDetailsLoaded(sessionKey);
+    const endpoint = resolveSummaryEndpointFromSettings();
+    if (!endpoint) {
+      throw new Error("No AI summary provider is configured. Set a custom provider in Settings.");
+    }
+    await summarizeOneSession(sessionKey, endpoint);
+    return store.getSession(sessionKey);
+  });
+  ipcMain.handle("session:summarize-missing", async () => {
+    const endpoint = resolveSummaryEndpointFromSettings();
+    if (!endpoint) {
+      throw new Error("No AI summary provider is configured. Set a custom provider in Settings.");
+    }
+    const settings = getSettings();
+    const maxAgeMs = settings.summaryMaxAgeDays * 86_400_000;
+    const candidates = store.listSessionsNeedingSummary(Date.now(), maxAgeMs, 50);
+    let processed = 0;
+    for (const candidate of candidates) {
+      try {
+        await summarizeOneSession(candidate.sessionKey, endpoint);
+        processed += 1;
+      } catch {
+        // Skip sessions the provider cannot summarize; keep going.
+      }
+    }
+    return { processed, total: candidates.length };
+  });
   ipcMain.handle("stats:get", (_event, options?: SessionStatsOptions) => store.getStats(options));
   ipcMain.handle("quota:get", () => {
     const settings = getSettings();

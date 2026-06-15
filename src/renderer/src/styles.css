@@ -1660,6 +1660,27 @@ select:focus-visible {
   border-bottom: 1px solid var(--border-subtle);
 }
 
+.detail-summary {
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.detail-summary-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.detail-summary p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .detail-actions button {
   display: inline-flex;
   align-items: center;

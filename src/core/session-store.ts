@@ -34,7 +34,7 @@ const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: typeof DatabaseSyncType };
 
 type Db = DatabaseSyncType;
-type ApiProviderKeyTarget = "codex" | "claude";
+type ApiProviderKeyTarget = "codex" | "claude" | "summary";
 
 const LIVE_SESSION_KEY_SQL = `
   CASE

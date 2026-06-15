@@ -33,6 +33,10 @@ const api = {
     ipcRenderer.invoke("session:messages", sessionKey, offset, limit),
   getTraceEvents: (sessionKey: string): Promise<SessionTraceEvent[]> => ipcRenderer.invoke("session:trace-events", sessionKey),
   getLiveSessions: (): Promise<LiveSessionSnapshot> => ipcRenderer.invoke("sessions:live"),
+  summarizeSession: (sessionKey: string): Promise<SessionSearchResult | null> =>
+    ipcRenderer.invoke("session:summarize", sessionKey),
+  summarizeMissingSessions: (): Promise<{ processed: number; total: number }> =>
+    ipcRenderer.invoke("session:summarize-missing"),
   getStats: (options?: SessionStatsOptions): Promise<SessionStats> => ipcRenderer.invoke("stats:get", options),
   getQuotas: (): Promise<UsageQuotaSnapshot> => ipcRenderer.invoke("quota:get"),
   listTags: (): Promise<string[]> => ipcRenderer.invoke("tags:list"),

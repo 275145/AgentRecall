@@ -312,6 +312,7 @@ export function App(): ReactElement {
   const [deleteSessionCandidate, setDeleteSessionCandidate] = useState<SessionSearchResult | null>(null);
   const [deletingSession, setDeletingSession] = useState(false);
   const [actionStatus, setActionStatus] = useState<ActionStatus | null>(null);
+  const [summarizing, setSummarizing] = useState(false);
   const [refreshFeedback, setRefreshFeedback] = useState<RefreshFeedback>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sshDialogOpen, setSshDialogOpen] = useState(false);
@@ -881,6 +882,24 @@ export function App(): ReactElement {
   async function toggleFavorite(session: SessionSearchResult): Promise<void> {
     await window.sessionSearch.setFavorited(session.sessionKey, !session.favorited);
     await refreshAfterAction();
+  }
+
+  async function summarizeDetail(session: SessionSearchResult): Promise<void> {
+    if (summarizing) return;
+    setSummarizing(true);
+    setActionStatus({ kind: "running", message: t("Generating AI summary...", "正在生成 AI 摘要...") });
+    try {
+      const updated = await window.sessionSearch.summarizeSession(session.sessionKey);
+      if (updated) setDetail(updated);
+      await refreshAfterAction();
+      const message = t("AI summary generated.", "AI 摘要已生成。");
+      setActionStatus({ kind: "success", message });
+      window.setTimeout(() => setActionStatus((current) => (current?.kind === "success" && current.message === message ? null : current)), 4000);
+    } catch (error) {
+      setActionStatus({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setSummarizing(false);
+    }
   }
 
   async function deleteTagGlobally(tagName: string): Promise<void> {
@@ -1524,6 +1543,8 @@ export function App(): ReactElement {
           onAddTag={() => beginAddTag(detail)}
           onRemoveTag={(tagName) => void removeTag(detail, tagName)}
           onFavorite={() => void toggleFavorite(detail)}
+          onSummarize={() => void summarizeDetail(detail)}
+          summarizing={summarizing}
           canResume={supportsResumeSource(detail.source)}
           onResume={() =>
             void runAction(t("Opening terminal", "正在打开终端"), () => window.sessionSearch.resumeSession(detail.sessionKey), (result) => resumeRouteMessage(result, language))
@@ -2076,6 +2097,20 @@ function SettingsDialog({
   const defaultTerminal = settings?.defaultTerminal ?? (RUNTIME_PLATFORM === "win32" ? "WindowsTerminal" : "Terminal");
   const globalShortcut = settings?.globalShortcut ?? (RUNTIME_PLATFORM === "win32" ? "Ctrl+Alt+Space" : "Alt+Space");
   const saving = feedback?.kind === "running";
+  const [summaryBatch, setSummaryBatch] = useState<{ running: boolean; message: string | null }>({ running: false, message: null });
+
+  async function runSummaryBatch(): Promise<void> {
+    setSummaryBatch({ running: true, message: null });
+    try {
+      const result = await window.sessionSearch.summarizeMissingSessions();
+      setSummaryBatch({
+        running: false,
+        message: localize(language, `Summarized ${result.processed}/${result.total} sessions.`, `已摘要 ${result.processed}/${result.total} 个会话。`),
+      });
+    } catch (error) {
+      setSummaryBatch({ running: false, message: error instanceof Error ? error.message : String(error) });
+    }
+  }
   const l = (en: string, zh: string) => localize(language, en, zh);
   const [activeSection, setActiveSection] = useState<"terminal" | "shortcut" | "connections" | "sources" | "usage" | "skills" | "appearance">("terminal");
 
@@ -2430,6 +2465,52 @@ function SettingsDialog({
                     />
                   </label>
                 ) : null}
+                <header className="settings-pane-head" style={{ marginTop: 18 }}>
+                  <h3>{l("AI summaries", "AI 摘要")}</h3>
+                  <p>
+                    {l(
+                      "Generate a one-line searchable summary per session using your custom API provider (the dedicated summary provider if set, otherwise the Codex provider). Session content is sent to that provider.",
+                      "用你的自定义 API provider 为每个会话生成一句可搜索的摘要(若设置了专用摘要 provider 则用它，否则用 Codex 的 provider)。会话内容会发送给该 provider。",
+                    )}
+                  </p>
+                </header>
+                <label className="settings-field settings-toggle">
+                  <div className="settings-field-text">
+                    <span className="settings-field-title">{l("Auto-summarize new sessions", "自动摘要新会话")}</span>
+                    <span className="settings-field-sub">{l("After each index, summarize recent sessions that are missing or outdated.", "每次索引后，为缺失或已过期的近期会话生成摘要。")}</span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    className="switch"
+                    checked={Boolean(settings?.summaryAutoBackfill)}
+                    disabled={!settings || saving}
+                    onChange={(event) => onSettingsChange({ summaryAutoBackfill: event.currentTarget.checked })}
+                  />
+                </label>
+                <label className="settings-field">
+                  <div className="settings-field-text">
+                    <span className="settings-field-title">{l("Only summarize sessions newer than (days)", "只摘要近 N 天内的会话")}</span>
+                    <span className="settings-field-sub">{l("Older inactive sessions are skipped by auto/batch summary.", "更久未更新的会话不会被自动/批量摘要。")}</span>
+                  </div>
+                  <input
+                    type="number"
+                    min={1}
+                    max={3650}
+                    className="settings-number"
+                    value={settings?.summaryMaxAgeDays ?? 30}
+                    disabled={!settings || saving}
+                    onChange={(event) => onSettingsChange({ summaryMaxAgeDays: Number(event.currentTarget.value) })}
+                  />
+                </label>
+                <div className="settings-field">
+                  <div className="settings-field-text">
+                    <span className="settings-field-title">{l("Backfill missing summaries now", "立即补全缺失摘要")}</span>
+                    <span className="settings-field-sub">{summaryBatch.message ?? l("Summarize recent sessions that have no summary yet.", "为还没有摘要的近期会话批量生成。")}</span>
+                  </div>
+                  <button disabled={!settings || summaryBatch.running} onClick={() => void runSummaryBatch()}>
+                    {summaryBatch.running ? l("Summarizing...", "摘要中...") : l("Run", "运行")}
+                  </button>
+                </div>
               </section>
             ) : null}
             {activeSection === "skills" ? (
