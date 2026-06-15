@@ -342,6 +342,11 @@ describe("API settings", () => {
     expect(defaultSettings.claudeApiConfig).toEqual(defaultClaudeApiConfig);
   });
 
+  it("enables session search MCP by default while preserving an explicit opt-out", () => {
+    expect(defaultSettings.sessionSearchMcpEnabled).toBe(true);
+    expect(mergeAppSettings(defaultSettings, { sessionSearchMcpEnabled: false }).sessionSearchMcpEnabled).toBe(false);
+  });
+
   it("keeps explicitly saved empty API keys empty instead of refilling profile defaults", () => {
     expect(
       mergeApiConfigWithProfileDefaults(

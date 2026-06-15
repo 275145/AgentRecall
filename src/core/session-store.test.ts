@@ -722,24 +722,28 @@ describe("SessionStore", () => {
     ]);
   });
 
-  it("sorts default results by created time", () => {
+  it("sorts default results by recent conversation time", () => {
     const store = createInMemoryStore();
-    const oldButActive = sampleSession({
-      sessionKey: "codex:active",
-      rawId: "active",
+    const oldButRecent = sampleSession({
+      sessionKey: "codex:recent",
+      rawId: "recent",
       timestamp: new Date("2026-05-01T10:00:00Z").getTime(),
-      fileMtimeMs: new Date("2026-06-01T12:00:00Z").getTime(),
+      fileMtimeMs: new Date("2026-05-01T10:00:00Z").getTime(),
     });
-    const newerButIdle = sampleSession({
-      sessionKey: "codex:idle",
-      rawId: "idle",
+    const newerButOlderConversation = sampleSession({
+      sessionKey: "codex:created",
+      rawId: "created",
       timestamp: new Date("2026-06-01T10:00:00Z").getTime(),
       fileMtimeMs: new Date("2026-06-01T10:00:00Z").getTime(),
     });
-    store.upsertIndexedSession(oldButActive, messages);
-    store.upsertIndexedSession(newerButIdle, messages);
+    store.upsertIndexedSession(oldButRecent, [
+      { role: "user", content: "newer conversation", timestamp: "2026-06-02T10:00:00Z", index: 0 },
+    ]);
+    store.upsertIndexedSession(newerButOlderConversation, [
+      { role: "user", content: "older conversation", timestamp: "2026-06-01T10:00:00Z", index: 0 },
+    ]);
 
-    expect(store.searchSessions({ query: "" }).map((session) => session.sessionKey)).toEqual(["codex:idle", "codex:active"]);
+    expect(store.searchSessions({ query: "" }).map((session) => session.sessionKey)).toEqual(["codex:recent", "codex:created"]);
   });
 
   it("sorts by explicit recent conversation and created time modes", () => {

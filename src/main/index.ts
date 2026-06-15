@@ -113,6 +113,14 @@ function loadMcpSetup(): McpSetup {
   return requireCjs(MCP_SETUP_PATH) as McpSetup;
 }
 
+function ensureSessionSearchMcpPreference(): boolean {
+  const setup = loadMcpSetup();
+  if (getSettings().sessionSearchMcpEnabled) {
+    if (!setup.status()) setup.run(false);
+  }
+  return setup.status();
+}
+
 // Merges skill-usage counts and hook-install state onto the scanned skill list
 // so the renderer can sort by most-used.
 function buildSkillsSnapshot(): InstalledSkillsSnapshot {
@@ -976,7 +984,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("mcp:status", () => {
     try {
-      return loadMcpSetup().status();
+      return ensureSessionSearchMcpPreference();
     } catch {
       return false;
     }
@@ -984,6 +992,7 @@ function registerIpc(): void {
   ipcMain.handle("mcp:set-enabled", (_event, enabled: boolean) => {
     const setup = loadMcpSetup();
     setup.run(!enabled);
+    settingsStore.set("sessionSearchMcpEnabled", enabled);
     return setup.status();
   });
   ipcMain.handle("stats:get", (_event, options?: SessionStatsOptions) => store.getStats(options));
@@ -1152,6 +1161,11 @@ app.whenReady().then(() => {
     writeDbPointer(dbPath);
   } catch {
     // Non-fatal: the MCP server can still be pointed at the DB via env var.
+  }
+  try {
+    ensureSessionSearchMcpPreference();
+  } catch (error) {
+    console.error(`Failed to configure session search MCP: ${error instanceof Error ? error.message : String(error)}`);
   }
   migrateLegacyApiProviderKeys();
   pruneDisabledOptionalSources(getSettings());

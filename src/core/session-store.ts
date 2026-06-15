@@ -1616,7 +1616,7 @@ export class SessionStore {
     return score;
   }
 
-  private sortValue(result: SessionSearchResult, sortBy: SessionSortBy = "created"): number {
+  private sortValue(result: SessionSearchResult, sortBy: SessionSortBy = "activity"): number {
     if (sortBy === "created") return result.timestamp || 0;
     return result.lastActivityAt || result.fileMtimeMs || result.timestamp || 0;
   }
@@ -1793,7 +1793,7 @@ function buildFtsQuery(query: string): string {
     .join(" ");
 }
 
-function sessionSortSql(sortBy: SessionSortBy = "created"): string {
+function sessionSortSql(sortBy: SessionSortBy = "activity"): string {
   if (sortBy === "activity") return sessionActivitySql("sessions");
   return "COALESCE(timestamp, 0)";
 }

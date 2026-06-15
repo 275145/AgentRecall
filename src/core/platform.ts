@@ -69,6 +69,7 @@ export interface AppSettings {
   notifyMinDurationSeconds: number;
   summaryAutoBackfill: boolean;
   summaryMaxAgeDays: number;
+  sessionSearchMcpEnabled: boolean;
   apiConfig: ApiConfig;
   claudeApiConfig: ClaudeApiConfig;
   summaryApiConfig: ApiConfig;
@@ -100,6 +101,7 @@ export const defaultSettings: AppSettings = {
   notifyMinDurationSeconds: 30,
   summaryAutoBackfill: false,
   summaryMaxAgeDays: 30,
+  sessionSearchMcpEnabled: true,
   apiConfig: defaultApiConfig,
   claudeApiConfig: defaultClaudeApiConfig,
   summaryApiConfig: defaultApiConfig,
