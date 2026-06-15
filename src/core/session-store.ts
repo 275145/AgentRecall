@@ -902,6 +902,13 @@ export class SessionStore {
 
   private migrate(): void {
     this.db.exec("PRAGMA foreign_keys = ON");
+    // WAL lets a read-only consumer (the MCP server) read concurrently while the app writes.
+    // Harmless for the in-memory test DB, which ignores the journal mode.
+    try {
+      this.db.exec("PRAGMA journal_mode = WAL");
+    } catch {
+      // Some environments (e.g. in-memory) reject WAL; fall back to the default journal.
+    }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         session_key TEXT PRIMARY KEY,

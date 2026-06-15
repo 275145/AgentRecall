@@ -42,6 +42,7 @@ import { focusLiveSessionTerminal } from "../core/session-focus";
 import { loadLiveSessionSnapshot } from "../core/session-activity";
 import { type TrackedLiveSession, updateLiveTracker } from "../core/live-transitions";
 import { resolveSummaryEndpoint, summarizeSession, type SummaryEndpoint } from "../core/session-summarizer";
+import { writeDbPointer } from "../core/app-paths";
 import { routeResumeSession } from "../core/resume-router";
 import { diagnoseRemoteEnvironment, preflightRemoteSessionResume } from "../core/remote-health";
 import { fetchRemoteSessionFilePayload, syncRemoteEnvironment } from "../core/remote-sync";
@@ -979,6 +980,12 @@ function registerIpc(): void {
 app.whenReady().then(() => {
   const dbPath = path.join(app.getPath("userData"), "session-search.sqlite");
   store = new SessionStore(dbPath);
+  // Publish the live database path so the standalone MCP server can find it.
+  try {
+    writeDbPointer(dbPath);
+  } catch {
+    // Non-fatal: the MCP server can still be pointed at the DB via env var.
+  }
   migrateLegacyApiProviderKeys();
   pruneDisabledOptionalSources(getSettings());
   registerIpc();
