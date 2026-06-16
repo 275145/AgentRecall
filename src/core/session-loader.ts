@@ -478,6 +478,27 @@ function subtractTokenUsage(current: TokenUsage, previous: TokenUsage | null): T
   );
 }
 
+function cumulativeTokenDelta(current: TokenUsage, previousTotals: TokenUsage[]): TokenUsage {
+  let bestIndex = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < previousTotals.length; index += 1) {
+    const previous = previousTotals[index];
+    if (previous.totalTokens > current.totalTokens) continue;
+    const distance = current.totalTokens - previous.totalTokens;
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = index;
+    }
+  }
+  if (bestIndex < 0) {
+    previousTotals.push(current);
+    return current;
+  }
+  const delta = subtractTokenUsage(current, previousTotals[bestIndex]);
+  previousTotals[bestIndex] = current;
+  return delta;
+}
+
 // Codex reports OpenAI-style usage where `input_tokens` already includes cached
 // tokens and `output_tokens` already includes reasoning tokens. Split them into
 // the distinct buckets createTokenUsage expects (input excludes cached, output
@@ -501,13 +522,15 @@ function normalizeCodexUsage(usage: Record<string, unknown>): {
 function extractCodexTokenEvents(rows: unknown[]): TokenUsageEvent[] {
   const entries = new Map<string, TokenUsageEvent>();
   const cumulativeEntries = new Map<string, TokenUsageEvent>();
-  let previousTotal: TokenUsage | null = null;
+  const previousTotals: TokenUsage[] = [];
   let currentModel = "";
   // Codex carries a running cumulative `total_token_usage` on every token_count
   // event. Convert those cumulative totals into per-event deltas so period stats
   // only count the tokens added inside that period while the full-session sum
-  // still matches the final cumulative total. Fall back to summing
-  // last_token_usage only when no cumulative total is present.
+  // still matches cumulative accounting. Some Codex logs interleave multiple
+  // cumulative sequences in one session file, so match each total to the closest
+  // prior sequence rather than assuming one monotonic counter. Fall back to
+  // summing last_token_usage only when no cumulative total is present.
 
   for (const row of rows) {
     if (!isRecord(row)) continue;
@@ -525,8 +548,7 @@ function extractCodexTokenEvents(rows: unknown[]): TokenUsageEvent[] {
     if (totalUsage) {
       const t = normalizeCodexUsage(totalUsage);
       const current = createTokenUsage(t.input, t.output, t.cached, t.reasoning);
-      const delta = subtractTokenUsage(current, previousTotal);
-      previousTotal = current;
+      const delta = cumulativeTokenDelta(current, previousTotals);
       if (delta.totalTokens > 0) {
         const key = [
           "codex-total",

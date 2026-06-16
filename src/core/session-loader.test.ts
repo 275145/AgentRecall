@@ -299,6 +299,66 @@ describe("Codex session loading", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("handles interleaved Codex cumulative token sequences in one session file", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-"));
+    const filePath = path.join(dir, "rollout.jsonl");
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          type: "session_meta",
+          timestamp: "2026-06-01T10:00:00Z",
+          payload: { id: "codex-interleaved-total", cwd: "/repo" },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-06-01T10:01:00Z",
+          payload: {
+            type: "token_count",
+            info: { model: "gpt-5-codex", total_token_usage: { input_tokens: 50_000_000, output_tokens: 1_000 } },
+          },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-06-01T10:02:00Z",
+          payload: {
+            type: "token_count",
+            info: { model: "gpt-5-codex", total_token_usage: { input_tokens: 13_000_000, output_tokens: 500 } },
+          },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-06-01T10:03:00Z",
+          payload: {
+            type: "token_count",
+            info: { model: "gpt-5-codex", total_token_usage: { input_tokens: 50_100_000, output_tokens: 1_200 } },
+          },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-06-01T10:04:00Z",
+          payload: {
+            type: "token_count",
+            info: { model: "gpt-5-codex", total_token_usage: { input_tokens: 13_100_000, output_tokens: 700 } },
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const loaded = loadCodexSessionFile(filePath);
+
+    expect(loaded?.session.tokenUsage).toEqual({
+      inputTokens: 63_200_000,
+      outputTokens: 1_900,
+      cachedInputTokens: 0,
+      reasoningOutputTokens: 0,
+      totalTokens: 63_201_900,
+    });
+    expect(loaded?.tokenEvents?.map((event) => event.totalTokens)).toEqual([50_001_000, 13_000_500, 100_200, 100_200]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("extracts Codex tool calls and execution events as trace events", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-"));
     const filePath = path.join(dir, "rollout.jsonl");
