@@ -58,13 +58,9 @@ describe("live session focus", () => {
     const runner = async (command: string, args: string[]): Promise<string> => {
       calls.push({ command, args });
       if (args.join(" ") === "-o tty= -p 303") return "ttys003\n";
-      if (args.join(" ") === "-axo pid=,ppid=,command=") {
-        return [
-          "101 1 /Applications/iTerm.app/Contents/MacOS/iTerm2",
-          "202 101 -zsh",
-          "303 202 /opt/homebrew/bin/codex resume codex-1",
-        ].join("\n");
-      }
+      if (args.join(" ") === "-o pid=,ppid=,command= -p 303") return "303 202 /opt/homebrew/bin/codex resume codex-1\n";
+      if (args.join(" ") === "-o pid=,ppid=,command= -p 202") return "202 101 -zsh\n";
+      if (args.join(" ") === "-o pid=,ppid=,command= -p 101") return "101 1 /Applications/iTerm.app/Contents/MacOS/iTerm2\n";
       return "false\n";
     };
 
@@ -73,6 +69,26 @@ describe("live session focus", () => {
     expect(calls.at(-1)).toEqual({
       command: "/usr/bin/osascript",
       args: ["-e", 'tell application "iTerm" to activate'],
+    });
+    expect(calls.some((call) => call.args.join(" ") === "-axo pid=,ppid=,command=")).toBe(false);
+  });
+
+  it("falls back to app activation when tty lookup fails", async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner = async (command: string, args: string[]): Promise<string> => {
+      calls.push({ command, args });
+      if (args.join(" ") === "-o tty= -p 303") throw new Error("tty unavailable");
+      if (args.join(" ") === "-o pid=,ppid=,command= -p 303") return "303 202 /opt/homebrew/bin/codex resume codex-1\n";
+      if (args.join(" ") === "-o pid=,ppid=,command= -p 202") return "202 101 -zsh\n";
+      if (args.join(" ") === "-o pid=,ppid=,command= -p 101") return "101 1 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal\n";
+      return "";
+    };
+
+    await focusLiveSessionTerminal(303, { platform: "darwin", runner });
+
+    expect(calls.at(-1)).toEqual({
+      command: "/usr/bin/osascript",
+      args: ["-e", 'tell application "Terminal" to activate'],
     });
   });
 

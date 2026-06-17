@@ -36,9 +36,8 @@ export async function focusLiveSessionTerminal(pid: number, options: FocusLiveSe
     throw new Error("Bringing an existing terminal to front is currently supported on macOS and Windows only.");
   }
 
-  const tty = normalizeTty(await runner("/bin/ps", ["-o", "tty=", "-p", String(pid)]));
-  const processOutput = await runner("/bin/ps", ["-axo", "pid=,ppid=,command="]);
-  const target = findTerminalTarget(pid, parseProcessRecords(processOutput));
+  const tty = await ttyForPid(pid, runner);
+  const target = await findTerminalTarget(pid, runner);
   if (!target) throw new Error("Could not find the terminal app for this open session.");
 
   if (tty && (target.appName === "Terminal" || target.appName === "iTerm")) {
@@ -53,19 +52,36 @@ export async function focusLiveSessionTerminal(pid: number, options: FocusLiveSe
   await runner("/usr/bin/osascript", ["-e", `tell application "${escapeAppleScript(target.appName)}" to activate`]);
 }
 
-function findTerminalTarget(pid: number, records: ProcessRecord[]): TerminalTarget | null {
-  const byPid = new Map(records.map((record) => [record.pid, record]));
+async function ttyForPid(pid: number, runner: CommandRunner): Promise<string | null> {
+  try {
+    return normalizeTty(await runner("/bin/ps", ["-o", "tty=", "-p", String(pid)]));
+  } catch {
+    return null;
+  }
+}
+
+async function findTerminalTarget(pid: number, runner: CommandRunner): Promise<TerminalTarget | null> {
   const visited = new Set<number>();
-  let current = byPid.get(pid);
+  let current: ProcessRecord | null = await processRecordForPid(pid, runner);
 
   while (current && !visited.has(current.pid)) {
     visited.add(current.pid);
     const target = terminalTargetFromCommand(current.command);
     if (target) return target;
-    current = byPid.get(current.ppid);
+    current = await processRecordForPid(current.ppid, runner);
   }
 
   return null;
+}
+
+async function processRecordForPid(pid: number, runner: CommandRunner): Promise<ProcessRecord | null> {
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  try {
+    const output = await runner("/bin/ps", ["-o", "pid=,ppid=,command=", "-p", String(pid)]);
+    return parseProcessRecords(output)[0] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function terminalTargetFromCommand(command: string): TerminalTarget | null {

@@ -31,8 +31,8 @@ It indexes existing local Claude and Codex sessions by default, and can also rea
 - Filter by project, environment, tag, source, open/closed state, pinned sessions, or hidden sessions.
 - Sort by latest activity, created time, or updated time.
 - Add local and SSH environments; SSH environments can be refreshed manually or kept in sync through remote file watching.
-- Resume a session in Terminal, iTerm, Ghostty, WezTerm, or Warp.
-- Bring detected open terminals to front, copy resume commands, or export Markdown.
+- Resume a session in Terminal, iTerm, Ghostty, WezTerm, or Warp. If a local session is already open, Resume brings the existing terminal window/tab to front instead of starting another `codex resume` / `claude --resume`.
+- Copy resume commands or export Markdown.
 - Read details with Markdown / code block rendering, collapsed tool traces, and user / assistant / tool message filters.
 - Track message and token usage for Today / 7D / 30D / All time.
 - Show Codex subscription quota; Claude Code quota can be shown through a statusline snapshot bridge.
@@ -62,6 +62,14 @@ It indexes existing local Claude and Codex sessions by default, and can also rea
 Codex title metadata is read from `~/.codex/session_index.jsonl` when that file exists. If no upstream title is available, the app uses the first meaningful user question as the default title.
 
 CodeBuddy CLI, OpenClaw, Hermes, OpenCode, Cursor Agent, and Trae are off by default and can be selected from Settings -> Optional sources. Once enabled, they support local read-only indexing, search, details, and source filtering. Resume, SSH remote sync, and provider-specific usage stats for these sources are intentionally separate follow-up work. Trae also supports open-state detection.
+
+## Resume Behavior
+
+When you click Resume or press `Cmd/Ctrl+Enter`, the app first checks whether the selected session is already open locally:
+
+- If it is open, the app follows the session process up to its owning terminal process and brings the existing Terminal / iTerm / Ghostty / WezTerm / Warp window to front. Terminal and iTerm try to focus the exact tty window or tab; if tty lookup is unavailable, the app falls back to activating the terminal app.
+- If it is not open, the app starts a new restore command in the configured default terminal, such as `codex resume <session-id>` or `claude --resume <session-id>`.
+- SSH remote sessions run a remote project-path and CLI preflight first, then execute the remote restore command through `ssh` in the local default terminal.
 
 ## SSH Remote Sessions
 
