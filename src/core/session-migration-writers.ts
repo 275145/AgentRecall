@@ -16,6 +16,7 @@ export interface WriteMigratedSessionOptions {
   homeDir?: string;
   now?: Date;
   idFactory?: () => string;
+  beforeValidate?: (filePath: string) => void | Promise<void>;
   validate?: (filePath: string) => LoadedSession | null | Promise<LoadedSession | null>;
   rename?: (oldPath: string, newPath: string) => void | Promise<void>;
 }
@@ -41,10 +42,16 @@ export async function writeMigratedSession(options: WriteMigratedSessionOptions)
   await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
   try {
     await writeJsonlAndSync(tempPath, rows);
-    const loaded = options.validate
-      ? await options.validate(tempPath)
-      : loadWrittenSession(options.target, tempPath, sessionId, options.session);
+    if (options.beforeValidate) await options.beforeValidate(tempPath);
+    const writtenRows = readJsonlStrict(tempPath, options.target);
+    validateNativeStructure(options.target, writtenRows, sessionId, options.session);
+    const loaded = loadWrittenSession(options.target, tempPath, sessionId, options.session);
     validateRoundTrip(loaded, options.target, sessionId, options.session);
+    if (options.validate) {
+      const additionallyLoaded = await options.validate(tempPath);
+      validateRoundTrip(additionallyLoaded, options.target, sessionId, options.session);
+    }
+    await fs.promises.chmod(tempPath, 0o600);
     if (options.rename) await options.rename(tempPath, filePath);
     else await fs.promises.rename(tempPath, filePath);
     return { sessionId, filePath };
@@ -224,13 +231,164 @@ function timestampMs(value: string): number {
 }
 
 async function writeJsonlAndSync(filePath: string, rows: unknown[]): Promise<void> {
-  const handle = await fs.promises.open(filePath, "wx");
+  const handle = await fs.promises.open(filePath, "wx", 0o600);
   try {
+    await handle.chmod(0o600);
     await handle.writeFile(`${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
     await handle.sync();
   } finally {
     await handle.close();
   }
+}
+
+function readJsonlStrict(filePath: string, target: MigrationAgent): unknown[] {
+  const rows: unknown[] = [];
+  const content = fs.readFileSync(filePath, "utf8");
+  for (const line of content.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      rows.push(JSON.parse(line));
+    } catch {
+      failValidation(target, "contains invalid JSONL");
+    }
+  }
+  return rows;
+}
+
+function validateNativeStructure(
+  target: MigrationAgent,
+  rows: unknown[],
+  sessionId: string,
+  session: PortableSession,
+): void {
+  if (target === "codex") {
+    validateCodexStructure(rows, sessionId, session);
+  } else if (target === "claude") {
+    validateClaudeStructure(rows, sessionId, session);
+  } else {
+    validateCodeBuddyStructure(rows, sessionId, session);
+  }
+}
+
+function validateCodexStructure(rows: unknown[], sessionId: string, session: PortableSession): void {
+  if (rows.length !== session.messages.length + 1) failValidation("codex", "has an unexpected row count");
+  const meta = record(rows[0]);
+  const payload = record(meta?.payload);
+  if (
+    meta?.type !== "session_meta"
+    || meta.timestamp !== session.startedAt
+    || payload?.id !== sessionId
+    || payload.title !== session.title
+    || payload.cwd !== session.projectPath
+  ) {
+    failValidation("codex", "has invalid session metadata");
+  }
+
+  session.messages.forEach((message, index) => {
+    const row = record(rows[index + 1]);
+    const messagePayload = record(row?.payload);
+    const content = Array.isArray(messagePayload?.content) ? messagePayload.content : [];
+    const block = record(content[0]);
+    const expectedBlockType = message.role === "user" ? "input_text" : "output_text";
+    if (
+      row?.type !== "response_item"
+      || row.timestamp !== message.timestamp
+      || messagePayload?.type !== "message"
+      || messagePayload.role !== message.role
+      || content.length !== 1
+      || block?.type !== expectedBlockType
+      || block.text !== message.content
+    ) {
+      failValidation("codex", `has invalid message structure at index ${index}`);
+    }
+  });
+}
+
+function validateClaudeStructure(rows: unknown[], sessionId: string, session: PortableSession): void {
+  if (rows.length !== session.messages.length + 1) failValidation("claude", "has an unexpected row count");
+  const title = record(rows[0]);
+  if (title?.type !== "ai-title" || title.aiTitle !== session.title || title.sessionId !== sessionId) {
+    failValidation("claude", "has invalid title metadata");
+  }
+
+  const seenIds = new Set<string>();
+  let parentUuid: string | null = null;
+  session.messages.forEach((portableMessage, index) => {
+    const row = record(rows[index + 1]);
+    const message = record(row?.message);
+    const uuid = typeof row?.uuid === "string" ? row.uuid : "";
+    if (!UUID_PATTERN.test(uuid) || seenIds.has(uuid)) failValidation("claude", `has invalid message UUID at index ${index}`);
+    seenIds.add(uuid);
+
+    const contentMatches = portableMessage.role === "user"
+      ? message?.content === portableMessage.content
+      : textBlockMatches(message?.content, "text", portableMessage.content);
+    if (
+      row?.parentUuid !== parentUuid
+      || row.type !== portableMessage.role
+      || row.timestamp !== portableMessage.timestamp
+      || row.cwd !== session.projectPath
+      || row.sessionId !== sessionId
+      || message?.role !== portableMessage.role
+      || !contentMatches
+    ) {
+      failValidation("claude", `has invalid message structure at index ${index}`);
+    }
+    parentUuid = uuid;
+  });
+}
+
+function validateCodeBuddyStructure(rows: unknown[], sessionId: string, session: PortableSession): void {
+  if (rows.length !== session.messages.length + 1) failValidation("codebuddy", "has an unexpected row count");
+  const title = record(rows[0]);
+  if (
+    title?.type !== "ai-title"
+    || title.aiTitle !== session.title
+    || title.sessionId !== sessionId
+    || title.cwd !== session.projectPath
+    || title.timestamp !== timestampMs(session.startedAt)
+  ) {
+    failValidation("codebuddy", "has invalid title metadata");
+  }
+
+  const seenIds = new Set<string>();
+  let parentId: string | undefined;
+  session.messages.forEach((message, index) => {
+    const row = record(rows[index + 1]);
+    if (!row) failValidation("codebuddy", `has invalid message structure at index ${index}`);
+    const id = typeof row.id === "string" ? row.id : "";
+    const expectedBlockType = message.role === "user" ? "input_text" : "output_text";
+    if (!id || seenIds.has(id)) failValidation("codebuddy", `has invalid message id at index ${index}`);
+    seenIds.add(id);
+    if (
+      row?.parentId !== parentId
+      || row.timestamp !== timestampMs(message.timestamp)
+      || row.type !== "message"
+      || row.role !== message.role
+      || row.sessionId !== sessionId
+      || row.cwd !== session.projectPath
+      || !textBlockMatches(row.content, expectedBlockType, message.content)
+    ) {
+      failValidation("codebuddy", `has invalid message structure at index ${index}`);
+    }
+    parentId = id;
+  });
+}
+
+function textBlockMatches(content: unknown, type: string, text: string): boolean {
+  if (!Array.isArray(content) || content.length !== 1) return false;
+  const block = record(content[0]);
+  return block?.type === type && block.text === text;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function failValidation(target: MigrationAgent, detail: string): never {
+  throw new Error(`Migrated ${target} session failed validation: ${detail}.`);
 }
 
 function loadWrittenSession(
@@ -260,7 +418,12 @@ function validateRoundTrip(
   const messagesMatch = loaded?.messages.length === portable.messages.length
     && loaded.messages.every((message, index) => {
       const expected = portable.messages[index];
-      return message.role === expected.role && message.content === expected.content;
+      const timestampMatches = target === "codebuddy"
+        ? new Date(message.timestamp).getTime() === new Date(expected.timestamp).getTime()
+        : message.timestamp === expected.timestamp;
+      return message.role === expected.role
+        && message.content === expected.content
+        && timestampMatches;
     });
 
   if (
@@ -268,8 +431,9 @@ function validateRoundTrip(
     || loaded.session.source !== expectedSource
     || loaded.session.rawId !== sessionId
     || loaded.session.projectPath !== portable.projectPath
+    || loaded.session.originalTitle !== portable.title
     || !messagesMatch
   ) {
-    throw new Error(`Migrated ${target} session failed round-trip validation.`);
+    failValidation(target, "round-trip data does not match the portable session");
   }
 }

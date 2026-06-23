@@ -75,6 +75,43 @@ function expectRoundTrip(
 }
 
 describe("writeMigratedSession", () => {
+  it.each(["codex", "claude", "codebuddy"] as const)(
+    "creates the temporary and final %s files with mode 0600",
+    async (target) => {
+      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), `migration-writer-mode-${target}-`));
+      let temporaryMode = 0;
+      const targetDirectory = target === "codex"
+        ? path.join(homeDir, ".codex", "sessions", "2026", "06", "23")
+        : target === "claude"
+          ? path.join(homeDir, ".claude", "projects", "-Users----My-Project")
+          : path.join(homeDir, ".codebuddy", "projects", "Users----My-Project");
+      fs.mkdirSync(targetDirectory, { recursive: true });
+      const previousUmask = process.umask(0o777);
+
+      let result;
+      try {
+        result = await writeMigratedSession({
+          target,
+          session: portable(),
+          homeDir,
+          now: NOW,
+          idFactory: idFactory(target === "codex" ? [SESSION_ID] : [SESSION_ID, ...MESSAGE_IDS]),
+          beforeValidate: (filePath) => {
+            temporaryMode = fs.statSync(filePath).mode & 0o777;
+            fs.chmodSync(filePath, 0o644);
+          },
+        });
+      } finally {
+        process.umask(previousUmask);
+      }
+
+      expect(temporaryMode).toBe(0o600);
+      expect(fs.statSync(result.filePath).mode & 0o777).toBe(0o600);
+
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    },
+  );
+
   it("writes a native Codex rollout and round-trips it through the existing loader", async () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "migration-writer-codex-"));
 
@@ -262,7 +299,54 @@ describe("writeMigratedSession", () => {
     expect(filesUnder(homeDir)).toEqual([]);
     fs.rmSync(homeDir, { recursive: true, force: true });
   });
+
+  it("rejects a tampered Codex title before rename and cleans the temporary file", async () => {
+    await expectTamperedSessionRejected("codex", (rows) => {
+      rows[0].payload.title = "被篡改的标题";
+    });
+  });
+
+  it("rejects a tampered CodeBuddy message timestamp before rename and cleans the temporary file", async () => {
+    await expectTamperedSessionRejected("codebuddy", (rows) => {
+      rows[1].timestamp += 1;
+    });
+  });
+
+  it("rejects a broken Claude parent UUID chain before rename and cleans the temporary file", async () => {
+    await expectTamperedSessionRejected("claude", (rows) => {
+      rows[2].parentUuid = null;
+    });
+  });
 });
+
+async function expectTamperedSessionRejected(
+  target: MigrationAgent,
+  mutate: (rows: Array<Record<string, any>>) => void,
+): Promise<void> {
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), `migration-writer-tamper-${target}-`));
+  let temporaryFile = "";
+
+  await expect(
+    writeMigratedSession({
+      target,
+      session: portable(),
+      homeDir,
+      now: NOW,
+      idFactory: idFactory(target === "codex" ? [SESSION_ID] : [SESSION_ID, ...MESSAGE_IDS]),
+      beforeValidate: (filePath) => {
+        temporaryFile = filePath;
+        const rows = parseJsonlText(fs.readFileSync(filePath, "utf8")) as Array<Record<string, any>>;
+        mutate(rows);
+        fs.writeFileSync(filePath, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+      },
+    }),
+  ).rejects.toThrow(/validation/i);
+
+  expect(temporaryFile).not.toBe("");
+  expect(fs.existsSync(temporaryFile)).toBe(false);
+  expect(filesUnder(homeDir)).toEqual([]);
+  fs.rmSync(homeDir, { recursive: true, force: true });
+}
 
 function filesUnder(root: string): string[] {
   const files: string[] = [];
