@@ -996,39 +996,44 @@ export function loadCodeBuddyCliSessions(codeBuddyDir = path.join(os.homedir(), 
   return [...loadCodeBuddyCliSessionsIterator(codeBuddyDir)];
 }
 
+export function loadCodeBuddyCliSessionFile(filePath: string): LoadedSession | null {
+  const rows = readJsonl(filePath);
+  if (rows.length === 0) return null;
+
+  const fallbackRawId = path.basename(filePath, ".jsonl");
+  const meta = firstCodeBuddySessionMeta(rows, fallbackRawId);
+  const messages = extractMessages(rows, "codebuddy");
+  const tokenEvents = extractCodeBuddyTokenEvents(rows);
+  const traceEvents = extractTraceEvents(rows, "codebuddy");
+  const tokenUsage = tokenUsageFromEvents(tokenEvents);
+  const question = firstQuestion(messages);
+  const aiTitle = firstCodeBuddyAiTitle(rows);
+
+  return {
+    session: createIndexedSession({
+      keyPrefix: "codebuddy",
+      rawId: meta.rawId,
+      source: "codebuddy-cli",
+      projectPath: meta.projectPath,
+      filePath,
+      originalTitle: aiTitle || cleanTitle(question) || "Untitled Session",
+      firstQuestion: cleanTitle(question),
+      timestamp: meta.timestamp,
+      tokenUsage,
+    }),
+    messages,
+    tokenEvents,
+    traceEvents,
+  };
+}
+
 export function* loadCodeBuddyCliSessionsIterator(codeBuddyDir = path.join(os.homedir(), CODEBUDDY_DIR)): Generator<LoadedSession> {
   const projectsDir = path.join(codeBuddyDir, "projects");
   if (!fs.existsSync(projectsDir)) return;
 
   for (const filePath of walkJsonlFiles(projectsDir)) {
-    const rows = readJsonl(filePath);
-    if (rows.length === 0) continue;
-
-    const fallbackRawId = path.basename(filePath, ".jsonl");
-    const meta = firstCodeBuddySessionMeta(rows, fallbackRawId);
-    const messages = extractMessages(rows, "codebuddy");
-    const tokenEvents = extractCodeBuddyTokenEvents(rows);
-    const traceEvents = extractTraceEvents(rows, "codebuddy");
-    const tokenUsage = tokenUsageFromEvents(tokenEvents);
-    const question = firstQuestion(messages);
-    const aiTitle = firstCodeBuddyAiTitle(rows);
-
-    yield {
-      session: createIndexedSession({
-        keyPrefix: "codebuddy",
-        rawId: meta.rawId,
-        source: "codebuddy-cli",
-        projectPath: meta.projectPath,
-        filePath,
-        originalTitle: aiTitle || cleanTitle(question) || "Untitled Session",
-        firstQuestion: cleanTitle(question),
-        timestamp: meta.timestamp,
-        tokenUsage,
-      }),
-      messages,
-      tokenEvents,
-      traceEvents,
-    };
+    const loaded = loadCodeBuddyCliSessionFile(filePath);
+    if (loaded) yield loaded;
   }
 }
 

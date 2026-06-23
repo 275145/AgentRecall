@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   loadClaudeCliSessions,
+  loadCodeBuddyCliSessionFile,
   loadCodeBuddyCliSessions,
   loadCodexSessionFile,
   loadCodexSessions,
@@ -749,6 +750,43 @@ describe("Claude session loading", () => {
 });
 
 describe("CodeBuddy session loading", () => {
+  it("loads one CodeBuddy CLI jsonl file with the same behavior as the iterator", () => {
+    const codeBuddyDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-codebuddy-file-"));
+    const filePath = path.join(codeBuddyDir, "codebuddy-file.jsonl");
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({
+          type: "ai-title",
+          aiTitle: "单文件标题",
+          sessionId: "codebuddy-file",
+          cwd: "/repo/单文件",
+        }),
+        JSON.stringify({
+          id: "msg-user",
+          timestamp: 1_780_321_278_404,
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "读取单文件" }],
+          sessionId: "codebuddy-file",
+          cwd: "/repo/单文件",
+        }),
+      ].join("\n"),
+    );
+
+    const loaded = loadCodeBuddyCliSessionFile(filePath);
+
+    expect(loaded?.session).toMatchObject({
+      rawId: "codebuddy-file",
+      source: "codebuddy-cli",
+      projectPath: "/repo/单文件",
+      originalTitle: "单文件标题",
+    });
+    expect(loaded?.messages.map((message) => message.content)).toEqual(["读取单文件"]);
+
+    fs.rmSync(codeBuddyDir, { recursive: true, force: true });
+  });
+
   it("loads CodeBuddy CLI jsonl sessions with a separate source namespace", () => {
     const codeBuddyDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-codebuddy-"));
     const projectDir = path.join(codeBuddyDir, "projects", "Users-xjx");
