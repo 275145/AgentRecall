@@ -1,11 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MIGRATION_TOKEN_LIMIT,
   estimatePortableSessionTokens,
+  migrateSession,
   migrationAgentForSource,
   portableSessionFrom,
   supportedMigrationTargets,
 } from "./session-migration";
+import type { PreparedMigrationSession } from "./session-migration-compression";
+import type { WrittenMigratedSession } from "./session-migration-writers";
 import type { SessionMessage, SessionSearchResult, SessionSource } from "./types";
 
 function session(
@@ -56,6 +59,103 @@ const messages: SessionMessage[] = [
   { role: "user", content: "你好", timestamp: "2026-06-23T00:00:00Z", index: 9 },
   { role: "assistant", content: "hello", timestamp: "2026-06-23T00:00:01Z", index: 15 },
 ];
+
+function longMessages(): SessionMessage[] {
+  return [
+    {
+      role: "user",
+      content: "a".repeat(MIGRATION_TOKEN_LIMIT * 4 + 1),
+      timestamp: "2026-06-23T00:00:00Z",
+      index: 0,
+    },
+    {
+      role: "assistant",
+      content: "tail",
+      timestamp: "2026-06-23T00:00:01Z",
+      index: 1,
+    },
+  ];
+}
+
+function writtenMigration(
+  overrides: Partial<WrittenMigratedSession> = {},
+): WrittenMigratedSession {
+  return {
+    sessionId: "target-session-1",
+    filePath: "/tmp/target-session-1.jsonl",
+    ...overrides,
+  };
+}
+
+function createDependencies() {
+  const callOrder: string[] = [];
+  const seenRecords: unknown[] = [];
+  const inspectCli = vi.fn(async () => {
+    callOrder.push("inspectCli");
+  });
+  const prepare = vi.fn(
+    async (portable): Promise<PreparedMigrationSession> => {
+      callOrder.push("prepare");
+      return {
+        session: portable,
+        strategy: "complete",
+      };
+    },
+  );
+  const write = vi.fn(async () => {
+    callOrder.push("write");
+    return writtenMigration();
+  });
+  const record = vi.fn(async (entry) => {
+    callOrder.push("record");
+    seenRecords.push(entry);
+  });
+  const refreshIndex = vi.fn(async () => {
+    callOrder.push("refreshIndex");
+  });
+  const launch = vi.fn(async () => {
+    callOrder.push("launch");
+  });
+  const resumeCommand = vi.fn(() => "codex resume target-session-1 --cwd /repo");
+  const projectPathExists = vi.fn(async () => true);
+  const projectPathIsDirectory = vi.fn(async () => true);
+  const onProgress = vi.fn((event) => {
+    callOrder.push(`progress:${event.stage}`);
+  });
+  const idFactory = vi.fn(() => "record-uuid-1");
+  const now = vi.fn(() => 1_719_100_800_000);
+
+  return {
+    deps: {
+      inspectCli,
+      prepare,
+      write,
+      record,
+      refreshIndex,
+      launch,
+      resumeCommand,
+      projectPathExists,
+      projectPathIsDirectory,
+      onProgress,
+      idFactory,
+      now,
+    },
+    callOrder,
+    seenRecords,
+    inspectCli,
+    prepare,
+    write,
+    record,
+    refreshIndex,
+    launch,
+    resumeCommand,
+    projectPathExists,
+    projectPathIsDirectory,
+    onProgress,
+    idFactory,
+    now,
+  };
+}
 
 describe("session migration model", () => {
   it.each([
@@ -138,5 +238,395 @@ describe("session migration model", () => {
     expect("你好🙂a".length).toBe(5);
     expect(estimatePortableSessionTokens(portable)).toBe(2);
     expect(MIGRATION_TOKEN_LIMIT).toBe(60_000);
+  });
+});
+
+describe("migrateSession", () => {
+  it.each([
+    ["claude-cli", "codex"],
+    ["claude-cli", "codebuddy"],
+    ["codex-cli", "claude"],
+    ["codex-cli", "codebuddy"],
+    ["codebuddy-cli", "claude"],
+    ["codebuddy-cli", "codex"],
+  ] as const)("migrates %s to %s", async (source, target) => {
+    const { deps, write, launch, refreshIndex, seenRecords } = createDependencies();
+
+    const result = await migrateSession({
+      source: session(source),
+      messages,
+      target,
+      deps,
+    });
+
+    expect(result).toEqual({
+      target,
+      targetSessionId: "target-session-1",
+      targetFilePath: "/tmp/target-session-1.jsonl",
+      strategy: "complete",
+      resumeCommand: "codex resume target-session-1 --cwd /repo",
+      indexed: true,
+      launched: true,
+    });
+    expect(write).toHaveBeenCalledOnce();
+    expect(refreshIndex).toHaveBeenCalledOnce();
+    expect(launch).toHaveBeenCalledOnce();
+    expect(seenRecords).toEqual([
+      {
+        id: "record-uuid-1",
+        sourceSessionKey: `${source}:1`,
+        sourceAgent: migrationAgentForSource(source),
+        targetAgent: target,
+        targetSessionId: "target-session-1",
+        targetFilePath: "/tmp/target-session-1.jsonl",
+        strategy: "complete",
+        createdAt: 1_719_100_800_000,
+      },
+    ]);
+  });
+
+  it.each([
+    [
+      "unsupported source",
+      session("hermes"),
+      "codex",
+      "Session source hermes cannot be migrated.",
+    ],
+    [
+      "remote session",
+      session("claude-cli", { environmentKind: "ssh", environmentId: "remote" }),
+      "codex",
+      "Remote session migration is not supported yet.",
+    ],
+    [
+      "same target",
+      session("claude-cli"),
+      "claude",
+      "Session is already a claude session.",
+    ],
+    [
+      "empty project path",
+      session("claude-cli", { projectPath: "   " }),
+      "codex",
+      "Session has no project path.",
+    ],
+  ] as const)(
+    "rejects %s before inspect or write",
+    async (_label, sourceSession, target, expectedMessage) => {
+      const { deps, inspectCli, write, record, refreshIndex, launch } = createDependencies();
+
+      await expect(
+        migrateSession({
+          source: sourceSession,
+          messages,
+          target,
+          deps,
+        }),
+      ).rejects.toThrow(expectedMessage);
+
+      expect(inspectCli).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+      expect(refreshIndex).not.toHaveBeenCalled();
+      expect(launch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects an invalid target before inspect or write", async () => {
+    const { deps, inspectCli, write } = createDependencies();
+
+    await expect(
+      migrateSession({
+        source: session("claude-cli"),
+        messages,
+        target: "hermes" as never,
+        deps,
+      }),
+    ).rejects.toThrow("Migration target hermes is not supported.");
+
+    expect(inspectCli).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("rejects when the project path does not exist before inspect or write", async () => {
+    const { deps, inspectCli, write, projectPathExists, projectPathIsDirectory } =
+      createDependencies();
+    projectPathExists.mockResolvedValue(false);
+
+    await expect(
+      migrateSession({
+        source: session("claude-cli"),
+        messages,
+        target: "codex",
+        deps,
+      }),
+    ).rejects.toThrow("Session project path does not exist: /repo");
+
+    expect(projectPathExists).toHaveBeenCalledWith("/repo");
+    expect(projectPathIsDirectory).not.toHaveBeenCalled();
+    expect(inspectCli).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("rejects when the project path is not a directory before inspect or write", async () => {
+    const { deps, inspectCli, write, projectPathIsDirectory } = createDependencies();
+    projectPathIsDirectory.mockResolvedValue(false);
+
+    await expect(
+      migrateSession({
+        source: session("claude-cli"),
+        messages,
+        target: "codex",
+        deps,
+      }),
+    ).rejects.toThrow("Session project path is not a directory: /repo");
+
+    expect(inspectCli).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("fails fast when the CLI preflight fails and does not write any file", async () => {
+    const { deps, inspectCli, prepare, write, record, refreshIndex, launch } =
+      createDependencies();
+    inspectCli.mockRejectedValue(new Error("codex CLI is not installed"));
+
+    await expect(
+      migrateSession({
+        source: session("claude-cli"),
+        messages,
+        target: "codex",
+        deps,
+      }),
+    ).rejects.toThrow("codex CLI is not installed");
+
+    expect(prepare).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+    expect(refreshIndex).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("does not emit compressing for a short session", async () => {
+    const { deps, onProgress } = createDependencies();
+
+    await migrateSession({
+      source: session("claude-cli"),
+      messages,
+      target: "codex",
+      deps,
+    });
+
+    expect(onProgress.mock.calls.map(([event]) => event.stage)).toEqual([
+      "reading",
+      "writing",
+      "indexing",
+      "launching",
+    ]);
+  });
+
+  it("emits compressing for a long session", async () => {
+    const { deps, onProgress, prepare } = createDependencies();
+    prepare.mockImplementation(async (portable) => ({
+      session: portable,
+      strategy: "locally-truncated",
+    }));
+
+    const result = await migrateSession({
+      source: session("claude-cli"),
+      messages: longMessages(),
+      target: "codex",
+      deps,
+    });
+
+    expect(result.strategy).toBe("locally-truncated");
+    expect(onProgress.mock.calls.map(([event]) => event.stage)).toEqual([
+      "reading",
+      "compressing",
+      "writing",
+      "indexing",
+      "launching",
+    ]);
+  });
+
+  it("isolates progress callback errors and preserves the exact stage order", async () => {
+    const { deps, callOrder, onProgress } = createDependencies();
+    onProgress.mockImplementation((event) => {
+      callOrder.push(`progress:${event.stage}`);
+      if (event.stage === "compressing") {
+        throw new Error("observer failed");
+      }
+    });
+
+    await migrateSession({
+      source: session("claude-cli"),
+      messages: longMessages(),
+      target: "codex",
+      deps,
+    });
+
+    expect(callOrder).toEqual([
+      "progress:reading",
+      "inspectCli",
+      "progress:compressing",
+      "prepare",
+      "progress:writing",
+      "write",
+      "record",
+      "progress:indexing",
+      "refreshIndex",
+      "progress:launching",
+      "launch",
+    ]);
+  });
+
+  it("rejects on prepare failure before writing", async () => {
+    const { deps, write, record, refreshIndex, launch, prepare } = createDependencies();
+    prepare.mockRejectedValue(new Error("compression provider failed"));
+
+    await expect(
+      migrateSession({
+        source: session("claude-cli"),
+        messages,
+        target: "codex",
+        deps,
+      }),
+    ).rejects.toThrow("compression provider failed");
+
+    expect(write).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+    expect(refreshIndex).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("rejects on writer failure and does not record, index, or launch", async () => {
+    const { deps, write, record, refreshIndex, launch } = createDependencies();
+    write.mockRejectedValue(new Error("disk full"));
+
+    await expect(
+      migrateSession({
+        source: session("claude-cli"),
+        messages,
+        target: "codex",
+        deps,
+      }),
+    ).rejects.toThrow("disk full");
+
+    expect(record).not.toHaveBeenCalled();
+    expect(refreshIndex).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the written file when recording metadata fails and still indexes and launches", async () => {
+    const { deps, record, refreshIndex, launch } = createDependencies();
+    record.mockRejectedValue(new Error("database unavailable"));
+
+    const result = await migrateSession({
+      source: session("claude-cli"),
+      messages,
+      target: "codex",
+      deps,
+    });
+
+    expect(result.indexed).toBe(true);
+    expect(result.launched).toBe(true);
+    expect(result.warning).toContain("Failed to record migration metadata: database unavailable");
+    expect(refreshIndex).toHaveBeenCalledOnce();
+    expect(launch).toHaveBeenCalledOnce();
+  });
+
+  it("returns indexed=false with a warning when refreshIndex fails and still launches", async () => {
+    const { deps, refreshIndex, launch } = createDependencies();
+    refreshIndex.mockRejectedValue(new Error("index busy"));
+
+    const result = await migrateSession({
+      source: session("claude-cli"),
+      messages,
+      target: "codex",
+      deps,
+    });
+
+    expect(result.indexed).toBe(false);
+    expect(result.launched).toBe(true);
+    expect(result.warning).toContain("Failed to refresh session index: index busy");
+    expect(launch).toHaveBeenCalledOnce();
+  });
+
+  it("returns launched=false with resumeCommand and a warning when launch fails", async () => {
+    const { deps, launch, resumeCommand } = createDependencies();
+    launch.mockRejectedValue(new Error("terminal unavailable"));
+
+    const result = await migrateSession({
+      source: session("claude-cli"),
+      messages,
+      target: "codex",
+      deps,
+    });
+
+    expect(result.indexed).toBe(true);
+    expect(result.launched).toBe(false);
+    expect(result.resumeCommand).toBe("codex resume target-session-1 --cwd /repo");
+    expect(result.warning).toContain("Failed to launch target session: terminal unavailable");
+    expect(resumeCommand).toHaveBeenCalledWith("codex", "target-session-1", "/repo");
+  });
+
+  it("merges multiple non-fatal warnings without overwriting earlier ones", async () => {
+    const { deps, record, refreshIndex, launch } = createDependencies();
+    record.mockRejectedValue(new Error("database unavailable"));
+    refreshIndex.mockRejectedValue(new Error("index busy"));
+    launch.mockRejectedValue(new Error("terminal unavailable"));
+
+    const result = await migrateSession({
+      source: session("claude-cli"),
+      messages,
+      target: "codex",
+      deps,
+    });
+
+    expect(result.indexed).toBe(false);
+    expect(result.launched).toBe(false);
+    expect(result.warning).toBe(
+      [
+        "Failed to record migration metadata: database unavailable",
+        "Failed to refresh session index: index busy",
+        "Failed to launch target session: terminal unavailable",
+      ].join("\n"),
+    );
+  });
+
+  it("allows repeated migrations of the same source session", async () => {
+    const first = createDependencies();
+    const second = createDependencies();
+    first.write.mockResolvedValueOnce(
+      writtenMigration({ sessionId: "target-session-1", filePath: "/tmp/target-session-1.jsonl" }),
+    );
+    second.write.mockResolvedValueOnce(
+      writtenMigration({ sessionId: "target-session-2", filePath: "/tmp/target-session-2.jsonl" }),
+    );
+    first.idFactory.mockReturnValueOnce("record-uuid-1");
+    second.idFactory.mockReturnValueOnce("record-uuid-2");
+    first.now.mockReturnValueOnce(1000);
+    second.now.mockReturnValueOnce(2000);
+
+    const firstResult = await migrateSession({
+      source: session("claude-cli"),
+      messages,
+      target: "codex",
+      deps: first.deps,
+    });
+    const secondResult = await migrateSession({
+      source: session("claude-cli"),
+      messages,
+      target: "codex",
+      deps: second.deps,
+    });
+
+    expect(firstResult.targetSessionId).toBe("target-session-1");
+    expect(secondResult.targetSessionId).toBe("target-session-2");
+    expect(first.seenRecords).toEqual([
+      expect.objectContaining({ id: "record-uuid-1", createdAt: 1000 }),
+    ]);
+    expect(second.seenRecords).toEqual([
+      expect.objectContaining({ id: "record-uuid-2", createdAt: 2000 }),
+    ]);
   });
 });
