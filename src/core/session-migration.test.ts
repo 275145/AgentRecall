@@ -116,7 +116,10 @@ function createDependencies() {
   const launch = vi.fn(async () => {
     callOrder.push("launch");
   });
-  const resumeCommand = vi.fn(() => "codex resume target-session-1 --cwd /repo");
+  const resumeCommand = vi.fn(() => {
+    callOrder.push("resumeCommand");
+    return "codex resume target-session-1 --cwd /repo";
+  });
   const projectPathExists = vi.fn(async () => true);
   const projectPathIsDirectory = vi.fn(async () => true);
   const onProgress = vi.fn((event) => {
@@ -472,6 +475,7 @@ describe("migrateSession", () => {
       "progress:writing",
       "write",
       "record",
+      "resumeCommand",
       "progress:indexing",
       "refreshIndex",
       "progress:launching",
@@ -567,6 +571,39 @@ describe("migrateSession", () => {
     expect(result.resumeCommand).toBe("codex resume target-session-1 --cwd /repo");
     expect(result.warning).toContain("Failed to launch target session: terminal unavailable");
     expect(resumeCommand).toHaveBeenCalledWith("codex", "target-session-1", "/repo");
+  });
+
+  it("records before attempting resumeCommand and downgrades resumeCommand failure to warning", async () => {
+    const { deps, callOrder, record, refreshIndex, launch, resumeCommand, seenRecords } =
+      createDependencies();
+    resumeCommand.mockImplementation(() => {
+      callOrder.push("resumeCommand");
+      throw new Error("resume formatter failed");
+    });
+
+    const result = await migrateSession({
+      source: session("claude-cli"),
+      messages,
+      target: "codex",
+      deps,
+    });
+
+    expect(record).toHaveBeenCalledOnce();
+    expect(seenRecords).toEqual([
+      expect.objectContaining({
+        sourceSessionKey: "claude-cli:1",
+        targetSessionId: "target-session-1",
+        targetFilePath: "/tmp/target-session-1.jsonl",
+      }),
+    ]);
+    expect(callOrder.indexOf("record")).toBeLessThan(callOrder.indexOf("resumeCommand"));
+    expect(result.targetFilePath).toBe("/tmp/target-session-1.jsonl");
+    expect(result.resumeCommand).toBe("codex resume target-session-1");
+    expect(result.indexed).toBe(true);
+    expect(result.launched).toBe(true);
+    expect(result.warning).toContain("Failed to build resume command: resume formatter failed");
+    expect(refreshIndex).toHaveBeenCalledOnce();
+    expect(launch).toHaveBeenCalledOnce();
   });
 
   it("merges multiple non-fatal warnings without overwriting earlier ones", async () => {

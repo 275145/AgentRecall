@@ -145,11 +145,6 @@ export async function migrateSession({
     stage: "writing",
   });
   const written = await deps.write(target, prepared.session);
-  const resumeCommand = deps.resumeCommand(
-    target,
-    written.sessionId,
-    prepared.session.projectPath,
-  );
 
   const warnings: string[] = [];
   await collectWarning(warnings, async () => {
@@ -164,6 +159,13 @@ export async function migrateSession({
       createdAt: deps.now(),
     });
   }, "Failed to record migration metadata");
+  const resumeCommand = safeResumeCommand(
+    deps,
+    warnings,
+    target,
+    written.sessionId,
+    prepared.session.projectPath,
+  );
 
   notifyProgress(deps.onProgress, {
     sessionKey: source.sessionKey,
@@ -264,4 +266,30 @@ function formatWarning(prefix: string, error: unknown): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function safeResumeCommand(
+  deps: SessionMigrationDependencies,
+  warnings: string[],
+  target: MigrationAgent,
+  sessionId: string,
+  projectPath: string,
+): string {
+  try {
+    return deps.resumeCommand(target, sessionId, projectPath);
+  } catch (error) {
+    warnings.push(formatWarning("Failed to build resume command", error));
+    return fallbackResumeCommand(target, sessionId);
+  }
+}
+
+function fallbackResumeCommand(target: MigrationAgent, sessionId: string): string {
+  switch (target) {
+    case "claude":
+      return `claude --resume ${sessionId}`;
+    case "codex":
+      return `codex resume ${sessionId}`;
+    case "codebuddy":
+      return `codebuddy --resume ${sessionId}`;
+  }
 }
