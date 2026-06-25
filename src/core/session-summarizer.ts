@@ -340,8 +340,16 @@ async function codexExecCompletion(endpoint: SummaryEndpoint, messages: ChatMess
       stderr += chunk.toString();
     });
     proc.on("error", (error) => {
-      if (error.name === "AbortError") reject(new Error(`AI summary request timed out after ${(REQUEST_TIMEOUT_MS * 2) / 1000}s.`));
-      else reject(error);
+      if (error.name === "AbortError") {
+        reject(new Error(`AI summary request timed out after ${(REQUEST_TIMEOUT_MS * 2) / 1000}s.`));
+        return;
+      }
+      // If codex is not found, fall back to claude exec
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        resolve(claudeExecCompletion(endpoint, messages, signal));
+        return;
+      }
+      reject(error);
     });
     proc.on("close", (code, signalName) => {
       if (stdoutBuffer.trim()) {
@@ -355,6 +363,19 @@ async function codexExecCompletion(endpoint: SummaryEndpoint, messages: ChatMess
         }
       }
       if (code !== 0) {
+        // If codex exited with error, try falling back to claude exec
+        // This handles cases where codex command doesn't exist or fails to run
+        // We check for ENOENT-like patterns in stderr, and also fallback when
+        // exit code is 1 with minimal/no content (typical of "command not found" on Windows)
+        const hasNotFoundError = stderr.toLowerCase().includes("not found") ||
+                                  stderr.toLowerCase().includes("not recognized") ||
+                                  stderr.toLowerCase().includes("no such file") ||
+                                  stderr.toLowerCase().includes("cannot find");
+        const isEmptyError = code === 1 && (!content.trim() || stdoutBuffer.length < 100);
+        if (hasNotFoundError || isEmptyError || code === null) {
+          resolve(claudeExecCompletion(endpoint, messages, signal));
+          return;
+        }
         const status = code === null ? `unknown${signalName ? ` (${signalName})` : ""}` : String(code);
         reject(new Error(`Codex summary exited with ${status}. ${stderr.trim().slice(-1000)}`.trim()));
         return;
