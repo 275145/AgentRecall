@@ -273,7 +273,6 @@ export function ApiConfigDialog({
                         type={showCodexApiKey ? "text" : "password"}
                         value={draftApiConfig.customApiKey}
                         disabled={!settings || saving}
-                        placeholder="sk-..."
                         onChange={(event) => updateDraftApiConfig({ customApiKey: event.currentTarget.value })}
                       />
                       <button
@@ -430,7 +429,6 @@ export function ApiConfigDialog({
                         type={showClaudeApiKey ? "text" : "password"}
                         value={draftClaudeApiConfig.customApiKey}
                         disabled={!settings || saving}
-                        placeholder="sk-..."
                         onChange={(event) => updateDraftClaudeApiConfig({ customApiKey: event.currentTarget.value })}
                       />
                       <button
@@ -597,7 +595,6 @@ export function ApiConfigDialog({
                         type={showSummaryApiKey ? "text" : "password"}
                         value={draftSummaryApiConfig.customApiKey}
                         disabled={!settings || saving}
-                        placeholder="sk-..."
                         onChange={(event) => updateDraftSummaryApiConfig({ customApiKey: event.currentTarget.value })}
                       />
                       <button
