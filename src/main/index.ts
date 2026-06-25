@@ -50,6 +50,14 @@ import { focusLiveSessionTerminal } from "../core/session-focus";
 import { loadLiveSessionSnapshot } from "../core/session-activity";
 import { type TrackedLiveSession, updateLiveTracker } from "../core/live-transitions";
 import { resolveSummaryEndpoint, summarizeSession, type SummaryEndpoint } from "../core/session-summarizer";
+import {
+  isLocalCliEndpoint,
+  runAiAssistantFallback,
+  runAiAssistantTurn,
+  type AiChatMessage,
+  type FallbackSessionHit,
+  type ToolExecutionResult,
+} from "../core/ai-assistant";
 import { applyMigrationLengthPolicy, createMigrationCompressor } from "../core/session-migration-compression";
 import { migrateSession } from "../core/session-migration";
 import { writeMigratedSession } from "../core/session-migration-writers";
@@ -882,6 +890,24 @@ let summaryBackfillRunning = false;
 const SUMMARY_PROVIDER_ERROR =
   "AI summary has no usable provider. Select Codex, Claude Code, or configure a direct summary API provider in Settings.";
 
+function buildCodexExecEndpoint(settings: AppSettings): SummaryEndpoint {
+  return {
+    baseUrl: "",
+    model: "codex",
+    apiKey: "",
+    apiFormat: "codex_exec",
+    command: settings.codexBinary,
+    cwd: process.cwd(),
+    onTemporarySession: (sessionKey) => {
+      try {
+        store.deleteSession(sessionKey);
+      } catch {
+        // Best-effort cleanup if an ephemeral Codex call is indexed before it exits.
+      }
+    },
+  };
+}
+
 async function resolveSummaryEndpointFromSettings(): Promise<SummaryEndpoint | null> {
   const settings = await getHydratedSettings();
   if (settings.summarySource === "custom") {
@@ -1094,6 +1120,104 @@ function registerIpc(): void {
     };
     await Promise.all(Array.from({ length: Math.min(3, total) }, worker));
     return { processed, failed, total };
+  });
+  ipcMain.handle("ai:assistant-chat", async (_event, messages: AiChatMessage[]) => {
+    // The assistant shares the summary provider routing. When the user picked a
+    // direct API provider but left it incomplete, fall back to the local Codex
+    // CLI so the assistant still works out of the box.
+    const endpoint = (await resolveSummaryEndpointFromSettings()) ?? buildCodexExecEndpoint(await getHydratedSettings());
+
+    // Local CLI providers (codex exec / claude) can't do HTTP function calling.
+    // Fall back to: keyword-search the store with the user's words, then let the
+    // CLI write a grounded answer over the hits.
+    if (isLocalCliEndpoint(endpoint)) {
+      const search = async (query: string): Promise<FallbackSessionHit[]> => {
+        const sessions = store.searchSessions({ query, limit: 12 });
+        return sessions.map((session) => ({
+          sessionKey: session.sessionKey,
+          title: session.displayTitle,
+          source: session.source,
+          project: session.projectPath,
+          summary: session.aiSummary ?? session.firstQuestion ?? null,
+        }));
+      };
+      const { reply, sessionKeys } = await runAiAssistantFallback(endpoint, messages, search);
+      const sessions = sessionKeys
+        .map((key) => store.getSession(key))
+        .filter((session): session is SessionSearchResult => session !== null);
+      return { reply, sessions };
+    }
+    // The model's tool calls run against the local SessionStore — the same data
+    // the MCP server exposes. We collect surfaced sessionKeys so the renderer can
+    // hydrate full results into clickable cards.
+    const executeTool = async (name: string, args: Record<string, unknown>): Promise<ToolExecutionResult> => {
+      switch (name) {
+        case "search_sessions": {
+          const query = typeof args.query === "string" ? args.query : "";
+          const source = typeof args.source === "string" && args.source ? args.source : undefined;
+          const projectPath = typeof args.project === "string" && args.project ? args.project : undefined;
+          const limit = typeof args.limit === "number" ? Math.max(1, Math.min(50, Math.floor(args.limit))) : 20;
+          const sessions = store.searchSessions({
+            query,
+            source: source as SearchOptions["source"],
+            projectPath,
+            limit,
+          });
+          return {
+            result: sessions.map((session) => ({
+              sessionKey: session.sessionKey,
+              title: session.displayTitle,
+              source: session.source,
+              project: session.projectPath,
+              timestamp: session.timestamp,
+              summary: session.aiSummary ?? session.firstQuestion ?? null,
+            })),
+            sessionKeys: sessions.map((session) => session.sessionKey),
+          };
+        }
+        case "list_projects": {
+          const projects = store.listProjects();
+          return {
+            result: projects.map((project) => ({ project: project.path, sessions: project.sessionCount })),
+            sessionKeys: [],
+          };
+        }
+        case "list_tags": {
+          return { result: store.listTags(), sessionKeys: [] };
+        }
+        case "get_session": {
+          const sessionKey = typeof args.sessionKey === "string" ? args.sessionKey : "";
+          if (!sessionKey) return { result: { error: "sessionKey is required." }, sessionKeys: [] };
+          await ensureRemoteSessionDetailsLoaded(sessionKey);
+          const session = store.getSession(sessionKey);
+          if (!session) return { result: { error: "Session not found." }, sessionKeys: [] };
+          const maxMessages = typeof args.maxMessages === "number" ? Math.max(1, Math.min(200, Math.floor(args.maxMessages))) : 40;
+          const offset = typeof args.offset === "number" && args.offset > 0 ? Math.floor(args.offset) : 0;
+          const messageList = store.getMessages(sessionKey, offset, maxMessages);
+          return {
+            result: {
+              sessionKey: session.sessionKey,
+              title: session.displayTitle,
+              source: session.source,
+              project: session.projectPath,
+              timestamp: session.timestamp,
+              summary: session.aiSummary,
+              totalMessages: session.messageCount,
+              messages: messageList.map((message) => ({ role: message.role, content: message.content })),
+            },
+            sessionKeys: [session.sessionKey],
+          };
+        }
+        default:
+          return { result: { error: `Unknown tool: ${name}` }, sessionKeys: [] };
+      }
+    };
+
+    const { reply, sessionKeys } = await runAiAssistantTurn(endpoint, messages, executeTool);
+    const sessions = sessionKeys
+      .map((key) => store.getSession(key))
+      .filter((session): session is SessionSearchResult => session !== null);
+    return { reply, sessions };
   });
   ipcMain.handle("mcp:status", () => {
     try {
