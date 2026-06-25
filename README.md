@@ -1,6 +1,6 @@
 <h1 align="center">Agent-Session-Search</h1>
 
-<p align="center">本地桌面工具 · 一处搜索、整理、分析与恢复多种 AI Coding Agent 会话</p>
+<p align="center">本地桌面工具 · 搜索、快速启动、分析多种 AI Coding Agent 会话</p>
 
 <p align="center">
   简体中文 ｜ <a href="./docs/README.en.md">English</a>
