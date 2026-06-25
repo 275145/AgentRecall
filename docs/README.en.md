@@ -1,6 +1,6 @@
 <h1 align="center">Agent-Session-Search</h1>
 
-<p align="center">A local desktop tool to search, organize, inspect, and resume AI coding-agent sessions</p>
+<p align="center">A local desktop tool to search, quick launch, and analyze AI coding-agent sessions</p>
 
 <p align="center">
   <a href="../README.md">简体中文</a> ｜ English
@@ -17,32 +17,22 @@
   <img src="../assets/show.png" alt="Agent-Session-Search preview" width="860">
 </p>
 
-Agent-Session-Search is a local desktop console for finding, organizing, inspecting, and resuming AI coding-agent sessions.
-
-It indexes existing local Claude and Codex sessions by default, and can also read remote Claude/Codex sessions over SSH. Optional local sources, including CodeBuddy CLI, OpenClaw, Hermes, OpenCode, Cursor Agent, and Trae, can be enabled from Settings -> Optional sources. The app lets you add your own titles and tags, and keeps app metadata in a separate local SQLite database. Indexing and organizing do not modify the original agent session data. Independent source files are deleted only when the user explicitly confirms session deletion; shared Hermes/OpenCode SQLite databases are never deleted as a whole for one session.
-
 ## Features
 
-- Search Claude Code, Codex, and enabled optional sources such as CodeBuddy CLI, OpenClaw, Hermes, OpenCode, Cursor Agent, and Trae from one desktop app.
-- Full-text search across custom titles, original titles, first user questions, conversation text, and project paths.
-- Paginated first load: long session lists render a small page first and load more on demand.
-- Add custom titles, tags, favorites, pinned state, and hidden state without changing upstream session files.
-- Delete tags and local session source files with confirmation.
-- Filter by project, environment, tag, source, open/closed state, pinned sessions, or hidden sessions.
-- Sort by latest activity, created time, or updated time.
-- Add local and SSH environments; SSH environments can be refreshed manually or kept in sync through remote file watching.
-- Resume a session in Terminal, iTerm, Ghostty, WezTerm, or Warp. If a local session is already open, Resume brings the existing terminal window/tab to front instead of starting another `codex resume` / `claude --resume`.
-- Copy resume commands or export Markdown.
-- Migrate local Claude Code / Codex / CodeBuddy sessions into each other and open the target session after migration.
-- Read details with Markdown / code block rendering, collapsed tool traces, and user / assistant / tool message filters.
-- Track message and token usage for Today / 7D / 30D / All time.
-- Show Codex subscription quota; Claude Code quota can be shown through a statusline snapshot bridge.
-- Refresh the local index and usage stats from the tray menu or in-app controls.
-- Manage installed Skills: list Codex / Claude Code skills, search, preview, filter by source, copy paths, reveal folders, and delete user skills.
-- Track Skill usage: Claude Code uses a PostToolUse hook; Codex usage is inferred from local session function calls that read `SKILL.md`. Usage is indexed in local SQLite and refreshed incrementally after app startup, when the Skills panel opens, and from the manual refresh button.
-- Switch Codex / Claude Code API providers with presets for CodexZH, DeepSeek, GLM, LongCat, Kimi, MiMo, plus custom base URL, model, and API key fields.
-- Switch between light/dark themes and English/Chinese UI.
-- Toggle the app with `Option+Space` on macOS by default; the shortcut can be changed or disabled in Settings.
+### Core Features
+
+- **Unified search and management for AI coding-agent sessions**:
+  Search, filter, inspect, organize, and quick launch Claude Code, Codex, and optional sessions from CodeBuddy, OpenClaw, Hermes, OpenCode, Cursor Agent, and Trae; add custom titles, tags, favorites, pinned state, and hidden state; local and SSH remote environments are supported without installing this app on the remote machine.
+- **Full session context view**:
+  The detail view shows complete messages, tool calls, Markdown / code blocks, and supports AI summaries plus Markdown export.
+- **AI / Agent-assisted session retrieval**:
+  Use AI summaries to improve history search, ask for sessions in natural language, and expose read-only MCP capabilities so Claude Code / Codex / CodeBuddy can search and read session history directly in chat.
+- **Cross-agent session migration**:
+  Migrate Claude / Codex / CodeBuddy sessions into another agent and continue from the migrated session.
+- **Unified agent usage and quota view**:
+  Track token usage by agent for today, 7 days, 30 days, and all time; also view current Claude Code / Codex quota status.
+- **Unified Skills and API Provider management**:
+  View and manage Claude Code / Codex skills, track skill usage, and switch Codex / Claude Code between official accounts and third-party API providers.
 
 ## Supported Sources
 
@@ -63,54 +53,6 @@ It indexes existing local Claude and Codex sessions by default, and can also rea
 Codex title metadata is read from `~/.codex/session_index.jsonl` when that file exists. If no upstream title is available, the app uses the first meaningful user question as the default title.
 
 CodeBuddy CLI, OpenClaw, Hermes, OpenCode, Cursor Agent, and Trae are off by default and can be selected from Settings -> Optional sources. Once enabled, they support local read-only indexing, search, details, and source filtering. Resume, SSH remote sync, and provider-specific usage stats for these sources are intentionally separate follow-up work. Trae also supports open-state detection.
-
-## Resume Behavior
-
-When you click Resume or press `Cmd/Ctrl+Enter`, the app first checks whether the selected session is already open locally:
-
-- If it is open, the app follows the session process up to its owning terminal process and brings the existing Terminal / iTerm / Ghostty / WezTerm / Warp window to front. Terminal and iTerm try to focus the exact tty window or tab; if tty lookup is unavailable, the app falls back to activating the terminal app.
-- If it is not open, the app starts a new restore command in the configured default terminal, such as `codex resume <session-id>` or `claude --resume <session-id>`.
-- SSH remote sessions run a remote project-path and CLI preflight first, then execute the remote restore command through `ssh` in the local default terminal.
-
-## SSH Remote Sessions
-
-SSH environments do not require Agent-Session-Search to be installed on the remote machine, and the app does not create a remote database. The local app uses the system `ssh` command, runs a temporary Python collector on the remote host, reads session summaries from remote `~/.codex` and `~/.claude`, then stores those summaries in the local SQLite index.
-
-Remote sync behavior:
-
-- Adding or enabling an SSH environment starts with one full summary sync.
-- If `inotifywait` exists on the remote host, the app keeps an SSH watcher open for `~/.codex/sessions`, `~/.codex/session_index.jsonl`, `~/.claude/projects`, and `~/.claude/sessions`.
-- If `inotifywait` is missing but `fswatch` exists, it watches `~/.codex` and `~/.claude`.
-- If neither watcher is available, it falls back to polling every 60 seconds.
-- Remote details are loaded on demand: the list stores summaries first, and the original remote session file is fetched only when that session is opened.
-
-Remote host requirements:
-
-- Non-interactive `ssh` access from the local machine.
-- `python3`.
-- `inotifywait` or `fswatch` for real-time watching; polling still works without them.
-
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-| --- | --- |
-| `Option+Space` | Show or hide the search window on macOS |
-| `Cmd/Ctrl+K` | Focus and select the search box |
-| `↑` / `↓` | Move through the main session list |
-| `Space` | Open details for the selected session |
-| `Enter` | Open details for the selected session when the search box is focused |
-| `Cmd/Ctrl+Enter` | Resume the selected session in the default terminal |
-| `Cmd/Ctrl+,` | Open Settings |
-
-## Data Model
-
-Agent-Session-Search keeps two kinds of data separate:
-
-- Upstream session data stays in the original agent files or databases and is treated as read-only input while indexing, searching, and tagging. Confirmed deletion removes independent session files, but Hermes and OpenCode use shared SQLite databases, so the app does not delete an entire database for one session.
-- SSH remote session files are also treated as read-only input and fetched over SSH only for summaries and on-demand details.
-- Cross-agent migration creates a new session file under the target agent's local session directory and records the source/target relationship in the local database; it does not rewrite the source session file.
-- App metadata, including custom titles, tags, favorites, pinned state, hidden state, the search index, remote environment configuration, Skill usage index, and API provider keys, is stored in a local SQLite database under Electron's `userData` directory.
-- Applying Codex / Claude Code provider settings edits the local `~/.codex/config.toml` or `~/.claude/settings.json` using the CLI's native configuration format and writes backups first.
 
 ## Installation
 

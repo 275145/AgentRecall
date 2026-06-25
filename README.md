@@ -17,10 +17,6 @@
   <img src="./assets/show.png" alt="Agent-Session-Search 界面预览" width="860">
 </p>
 
-Agent-Session-Search 是一个本地桌面工具，用来搜索、整理、快速启动和分析 AI Coding Agent 的历史会话。
-
-它支持本机和 SSH 远程机器上的 Claude Code / Codex 会话，也支持 CodeBuddy CLI、OpenClaw、Hermes、OpenCode、Cursor Agent、Trae 等来源。你可以在本地建立搜索索引，并为 session 添加自定义标题、标签、收藏、置顶和隐藏状态；这些额外信息存放在独立的本地 SQLite 数据库里，索引和整理默认不会修改原始 session 数据。
-
 ## 功能
 
 ### 核心功能
