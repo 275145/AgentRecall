@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { indexMigratedSessionFile, syncLoadedSessionsInBatches } from "./indexer";
+import { indexMigratedSessionFile, syncDefaultSessionsInBatches, syncLoadedSessionsInBatches } from "./indexer";
 import { createInMemoryStore } from "./session-store";
 import { writeMigratedSession } from "./session-migration-writers";
 import type { IndexedSession, LoadedSession, MigrationAgent, PortableSession } from "./types";
@@ -50,6 +50,71 @@ describe("indexer", () => {
     expect(store.searchSessions({ query: "Question", limit: 10 })).toHaveLength(3);
   });
 
+  it("skips rebuilding unchanged sessions", async () => {
+    const store = createInMemoryStore();
+    store.upsertIndexedSession(session(1).session, [
+      { role: "user", content: "original indexed question", timestamp: "2026-06-01T10:00:00Z", index: 0 },
+    ]);
+
+    const unchanged = session(1);
+    unchanged.messages = [{ role: "user", content: "should not replace unchanged content", timestamp: "2026-06-01T10:00:00Z", index: 0 }];
+
+    const status = await syncLoadedSessionsInBatches(store, [unchanged], { batchSize: 1 });
+
+    expect(status).toMatchObject({ indexed: 0, skipped: 1, total: 1 });
+    expect(store.searchSessions({ query: "original indexed question", limit: 10 })).toHaveLength(1);
+    expect(store.searchSessions({ query: "should not replace unchanged content", limit: 10 })).toHaveLength(0);
+  });
+
+  it("skips unchanged default session files before reading them", async () => {
+    const store = createInMemoryStore();
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-session-search-default-skip-"));
+    try {
+      const filePath = writeCodexSession(homeDir, "codex-skip", "original question", "Original Title");
+      const cold = await syncDefaultSessionsInBatches(store, { batchSize: 1, loadOptions: { homeDir } });
+      expect(cold).toMatchObject({ indexed: 1, skipped: 0, total: 1 });
+
+      const previousStat = store.listIndexedSessionFiles()[0];
+      fs.writeFileSync(filePath, "{not jsonl".padEnd(previousStat.fileSize, "x"));
+      fs.utimesSync(filePath, previousStat.fileMtimeMs / 1000, previousStat.fileMtimeMs / 1000);
+      const oldIndexTime = new Date(Math.max(0, previousStat.indexedAt - 1000));
+      fs.utimesSync(path.join(homeDir, ".codex", "session_index.jsonl"), oldIndexTime, oldIndexTime);
+
+      const warm = await syncDefaultSessionsInBatches(store, { batchSize: 1, loadOptions: { homeDir } });
+
+      expect(warm).toMatchObject({ indexed: 0, skipped: 1, total: 1 });
+      expect(store.searchSessions({ query: "original question", limit: 10 })).toHaveLength(1);
+    } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-reads Codex sessions when the session index changes", async () => {
+    const store = createInMemoryStore();
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-session-search-codex-index-"));
+    try {
+      writeCodexSession(homeDir, "codex-title-refresh", "title refresh question", "Old Title");
+      await syncDefaultSessionsInBatches(store, { batchSize: 1, loadOptions: { homeDir } });
+      expect(store.searchSessions({ query: "Old Title", limit: 10 })).toHaveLength(1);
+
+      const indexPath = path.join(homeDir, ".codex", "session_index.jsonl");
+      fs.writeFileSync(
+        indexPath,
+        `${JSON.stringify({ id: "codex-title-refresh", thread_name: "New Title", updated_at: "2026-06-01T10:05:00Z" })}\n`,
+      );
+      const futureIndexTime = new Date(Date.now() + 2000);
+      fs.utimesSync(indexPath, futureIndexTime, futureIndexTime);
+
+      const warm = await syncDefaultSessionsInBatches(store, { batchSize: 1, loadOptions: { homeDir } });
+
+      expect(warm).toMatchObject({ indexed: 1, skipped: 0, total: 1 });
+      expect(store.searchSessions({ query: "New Title", limit: 10 })).toHaveLength(1);
+      expect(store.searchSessions({ query: "Old Title", limit: 10 })).toHaveLength(0);
+    } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
   it.each(["claude", "codex", "codebuddy"] as const)("indexes one migrated %s session file without a full scan", async (target: MigrationAgent) => {
     const store = createInMemoryStore();
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-session-search-index-migration-"));
@@ -70,6 +135,33 @@ describe("indexer", () => {
     }
   });
 });
+
+function writeCodexSession(homeDir: string, id: string, question: string, title: string): string {
+  const codexDir = path.join(homeDir, ".codex");
+  const sessionDir = path.join(codexDir, "sessions", "2026", "06", "01");
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexDir, "session_index.jsonl"),
+    `${JSON.stringify({ id, thread_name: title, updated_at: "2026-06-01T10:00:00Z" })}\n`,
+  );
+  const filePath = path.join(sessionDir, `${id}.jsonl`);
+  fs.writeFileSync(
+    filePath,
+    [
+      JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-06-01T10:00:00Z",
+        payload: { id, cwd: "/repo", title: "Embedded Title" },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: "2026-06-01T10:01:00Z",
+        payload: { type: "message", role: "user", content: [{ type: "input_text", text: question }] },
+      }),
+    ].join("\n"),
+  );
+  return filePath;
+}
 
 function portableSession(): PortableSession {
   return {

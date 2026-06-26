@@ -8,12 +8,33 @@ import {
   loadCodeBuddyCliSessionFile,
   loadCodeBuddyCliSessions,
   loadCodexSessionFile,
+  loadCodexSessionsIterator,
   loadCodexSessions,
   parseCodexSessionMetaLine,
 } from "./session-loader";
 import { TRACE_DETAIL_PREVIEW_MAX_CHARS } from "./trace-detail";
 
 describe("Codex session loading", () => {
+  it("skips unchanged source files before parsing JSONL", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-codex-skip-"));
+    const filePath = path.join(root, "sessions", "2026", "06", "26", "rollout.jsonl");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, "{not valid jsonl");
+    const skipped: string[] = [];
+
+    const loaded = [
+      ...loadCodexSessionsIterator(root, undefined, {
+        shouldSkipFile: () => true,
+        onSkippedFile: (skippedPath) => skipped.push(skippedPath),
+      }),
+    ];
+
+    expect(loaded).toEqual([]);
+    expect(skipped).toEqual([filePath]);
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   it("extracts id, cwd, originator, first question, and visible messages from a rollout file", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-"));
     const filePath = path.join(dir, "rollout.jsonl");

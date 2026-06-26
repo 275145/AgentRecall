@@ -1074,7 +1074,10 @@ export function App(): ReactElement {
         setRefreshFeedback({ kind: "error", message: status.error });
         return;
       }
-      const successMessage = t(`Index refreshed: ${status.indexed}/${status.total} sessions.`, `索引已更新：${status.indexed}/${status.total} 个会话。`);
+      const successMessage = t(
+        `Index refreshed: ${status.indexed} updated, ${status.skipped} skipped, ${status.total} total.`,
+        `索引已更新：更新 ${status.indexed} 个，跳过 ${status.skipped} 个，共 ${status.total} 个。`,
+      );
       setRefreshFeedback({ kind: "success", message: successMessage });
       window.setTimeout(() => {
         setRefreshFeedback((current) => (current?.kind === "success" && current.message === successMessage ? null : current));

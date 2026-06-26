@@ -14,6 +14,7 @@ import type { LoadedSession, MigrationAgent } from "./types";
 export interface IndexStatus {
   running: boolean;
   indexed: number;
+  skipped: number;
   total: number;
   lastIndexedAt: number | null;
   error: string | null;
@@ -29,6 +30,7 @@ export function syncDefaultSessions(store: SessionStore, loadOptions: SessionLoa
   return {
     running: false,
     indexed,
+    skipped: 0,
     total: loaded.length,
     lastIndexedAt: Date.now(),
     error: null,
@@ -50,30 +52,37 @@ export async function syncLoadedSessionsInBatches(
   const batchSize = Math.max(1, options.batchSize ?? 3);
   const yieldToEventLoop = options.yieldToEventLoop ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
   let indexed = 0;
+  let skipped = 0;
   let total = 0;
   let pendingInBatch = 0;
 
   for (const item of loaded) {
-    store.upsertIndexedSession(item.session, item.messages, item.tokenEvents, item.traceEvents);
-    indexed++;
+    if (store.isIndexedSessionFresh(item.session)) {
+      store.touchIndexedAtIfMissing(item.session.sessionKey);
+      skipped++;
+    } else {
+      store.upsertIndexedSession(item.session, item.messages, item.tokenEvents, item.traceEvents);
+      indexed++;
+    }
     total++;
     pendingInBatch++;
 
     if (pendingInBatch >= batchSize) {
       pendingInBatch = 0;
-      options.onProgress?.({ running: true, indexed, total, lastIndexedAt: null, error: null });
+      options.onProgress?.({ running: true, indexed, skipped, total, lastIndexedAt: null, error: null });
       await yieldToEventLoop();
     }
   }
 
   if (pendingInBatch > 0 || indexed === 0) {
-    options.onProgress?.({ running: true, indexed, total, lastIndexedAt: null, error: null });
+    options.onProgress?.({ running: true, indexed, skipped, total, lastIndexedAt: null, error: null });
     await yieldToEventLoop();
   }
 
   return {
     running: false,
     indexed,
+    skipped,
     total,
     lastIndexedAt: Date.now(),
     error: null,
@@ -81,7 +90,52 @@ export async function syncLoadedSessionsInBatches(
 }
 
 export function syncDefaultSessionsInBatches(store: SessionStore, options: BatchIndexOptions = {}): Promise<IndexStatus> {
-  return syncLoadedSessionsInBatches(store, loadDefaultSessionsIterator(options.loadOptions), options);
+  const indexedFiles = sessionFileSnapshots(store.listIndexedSessionFiles());
+  let fileSkipped = 0;
+  const loadOptions = options.loadOptions ?? {};
+  const shouldSkipFile = loadOptions.shouldSkipFile;
+  const onSkippedFile = loadOptions.onSkippedFile;
+  const loaded = loadDefaultSessionsIterator({
+    ...loadOptions,
+    shouldSkipFile: (filePath, stat, dependencyMtimeMs = 0) => {
+      const customDecision = shouldSkipFile?.(filePath, stat, dependencyMtimeMs);
+      if (customDecision !== undefined) return customDecision;
+      const snapshot = findSessionFileSnapshot(indexedFiles, filePath, stat);
+      return snapshot !== undefined && snapshot.indexedAt > 0 && dependencyMtimeMs <= snapshot.indexedAt;
+    },
+    onSkippedFile: (filePath, stat) => {
+      fileSkipped++;
+      onSkippedFile?.(filePath, stat);
+    },
+  });
+  return syncLoadedSessionsInBatches(store, loaded, {
+    ...options,
+    onProgress: (status) => options.onProgress?.({ ...status, skipped: status.skipped + fileSkipped, total: status.total + fileSkipped }),
+  }).then((status) => ({ ...status, skipped: status.skipped + fileSkipped, total: status.total + fileSkipped }));
+}
+
+interface SessionFileSnapshot {
+  fileMtimeMs: number;
+  fileSize: number;
+  indexedAt: number;
+}
+
+function sessionFileSnapshots(files: Array<{ filePath: string; fileMtimeMs: number; fileSize: number; indexedAt: number }>): Map<string, SessionFileSnapshot[]> {
+  const snapshots = new Map<string, SessionFileSnapshot[]>();
+  for (const file of files) {
+    const bucket = snapshots.get(file.filePath) ?? [];
+    bucket.push({ fileMtimeMs: file.fileMtimeMs, fileSize: file.fileSize, indexedAt: file.indexedAt });
+    snapshots.set(file.filePath, bucket);
+  }
+  return snapshots;
+}
+
+function findSessionFileSnapshot(
+  snapshots: Map<string, SessionFileSnapshot[]>,
+  filePath: string,
+  stat: { mtimeMs: number; size: number },
+): SessionFileSnapshot | undefined {
+  return snapshots.get(filePath)?.find((snapshot) => snapshot.fileSize === stat.size && Math.abs(snapshot.fileMtimeMs - stat.mtimeMs) < 1);
 }
 
 export function indexMigratedSessionFile(
@@ -97,6 +151,7 @@ export function indexMigratedSessionFile(
   return {
     running: false,
     indexed: 1,
+    skipped: 0,
     total: 1,
     lastIndexedAt: Date.now(),
     error: null,

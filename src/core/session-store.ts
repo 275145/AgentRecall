@@ -65,6 +65,7 @@ interface SessionRow {
   timestamp: number;
   file_mtime_ms: number;
   file_size: number;
+  indexed_at: number;
   pr_url: string | null;
   pr_number: number | null;
   custom_title: string | null;
@@ -164,6 +165,7 @@ export class SessionStore {
   ): void {
     const normalizedTokenEvents = tokenEvents.map(normalizeTokenEvent).filter((event) => event.totalTokens > 0 && event.dedupeKey);
     const tokenUsage = normalizedTokenEvents.length > 0 ? tokenUsageFromEvents(normalizedTokenEvents) : normalizeTokenUsage(session.tokenUsage);
+    const indexedAt = Date.now();
     this.transaction(() => {
       this.db
         .prepare(
@@ -171,9 +173,9 @@ export class SessionStore {
           INSERT INTO sessions (
             session_key, raw_id, source, environment_id, project_path, file_path, original_title, first_question,
             timestamp, file_mtime_ms, file_size, pr_url, pr_number, message_count,
-            input_tokens, output_tokens, cached_input_tokens, reasoning_output_tokens, total_tokens
+            input_tokens, output_tokens, cached_input_tokens, reasoning_output_tokens, total_tokens, indexed_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(session_key) DO UPDATE SET
             raw_id = excluded.raw_id,
             source = excluded.source,
@@ -192,7 +194,8 @@ export class SessionStore {
             output_tokens = excluded.output_tokens,
             cached_input_tokens = excluded.cached_input_tokens,
             reasoning_output_tokens = excluded.reasoning_output_tokens,
-            total_tokens = excluded.total_tokens
+            total_tokens = excluded.total_tokens,
+            indexed_at = excluded.indexed_at
         `,
         )
         .run(
@@ -215,6 +218,7 @@ export class SessionStore {
           tokenUsage.cachedInputTokens,
           tokenUsage.reasoningOutputTokens,
           tokenUsage.totalTokens,
+          indexedAt,
         );
 
       this.db.prepare("DELETE FROM messages WHERE session_key = ?").run(session.sessionKey);
@@ -281,8 +285,72 @@ export class SessionStore {
     });
   }
 
+  isIndexedSessionFresh(session: IndexedSession): boolean {
+    if (session.fileMtimeMs <= 0 && session.fileSize <= 0) return false;
+    const row = this.db
+      .prepare(
+        `
+        SELECT raw_id, source, environment_id, project_path, file_path, original_title, first_question,
+          timestamp, file_mtime_ms, file_size, pr_url, pr_number
+        FROM sessions
+        WHERE session_key = ?
+      `,
+      )
+      .get(session.sessionKey) as
+      | Pick<
+        SessionRow,
+        | "raw_id"
+        | "source"
+        | "environment_id"
+        | "project_path"
+        | "file_path"
+        | "original_title"
+        | "first_question"
+        | "timestamp"
+        | "file_mtime_ms"
+        | "file_size"
+        | "pr_url"
+        | "pr_number"
+      >
+      | undefined;
+    if (!row) return false;
+    return (
+      row.raw_id === session.rawId &&
+      row.source === session.source &&
+      row.environment_id === (session.environmentId ?? "local") &&
+      row.project_path === session.projectPath &&
+      row.file_path === session.filePath &&
+      row.original_title === session.originalTitle &&
+      row.first_question === session.firstQuestion &&
+      row.timestamp === session.timestamp &&
+      Math.abs(row.file_mtime_ms - session.fileMtimeMs) < 0.001 &&
+      row.file_size === session.fileSize &&
+      (row.pr_url ?? null) === (session.prUrl ?? null) &&
+      (row.pr_number ?? null) === (session.prNumber ?? null)
+    );
+  }
+
+  touchIndexedAtIfMissing(sessionKey: string): void {
+    this.db.prepare("UPDATE sessions SET indexed_at = ? WHERE session_key = ? AND indexed_at <= 0").run(Date.now(), sessionKey);
+  }
+
+  listIndexedSessionFiles(environmentId = "local"): Array<{ filePath: string; fileMtimeMs: number; fileSize: number; indexedAt: number }> {
+    return this.db
+      .prepare(
+        `
+        SELECT file_path AS filePath, file_mtime_ms AS fileMtimeMs, file_size AS fileSize, indexed_at AS indexedAt
+        FROM sessions
+        WHERE environment_id = ?
+          AND file_path != ''
+          AND file_mtime_ms > 0
+      `,
+      )
+      .all(environmentId) as Array<{ filePath: string; fileMtimeMs: number; fileSize: number; indexedAt: number }>;
+  }
+
   upsertIndexedSessionSummary(session: IndexedSession, messageCount: number): void {
     const tokenUsage = normalizeTokenUsage(session.tokenUsage);
+    const indexedAt = Date.now();
     this.transaction(() => {
       this.db
         .prepare(
@@ -290,9 +358,9 @@ export class SessionStore {
           INSERT INTO sessions (
             session_key, raw_id, source, environment_id, project_path, file_path, original_title, first_question,
             timestamp, file_mtime_ms, file_size, pr_url, pr_number, message_count,
-            input_tokens, output_tokens, cached_input_tokens, reasoning_output_tokens, total_tokens
+            input_tokens, output_tokens, cached_input_tokens, reasoning_output_tokens, total_tokens, indexed_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(session_key) DO UPDATE SET
             raw_id = excluded.raw_id,
             source = excluded.source,
@@ -311,7 +379,8 @@ export class SessionStore {
             output_tokens = excluded.output_tokens,
             cached_input_tokens = excluded.cached_input_tokens,
             reasoning_output_tokens = excluded.reasoning_output_tokens,
-            total_tokens = excluded.total_tokens
+            total_tokens = excluded.total_tokens,
+            indexed_at = excluded.indexed_at
         `,
         )
         .run(
@@ -334,6 +403,7 @@ export class SessionStore {
           tokenUsage.cachedInputTokens,
           tokenUsage.reasoningOutputTokens,
           tokenUsage.totalTokens,
+          indexedAt,
         );
 
       this.refreshFtsForSession(session.sessionKey);
@@ -1016,7 +1086,8 @@ export class SessionStore {
         output_tokens INTEGER NOT NULL DEFAULT 0,
         cached_input_tokens INTEGER NOT NULL DEFAULT 0,
         reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
-        total_tokens INTEGER NOT NULL DEFAULT 0
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        indexed_at INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS environments (
@@ -1167,6 +1238,7 @@ export class SessionStore {
     this.addColumnIfMissing("sessions", "ai_summary_model", "TEXT");
     this.addColumnIfMissing("sessions", "ai_summary_at", "INTEGER");
     this.addColumnIfMissing("sessions", "ai_summary_basis", "INTEGER");
+    this.addColumnIfMissing("sessions", "indexed_at", "INTEGER NOT NULL DEFAULT 0");
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sessions_environment
         ON sessions(environment_id);

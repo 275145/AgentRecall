@@ -30,6 +30,7 @@ const CODEX_INTERNAL_DIR = ".codex-internal";
 const CODEBUDDY_DIR = ".codebuddy";
 
 export interface SessionLoadOptions {
+  homeDir?: string;
   includeClaudeInternal?: boolean;
   includeCodexInternal?: boolean;
   includeCodeBuddyCli?: boolean;
@@ -38,6 +39,8 @@ export interface SessionLoadOptions {
   includeOpenCode?: boolean;
   includeCursorAgent?: boolean;
   includeTrae?: boolean;
+  shouldSkipFile?: (filePath: string, stat: VirtualSessionFileStat, dependencyMtimeMs?: number) => boolean;
+  onSkippedFile?: (filePath: string, stat: VirtualSessionFileStat) => void;
 }
 
 export interface VirtualSessionFileStat {
@@ -95,6 +98,12 @@ function safeStat(filePath: string): VirtualSessionFileStat {
   } catch {
     return { mtimeMs: 0, size: 0 };
   }
+}
+
+function shouldSkipFile(options: SessionLoadOptions, filePath: string, stat = safeStat(filePath), dependencyMtimeMs = 0): boolean {
+  if (!options.shouldSkipFile?.(filePath, stat, dependencyMtimeMs)) return false;
+  options.onSkippedFile?.(filePath, stat);
+  return true;
 }
 
 export function parseJsonlText(content: string): unknown[] {
@@ -817,12 +826,17 @@ export function loadCodexSessions(codexDir = path.join(os.homedir(), ".codex"), 
   return [...loadCodexSessionsIterator(codexDir, sourceOverride)];
 }
 
-export function* loadCodexSessionsIterator(codexDir = path.join(os.homedir(), ".codex"), sourceOverride?: SessionSource): Generator<LoadedSession> {
+export function* loadCodexSessionsIterator(
+  codexDir = path.join(os.homedir(), ".codex"),
+  sourceOverride?: SessionSource,
+  options: SessionLoadOptions = {},
+): Generator<LoadedSession> {
   const sessionsDir = path.join(codexDir, "sessions");
   if (!fs.existsSync(sessionsDir)) return;
 
   const titleMap = new Map<string, { title: string; updatedAt: string }>();
   const indexPath = path.join(codexDir, "session_index.jsonl");
+  const indexStat = fs.existsSync(indexPath) ? safeStat(indexPath) : { mtimeMs: 0, size: 0 };
   if (fs.existsSync(indexPath)) {
     for (const row of readJsonl(indexPath) as Array<{ id?: string; thread_name?: string; updated_at?: string }>) {
       if (row.id && row.thread_name) titleMap.set(row.id, { title: row.thread_name, updatedAt: row.updated_at || "" });
@@ -830,6 +844,8 @@ export function* loadCodexSessionsIterator(codexDir = path.join(os.homedir(), ".
   }
 
   for (const filePath of walkJsonlFiles(sessionsDir)) {
+    const stat = safeStat(filePath);
+    if (shouldSkipFile(options, filePath, stat, indexStat.mtimeMs)) continue;
     const rows = readJsonl(filePath);
     const meta = rows.length > 0 ? parseCodexSessionMetaLine(rows[0] as CodexConversationLine) : null;
     if (!meta) continue;
@@ -838,6 +854,7 @@ export function* loadCodexSessionsIterator(codexDir = path.join(os.homedir(), ".
       title: indexedTitle?.title,
       updatedAt: indexedTitle?.updatedAt,
       sourceOverride,
+      stat,
     });
     if (loaded) yield loaded;
   }
@@ -889,18 +906,27 @@ export function loadClaudeCliSessions(claudeDir = path.join(os.homedir(), ".clau
   return [...loadClaudeCliSessionsIterator(claudeDir, source)];
 }
 
-export function* loadClaudeCliSessionsIterator(claudeDir = path.join(os.homedir(), ".claude"), source: SessionSource = "claude-cli"): Generator<LoadedSession> {
+export function* loadClaudeCliSessionsIterator(
+  claudeDir = path.join(os.homedir(), ".claude"),
+  source: SessionSource = "claude-cli",
+  options: SessionLoadOptions = {},
+): Generator<LoadedSession> {
   const sessionsDir = path.join(claudeDir, "sessions");
   const projectsDir = path.join(claudeDir, "projects");
   if (!fs.existsSync(projectsDir)) return;
 
   const index = new Map<string, ClaudeSessionIndexFile>();
+  const indexMtimeBySessionId = new Map<string, number>();
   if (fs.existsSync(sessionsDir)) {
     for (const file of fs.readdirSync(sessionsDir)) {
       if (!file.endsWith(".json")) continue;
       try {
-        const parsed = JSON.parse(fs.readFileSync(path.join(sessionsDir, file), "utf-8")) as ClaudeSessionIndexFile;
-        if (parsed.sessionId) index.set(parsed.sessionId, parsed);
+        const indexFilePath = path.join(sessionsDir, file);
+        const parsed = JSON.parse(fs.readFileSync(indexFilePath, "utf-8")) as ClaudeSessionIndexFile;
+        if (parsed.sessionId) {
+          index.set(parsed.sessionId, parsed);
+          indexMtimeBySessionId.set(parsed.sessionId, safeStat(indexFilePath).mtimeMs);
+        }
       } catch {
         // Ignore malformed index files.
       }
@@ -914,11 +940,14 @@ export function* loadClaudeCliSessionsIterator(claudeDir = path.join(os.homedir(
       if (!file.endsWith(".jsonl")) continue;
       const rawId = file.replace(/\.jsonl$/, "");
       const filePath = path.join(projectPath, file);
+      const stat = safeStat(filePath);
+      if (shouldSkipFile(options, filePath, stat, indexMtimeBySessionId.get(rawId) ?? 0)) continue;
       const loaded = loadClaudeCliSessionRows(filePath, readJsonl(filePath), {
         rawId,
         cwd: index.get(rawId)?.cwd,
         startedAt: index.get(rawId)?.startedAt,
         source,
+        stat,
       });
       if (loaded) yield loaded;
     }
@@ -935,6 +964,7 @@ export function loadClaudeAppSessions(
 export function* loadClaudeAppSessionsIterator(
   appSessionsDir = path.join(os.homedir(), "Library", "Application Support", "Claude", "claude-code-sessions"),
   claudeDir = path.join(os.homedir(), ".claude"),
+  options: SessionLoadOptions = {},
 ): Generator<LoadedSession> {
   if (!fs.existsSync(appSessionsDir)) return;
   const projectsDir = path.join(claudeDir, "projects");
@@ -953,6 +983,7 @@ export function* loadClaudeAppSessionsIterator(
   }
 
   for (const metaPath of metaFiles) {
+    const metaStat = safeStat(metaPath);
     let appMeta: ClaudeAppSessionFile;
     try {
       appMeta = JSON.parse(fs.readFileSync(metaPath, "utf-8")) as ClaudeAppSessionFile;
@@ -963,6 +994,8 @@ export function* loadClaudeAppSessionsIterator(
     const cwd = appMeta.cwd || appMeta.originCwd || "";
     const convoPath =
       rawId && cwd ? path.join(projectsDir, encodeClaudeProjectDir(cwd), `${rawId}.jsonl`) : metaPath;
+    const stat = safeStat(convoPath);
+    if (shouldSkipFile(options, convoPath, stat, metaStat.mtimeMs)) continue;
     const rows = fs.existsSync(convoPath) ? readJsonl(convoPath) : [];
     const messages = extractMessages(rows, "claude");
     const tokenEvents = extractClaudeTokenEvents(rows);
@@ -985,6 +1018,7 @@ export function* loadClaudeAppSessionsIterator(
         prNumber: appMeta.prNumber || null,
         gitBranch,
         tokenUsage,
+        stat,
       }),
       messages,
       tokenEvents,
@@ -997,7 +1031,7 @@ export function loadCodeBuddyCliSessions(codeBuddyDir = path.join(os.homedir(), 
   return [...loadCodeBuddyCliSessionsIterator(codeBuddyDir)];
 }
 
-export function loadCodeBuddyCliSessionFile(filePath: string): LoadedSession | null {
+export function loadCodeBuddyCliSessionFile(filePath: string, stat?: VirtualSessionFileStat): LoadedSession | null {
   const rows = readJsonl(filePath);
   if (rows.length === 0) return null;
 
@@ -1021,6 +1055,7 @@ export function loadCodeBuddyCliSessionFile(filePath: string): LoadedSession | n
       firstQuestion: cleanTitle(question),
       timestamp: meta.timestamp,
       tokenUsage,
+      stat,
     }),
     messages,
     tokenEvents,
@@ -1028,12 +1063,17 @@ export function loadCodeBuddyCliSessionFile(filePath: string): LoadedSession | n
   };
 }
 
-export function* loadCodeBuddyCliSessionsIterator(codeBuddyDir = path.join(os.homedir(), CODEBUDDY_DIR)): Generator<LoadedSession> {
+export function* loadCodeBuddyCliSessionsIterator(
+  codeBuddyDir = path.join(os.homedir(), CODEBUDDY_DIR),
+  options: SessionLoadOptions = {},
+): Generator<LoadedSession> {
   const projectsDir = path.join(codeBuddyDir, "projects");
   if (!fs.existsSync(projectsDir)) return;
 
   for (const filePath of walkJsonlFiles(projectsDir)) {
-    const loaded = loadCodeBuddyCliSessionFile(filePath);
+    const stat = safeStat(filePath);
+    if (shouldSkipFile(options, filePath, stat)) continue;
+    const loaded = loadCodeBuddyCliSessionFile(filePath, stat);
     if (loaded) yield loaded;
   }
 }
@@ -1149,7 +1189,7 @@ function traceEventsFromRows(rows: unknown[], format: SessionFormat): SessionTra
   return dedupeTraceEvents(events);
 }
 
-function loadOpenClawSessionFile(filePath: string): LoadedSession | null {
+function loadOpenClawSessionFile(filePath: string, stat = safeStat(filePath)): LoadedSession | null {
   const rows = readJsonl(filePath);
   if (rows.length === 0) return null;
 
@@ -1160,7 +1200,6 @@ function loadOpenClawSessionFile(filePath: string): LoadedSession | null {
   const messages = sourceMessages(rows, "openclaw");
   const traceEvents = traceEventsFromRows(rows, "openclaw");
   const question = firstQuestion(messages);
-  const stat = safeStat(filePath);
 
   return {
     session: createIndexedSession({
@@ -1183,13 +1222,18 @@ export function loadOpenClawSessions(openClawDir = path.join(os.homedir(), ".ope
   return [...loadOpenClawSessionsIterator(openClawDir)];
 }
 
-export function* loadOpenClawSessionsIterator(openClawDir = path.join(os.homedir(), ".openclaw")): Generator<LoadedSession> {
+export function* loadOpenClawSessionsIterator(
+  openClawDir = path.join(os.homedir(), ".openclaw"),
+  options: SessionLoadOptions = {},
+): Generator<LoadedSession> {
   const agentsDir = path.join(openClawDir, "agents");
   if (!fs.existsSync(agentsDir)) return;
   for (const filePath of walkJsonlFiles(agentsDir)) {
     if (filePath.endsWith(".trajectory.jsonl")) continue;
     if (!filePath.includes(`${path.sep}sessions${path.sep}`)) continue;
-    const loaded = loadOpenClawSessionFile(filePath);
+    const stat = safeStat(filePath);
+    if (shouldSkipFile(options, filePath, stat)) continue;
+    const loaded = loadOpenClawSessionFile(filePath, stat);
     if (loaded) yield loaded;
   }
 }
@@ -1209,7 +1253,7 @@ function traeAssistantSummary(row: Record<string, unknown>): string {
   return joinNonEmpty(parts);
 }
 
-function loadTraeMemoryFile(filePath: string, traeDir: string): LoadedSession | null {
+function loadTraeMemoryFile(filePath: string, traeDir: string, stat = safeStat(filePath)): LoadedSession | null {
   const rows = readJsonl(filePath).filter(isRecord);
   if (rows.length === 0) return null;
   const rawId = path.basename(filePath, ".jsonl");
@@ -1225,7 +1269,6 @@ function loadTraeMemoryFile(filePath: string, traeDir: string): LoadedSession | 
     if (assistant) messages.push(messageFromParts("assistant", assistant, ts, messages.length));
   }
   const question = firstQuestion(messages);
-  const stat = safeStat(filePath);
   return {
     session: createIndexedSession({
       keyPrefix: "trae",
@@ -1246,12 +1289,14 @@ export function loadTraeSessions(traeDir = path.join(os.homedir(), ".trae-cn")):
   return [...loadTraeSessionsIterator(traeDir)];
 }
 
-export function* loadTraeSessionsIterator(traeDir = path.join(os.homedir(), ".trae-cn")): Generator<LoadedSession> {
+export function* loadTraeSessionsIterator(traeDir = path.join(os.homedir(), ".trae-cn"), options: SessionLoadOptions = {}): Generator<LoadedSession> {
   const memoryDir = path.join(traeDir, "memory", "projects");
   if (!fs.existsSync(memoryDir)) return;
   for (const filePath of walkJsonlFiles(memoryDir)) {
     if (!path.basename(filePath).startsWith("session_memory_")) continue;
-    const loaded = loadTraeMemoryFile(filePath, traeDir);
+    const stat = safeStat(filePath);
+    if (shouldSkipFile(options, filePath, stat)) continue;
+    const loaded = loadTraeMemoryFile(filePath, traeDir, stat);
     if (loaded) yield loaded;
   }
 }
@@ -1453,14 +1498,13 @@ function loadOpenCodeSessionRow(db: import("node:sqlite").DatabaseSync, dbPath: 
   };
 }
 
-function loadCursorTranscriptFile(filePath: string): LoadedSession | null {
+function loadCursorTranscriptFile(filePath: string, stat = safeStat(filePath)): LoadedSession | null {
   const rows = readJsonl(filePath);
   if (rows.length === 0) return null;
   const rawId = path.basename(filePath, ".jsonl");
   const messages = sourceMessages(rows, "cursor");
   const traceEvents = traceEventsFromRows(rows, "cursor");
   const question = firstQuestion(messages);
-  const stat = safeStat(filePath);
   const projectPath =
     rows.map((row) => (isRecord(row) ? firstStringField(row, ["cwd", "projectPath", "project_path", "workspacePath", "workspace_path"]) : "")).find(Boolean) ||
     "";
@@ -1486,12 +1530,14 @@ export function loadCursorAgentSessions(cursorDir = path.join(os.homedir(), ".cu
   return [...loadCursorAgentSessionsIterator(cursorDir)];
 }
 
-export function* loadCursorAgentSessionsIterator(cursorDir = path.join(os.homedir(), ".cursor")): Generator<LoadedSession> {
+export function* loadCursorAgentSessionsIterator(cursorDir = path.join(os.homedir(), ".cursor"), options: SessionLoadOptions = {}): Generator<LoadedSession> {
   const projectsDir = path.join(cursorDir, "projects");
   if (!fs.existsSync(projectsDir)) return;
   for (const filePath of walkJsonlFiles(projectsDir)) {
     if (!filePath.includes(`${path.sep}agent-transcripts${path.sep}`)) continue;
-    const loaded = loadCursorTranscriptFile(filePath);
+    const stat = safeStat(filePath);
+    if (shouldSkipFile(options, filePath, stat)) continue;
+    const loaded = loadCursorTranscriptFile(filePath, stat);
     if (loaded) yield loaded;
   }
 }
@@ -1501,18 +1547,23 @@ export function loadDefaultSessions(options: SessionLoadOptions = {}): LoadedSes
 }
 
 export function* loadDefaultSessionsIterator(options: SessionLoadOptions = {}): Generator<LoadedSession> {
-  yield* loadClaudeCliSessionsIterator();
-  yield* loadClaudeAppSessionsIterator();
-  yield* loadCodexSessionsIterator();
+  const homeDir = options.homeDir ?? os.homedir();
+  yield* loadClaudeCliSessionsIterator(path.join(homeDir, ".claude"), "claude-cli", options);
+  yield* loadClaudeAppSessionsIterator(
+    path.join(homeDir, "Library", "Application Support", "Claude", "claude-code-sessions"),
+    path.join(homeDir, ".claude"),
+    options,
+  );
+  yield* loadCodexSessionsIterator(path.join(homeDir, ".codex"), undefined, options);
   if (options.includeOpenClaw) {
-    yield* loadOpenClawSessionsIterator();
-    yield* loadOpenClawSessionsIterator(path.join(os.homedir(), ".clawdbot"));
+    yield* loadOpenClawSessionsIterator(path.join(homeDir, ".openclaw"), options);
+    yield* loadOpenClawSessionsIterator(path.join(homeDir, ".clawdbot"), options);
   }
   if (options.includeHermes) yield* loadHermesSessions();
   if (options.includeOpenCode) yield* loadOpenCodeSessions();
-  if (options.includeCursorAgent) yield* loadCursorAgentSessionsIterator();
-  if (options.includeTrae) yield* loadTraeSessionsIterator();
-  if (options.includeClaudeInternal) yield* loadClaudeCliSessionsIterator(path.join(os.homedir(), CLAUDE_INTERNAL_DIR), "claude-internal");
-  if (options.includeCodexInternal) yield* loadCodexSessionsIterator(path.join(os.homedir(), CODEX_INTERNAL_DIR), "codex-internal");
-  if (options.includeCodeBuddyCli) yield* loadCodeBuddyCliSessionsIterator(path.join(os.homedir(), CODEBUDDY_DIR));
+  if (options.includeCursorAgent) yield* loadCursorAgentSessionsIterator(path.join(homeDir, ".cursor"), options);
+  if (options.includeTrae) yield* loadTraeSessionsIterator(path.join(homeDir, ".trae-cn"), options);
+  if (options.includeClaudeInternal) yield* loadClaudeCliSessionsIterator(path.join(homeDir, CLAUDE_INTERNAL_DIR), "claude-internal", options);
+  if (options.includeCodexInternal) yield* loadCodexSessionsIterator(path.join(homeDir, CODEX_INTERNAL_DIR), "codex-internal", options);
+  if (options.includeCodeBuddyCli) yield* loadCodeBuddyCliSessionsIterator(path.join(homeDir, CODEBUDDY_DIR), options);
 }

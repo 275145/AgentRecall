@@ -202,7 +202,7 @@ app.setAppUserModelId("dev.zszz3.agent-session-search");
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let store: SessionStore;
-let indexStatus: IndexStatus = { running: false, indexed: 0, total: 0, lastIndexedAt: null, error: null };
+let indexStatus: IndexStatus = { running: false, indexed: 0, skipped: 0, total: 0, lastIndexedAt: null, error: null };
 let activeIndexRun: Promise<IndexStatus> | null = null;
 let autoIndexTimer: ReturnType<typeof setInterval> | null = null;
 let initialSkillUsageTimer: ReturnType<typeof setTimeout> | null = null;
@@ -792,6 +792,7 @@ async function runIndexSync(): Promise<IndexStatus> {
       indexStatus = {
         running: false,
         indexed: 0,
+        skipped: 0,
         total: 0,
         lastIndexedAt: indexStatus.lastIndexedAt,
         error: String(error),
