@@ -58,6 +58,18 @@ describe("stylesheet theme contract", () => {
     expect(sshBody).toMatch(/overflow-y:\s*auto/);
   });
 
+  it("keeps Supabase skill sync inputs from overlapping their labels", () => {
+    const syncField = stylesheet.match(/\.skills-sync-field\s*\{[^}]*\}/)?.[0] ?? "";
+    const syncInput = stylesheet.match(/\.skills-sync-field\s+input\s*\{[^}]*\}/)?.[0] ?? "";
+    const narrowSyncField = stylesheet.match(/@media \(max-width:\s*640px\)\s*\{[\s\S]*?\.skills-sync-field\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(syncField).toMatch(/display:\s*grid/);
+    expect(syncField).toMatch(/grid-template-columns:\s*minmax\(160px,\s*220px\)\s+minmax\(0,\s*1fr\)/);
+    expect(syncInput).toMatch(/width:\s*100%/);
+    expect(syncInput).toMatch(/min-width:\s*0/);
+    expect(narrowSyncField).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+  });
+
   it("clamps the detail title so long remote prompts cannot push conversation out of view", () => {
     const detailTitle = stylesheet.match(/\.detail-header h2\s*\{[^}]*\}/)?.[0] ?? "";
 

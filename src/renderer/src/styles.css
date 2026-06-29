@@ -3013,6 +3013,17 @@ select:focus-visible {
   cursor: pointer;
 }
 
+.skills-sync-field {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);
+  align-items: center;
+}
+
+.skills-sync-field input {
+  width: 100%;
+  min-width: 0;
+}
+
 /* A single card that stacks a toggle row with a dependent sub-row (e.g. its threshold). */
 .settings-field.settings-stack {
   flex-direction: column;
@@ -3632,6 +3643,11 @@ select:focus-visible {
 }
 
 @media (max-width: 640px) {
+  .skills-sync-field {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
   .api-settings-form .settings-field {
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;

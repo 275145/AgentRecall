@@ -2962,7 +2962,7 @@ function SettingsDialog({
                     onChange={(event) => onSettingsChange({ skillSyncEnabled: event.currentTarget.checked })}
                   />
                 </label>
-                <label className="settings-field">
+                <label className="settings-field skills-sync-field">
                   <div className="settings-field-text">
                     <span className="settings-field-title">Supabase URL</span>
                     <span className="settings-field-sub">https://your-project.supabase.co</span>
@@ -2975,7 +2975,7 @@ function SettingsDialog({
                     onChange={(event) => onSettingsChange({ skillSyncSupabaseUrl: event.currentTarget.value })}
                   />
                 </label>
-                <label className="settings-field">
+                <label className="settings-field skills-sync-field">
                   <div className="settings-field-text">
                     <span className="settings-field-title">anon key</span>
                     <span className="settings-field-sub">{l("Stored locally and used only for the skills sync table.", "保存在本地，仅用于 Skills 同步表。")}</span>
