@@ -2696,7 +2696,7 @@ function SettingsDialog({
                 <label className="settings-field settings-toggle">
                   <div className="settings-field-text">
                     <span className="settings-field-title">Include ~/.tclaude</span>
-                    <span className="settings-field-sub">{l("Indexes tclaude CLI sessions (Claude Code fork).", "索引 tclaude CLI 会话（Claude Code 分支）。")}</span>
+                    <span className="settings-field-sub">{l("Indexes TClaude CLI sessions (Claude Code fork).", "索引 TClaude CLI 会话（Claude Code 分支）。")}</span>
                   </div>
                   <input
                     type="checkbox"
@@ -2709,7 +2709,7 @@ function SettingsDialog({
                 <label className="settings-field settings-toggle">
                   <div className="settings-field-text">
                     <span className="settings-field-title">Include ~/.tcodex</span>
-                    <span className="settings-field-sub">{l("Indexes tcodex CLI sessions (Codex fork).", "索引 tcodex CLI 会话（Codex 分支）。")}</span>
+                    <span className="settings-field-sub">{l("Indexes TCodex CLI sessions (Codex fork).", "索引 TCodex CLI 会话（Codex 分支）。")}</span>
                   </div>
                   <input
                     type="checkbox"

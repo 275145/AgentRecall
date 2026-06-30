@@ -938,8 +938,8 @@ const LIVE_NOTIFY_INTERVAL_MS = 10_000;
 const LIVE_FAMILY_LABEL: Record<TrackedLiveSession["family"], string> = {
   claude: "Claude Code",
   codex: "Codex",
-  tclaude: "tclaude",
-  tcodex: "tcodex",
+  tclaude: "TClaude",
+  tcodex: "TCodex",
   codebuddy: "CodeBuddy",
   trae: "Trae",
 };

@@ -165,8 +165,8 @@ function sourceDisplayName(source: SessionSource): string {
   if (source === "openclaw") return "OpenClaw";
   if (source === "hermes") return "Hermes";
   if (source === "trae") return "Trae";
-  if (source === "tclaude-cli") return "tclaude";
-  if (source === "tcodex-cli") return "tcodex";
+  if (source === "tclaude-cli") return "TClaude";
+  if (source === "tcodex-cli") return "TCodex";
   if (source === "codebuddy-cli") return "CodeBuddy";
   if (source.startsWith("claude")) return "Claude";
   return "Codex";
