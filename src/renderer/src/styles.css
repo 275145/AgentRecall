@@ -4245,6 +4245,7 @@ body.overlay-open .sidebar {
   font-family: inherit;
   padding: 6px 0;
   max-height: 140px;
+  overflow-y: hidden;
 }
 
 .ai-assistant-input textarea::placeholder {

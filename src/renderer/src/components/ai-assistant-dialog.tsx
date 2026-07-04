@@ -61,6 +61,8 @@ export function AiAssistantDialog({
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setPending(false);
+      // Return focus to the input so the user can immediately send the next message.
+      textareaRef.current?.focus();
     }
   };
 
