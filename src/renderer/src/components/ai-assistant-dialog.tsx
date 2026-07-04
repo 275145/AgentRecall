@@ -33,11 +33,14 @@ export function AiAssistantDialog({
   const [queue, setQueue] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const lastUserMessageRef = useRef<HTMLDivElement>(null);
 
+  // Keep the newest user question pinned to the top of the viewport (rather than
+  // scrolling to the bottom), so the user reads from their question down through
+  // the matched sessions and reply.
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    lastUserMessageRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
   }, [messages, queue, pending]);
 
   // Auto-grow the textarea so the send button stays bottom-aligned with it.
@@ -94,6 +97,9 @@ export function AiAssistantDialog({
     }
   };
 
+  // The newest user turn — its DOM node is what we pin to the top of the viewport.
+  const lastUserMessageIndex = messages.map((m) => m.role).lastIndexOf("user");
+
   return (
     <div className="dialog-backdrop" onMouseDown={onClose}>
       <section className="command-dialog ai-assistant-dialog" onMouseDown={(event) => event.stopPropagation()}>
@@ -107,7 +113,7 @@ export function AiAssistantDialog({
           </button>
         </div>
 
-        <div className="ai-assistant-messages" ref={scrollRef}>
+        <div className="ai-assistant-messages">
           {messages.length === 0 ? (
             <div className="ai-assistant-empty">
               <Sparkles size={22} />
@@ -119,7 +125,11 @@ export function AiAssistantDialog({
           ) : null}
 
           {messages.map((message, index) => (
-            <div key={index} className={`ai-message ai-message-${message.role}`}>
+            <div
+              key={index}
+              ref={index === lastUserMessageIndex ? lastUserMessageRef : undefined}
+              className={`ai-message ai-message-${message.role}`}
+            >
               {/* Surface the matched sessions above the reply — the top card is
                   the closest match, so it sits right under the user's question. */}
               {message.sessions && message.sessions.length > 0 ? (
