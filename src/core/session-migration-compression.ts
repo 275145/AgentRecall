@@ -514,6 +514,7 @@ async function mapWithConcurrency<T, R>(
 export function createMigrationCompressor(
   endpoint: SummaryEndpoint,
   chat: ChatCompletionFn = requestSummaryCompletion,
+  concurrency: number = COMPRESSION_CONCURRENCY,
 ): MigrationCompressFn {
   return async (session, onProgress) => {
     const chunks = transcriptChunks(session);
@@ -531,7 +532,7 @@ export function createMigrationCompressor(
     let completed = 0;
     const chunkSummaries = await mapWithConcurrency(
       chunks,
-      COMPRESSION_CONCURRENCY,
+      concurrency,
       async (chunk, index) => {
         const summary = await chat(
           endpoint,

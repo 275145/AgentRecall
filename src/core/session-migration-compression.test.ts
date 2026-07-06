@@ -589,6 +589,35 @@ describe("migration handoff provider request", () => {
     // ...but never exceeded the configured bound.
     expect(maxInFlight).toBeLessThanOrEqual(COMPRESSION_CONCURRENCY);
   });
+
+  it("respects a custom concurrency bound", async () => {
+    const endpoint = {
+      baseUrl: "https://provider.example/v1",
+      model: "model",
+      apiKey: "secret",
+      apiFormat: "openai_chat" as const,
+    };
+    const session = portable(
+      Array.from({ length: 80 }, (_, index) =>
+        message(`chunk-${index}-${"x".repeat(5_000)}`, index),
+      ),
+    );
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const chat = vi.fn(async (_endpoint, messages) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      if (messages[0].content.includes("分片摘要")) return "分片摘要内容";
+      return VALID_HANDOFF;
+    });
+
+    await createMigrationCompressor(endpoint, chat, 2)(session);
+
+    expect(maxInFlight).toBeGreaterThan(1);
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+  });
 });
 
 describe("migrationCompressionPercent", () => {
