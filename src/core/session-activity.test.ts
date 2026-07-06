@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { detectLiveSessionsFromProcessLines, loadLiveSessionSnapshot } from "./session-activity";
+import { createCachedLiveSessionSnapshotLoader, detectLiveSessionsFromProcessLines, loadLiveSessionSnapshot } from "./session-activity";
 
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: new (path: string) => import("node:sqlite").DatabaseSync };
@@ -240,5 +240,45 @@ describe("live session detection", () => {
     expect(snapshot).toMatchObject({ sessions: [] });
     expect(snapshot.error).toBeUndefined();
     expect(lsofCalls).toBe(0);
+  });
+
+  it("reuses concurrent live session snapshot loads for the same options", async () => {
+    let calls = 0;
+    let resolveLoad: (value: Awaited<ReturnType<typeof loadLiveSessionSnapshot>>) => void = () => {
+      throw new Error("resolveLoad was not initialized.");
+    };
+    const pending = new Promise<Awaited<ReturnType<typeof loadLiveSessionSnapshot>>>((resolve) => {
+      resolveLoad = resolve;
+    });
+    const load = async () => {
+      calls += 1;
+      return pending;
+    };
+    const cached = createCachedLiveSessionSnapshotLoader({ load, ttlMs: 5000, nowMs: () => 1000 });
+
+    const first = cached({ includeTrae: false });
+    const second = cached({ includeTrae: false });
+    resolveLoad({ generatedAt: "2026-07-06T00:00:00.000Z", sessions: [] });
+
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    expect(calls).toBe(1);
+  });
+
+  it("serves cached live session snapshots within the ttl and refreshes after expiry", async () => {
+    let calls = 0;
+    let now = 1000;
+    const load = async () => {
+      calls += 1;
+      return { generatedAt: `snapshot-${calls}`, sessions: [] };
+    };
+    const cached = createCachedLiveSessionSnapshotLoader({ load, ttlMs: 5000, nowMs: () => now });
+
+    await expect(cached({ includeTrae: false })).resolves.toMatchObject({ generatedAt: "snapshot-1" });
+    await expect(cached({ includeTrae: false })).resolves.toMatchObject({ generatedAt: "snapshot-1" });
+    expect(calls).toBe(1);
+
+    now += 5001;
+    await expect(cached({ includeTrae: false })).resolves.toMatchObject({ generatedAt: "snapshot-2" });
+    expect(calls).toBe(2);
   });
 });

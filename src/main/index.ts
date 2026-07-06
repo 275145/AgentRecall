@@ -49,7 +49,7 @@ import {
 } from "../core/platform";
 import { loadUsageQuotaSnapshot } from "../core/quota";
 import { focusLiveSessionTerminal } from "../core/session-focus";
-import { loadLiveSessionSnapshot } from "../core/session-activity";
+import { createCachedLiveSessionSnapshotLoader } from "../core/session-activity";
 import { type TrackedLiveSession, updateLiveTracker } from "../core/live-transitions";
 import { resolveSummaryEndpoint, summarizeSession, type SummaryEndpoint } from "../core/session-summarizer";
 import {
@@ -112,6 +112,7 @@ import {
   AUTO_SKILL_USAGE_REFRESH_INTERVAL_MS,
   INITIAL_INDEX_DELAY_MS,
   INITIAL_SKILL_USAGE_REFRESH_DELAY_MS,
+  LIVE_SESSION_REFRESH_INTERVAL_MS,
 } from "../core/refresh-policy";
 import { globalShortcutLabel, normalizeGlobalShortcut } from "../core/shortcuts";
 import type { AppSettings, AppSettingsUpdate } from "../core/platform";
@@ -1060,7 +1061,8 @@ async function runIndexSync(): Promise<IndexStatus> {
   return activeIndexRun;
 }
 
-const LIVE_NOTIFY_INTERVAL_MS = 10_000;
+const LIVE_NOTIFY_INTERVAL_MS = LIVE_SESSION_REFRESH_INTERVAL_MS;
+const loadCachedLiveSessionSnapshot = createCachedLiveSessionSnapshotLoader();
 
 const LIVE_FAMILY_LABEL: Record<TrackedLiveSession["family"], string> = {
   claude: "Claude Code",
@@ -1081,7 +1083,7 @@ async function pollLiveSessionsForNotifications(): Promise<void> {
 
   let sessions;
   try {
-    const snapshot = await loadLiveSessionSnapshot({ includeTrae: settings.includeTrae });
+    const snapshot = await loadCachedLiveSessionSnapshot({ includeTrae: settings.includeTrae });
     if (snapshot.error) return;
     sessions = snapshot.sessions;
   } catch {
@@ -1342,7 +1344,7 @@ function registerIpc(): void {
     await ensureRemoteSessionDetailsLoaded(sessionKey);
     return store.getTraceEvents(sessionKey, options);
   });
-  ipcMain.handle("sessions:live", () => loadLiveSessionSnapshot({ includeTrae: getSettings().includeTrae }));
+  ipcMain.handle("sessions:live", () => loadCachedLiveSessionSnapshot({ includeTrae: getSettings().includeTrae }));
   ipcMain.handle("session:summarize", async (_event, sessionKey: string) => {
     await ensureRemoteSessionDetailsLoaded(sessionKey);
     const endpoint = await resolveSummaryEndpointFromSettings();
@@ -1616,7 +1618,7 @@ function registerIpc(): void {
       store.markResumed(sessionKey);
       return { route: "resume" as const };
     }
-    const snapshot = await loadLiveSessionSnapshot({ includeTrae: getSettings().includeTrae });
+    const snapshot = await loadCachedLiveSessionSnapshot({ includeTrae: getSettings().includeTrae });
     const route = snapshot.error ? { route: "resume" as const } : routeResumeSession(session, snapshot.sessions);
     if (route.route === "focus") {
       await focusLiveSessionTerminal(route.pid);

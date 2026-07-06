@@ -44,7 +44,7 @@ import {
 import type { ApiConfig, ClaudeApiConfig } from "../../core/api-config";
 import type { IndexStatus } from "../../core/indexer";
 import { formatRelativeTime } from "../../core/format-session";
-import { QUOTA_REFRESH_INTERVAL_MS } from "../../core/refresh-policy";
+import { LIVE_SESSION_REFRESH_INTERVAL_MS, QUOTA_REFRESH_INTERVAL_MS } from "../../core/refresh-policy";
 import type { AppSettings, AppSettingsUpdate } from "../../core/platform";
 import type { RemoteHealthReport } from "../../core/remote-health";
 import type { RemoteSessionDetailSnapshot } from "../../core/remote-session-sync";
@@ -767,7 +767,7 @@ export function App(): ReactElement {
 
   useEffect(() => {
     void refreshLiveSessions();
-    const timer = window.setInterval(() => void refreshLiveSessions(), 10_000);
+    const timer = window.setInterval(() => void refreshLiveSessions(), LIVE_SESSION_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [refreshLiveSessions]);
 

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { AUTO_INDEX_REFRESH_INTERVAL_MS, AUTO_SKILL_USAGE_REFRESH_INTERVAL_MS, INITIAL_INDEX_DELAY_MS, QUOTA_REFRESH_INTERVAL_MS } from "./refresh-policy";
+import {
+  AUTO_INDEX_REFRESH_INTERVAL_MS,
+  AUTO_SKILL_USAGE_REFRESH_INTERVAL_MS,
+  INITIAL_INDEX_DELAY_MS,
+  LIVE_SESSION_REFRESH_INTERVAL_MS,
+  LIVE_SESSION_SNAPSHOT_CACHE_TTL_MS,
+  QUOTA_REFRESH_INTERVAL_MS,
+} from "./refresh-policy";
 
 describe("refresh policy", () => {
   it("keeps automatic indexing infrequent while still indexing shortly after startup", () => {
@@ -15,5 +22,11 @@ describe("refresh policy", () => {
   it("refreshes skill usage automatically without matching the high-frequency quota poll", () => {
     expect(AUTO_SKILL_USAGE_REFRESH_INTERVAL_MS).toBe(10 * 60 * 1000);
     expect(AUTO_SKILL_USAGE_REFRESH_INTERVAL_MS).toBeGreaterThan(QUOTA_REFRESH_INTERVAL_MS);
+  });
+
+  it("keeps live session detection responsive without polling expensive process scans too often", () => {
+    expect(LIVE_SESSION_REFRESH_INTERVAL_MS).toBe(30 * 1000);
+    expect(LIVE_SESSION_SNAPSHOT_CACHE_TTL_MS).toBe(5 * 1000);
+    expect(LIVE_SESSION_SNAPSHOT_CACHE_TTL_MS).toBeLessThan(LIVE_SESSION_REFRESH_INTERVAL_MS);
   });
 });

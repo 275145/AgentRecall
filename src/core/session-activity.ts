@@ -3,12 +3,14 @@ import { createRequire } from "node:module";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { LIVE_SESSION_SNAPSHOT_CACHE_TTL_MS } from "./refresh-policy";
 import type { LiveSession, LiveSessionFamily, LiveSessionSnapshot } from "./types";
 
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as { DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => import("node:sqlite").DatabaseSync };
 
 type ProcessListRunner = (command: string, args: string[]) => Promise<string>;
+type LiveSessionSnapshotLoader = (options?: LoadLiveSessionOptions) => Promise<LiveSessionSnapshot>;
 
 interface ProcessEntry {
   pid: number;
@@ -21,6 +23,33 @@ export interface LoadLiveSessionOptions {
   now?: Date;
   includeTrae?: boolean;
   homeDir?: string;
+}
+
+export interface CachedLiveSessionSnapshotLoaderOptions {
+  ttlMs?: number;
+  nowMs?: () => number;
+  load?: LiveSessionSnapshotLoader;
+}
+
+export function createCachedLiveSessionSnapshotLoader({
+  ttlMs = LIVE_SESSION_SNAPSHOT_CACHE_TTL_MS,
+  nowMs = Date.now,
+  load = loadLiveSessionSnapshot,
+}: CachedLiveSessionSnapshotLoaderOptions = {}): LiveSessionSnapshotLoader {
+  const cache = new Map<string, { expiresAt: number; promise: Promise<LiveSessionSnapshot> }>();
+  return (options: LoadLiveSessionOptions = {}) => {
+    const key = liveSessionSnapshotCacheKey(options);
+    const now = nowMs();
+    const cached = cache.get(key);
+    if (cached && cached.expiresAt > now) return cached.promise;
+
+    const promise = load(options);
+    cache.set(key, { expiresAt: now + ttlMs, promise });
+    void promise.catch(() => {
+      if (cache.get(key)?.promise === promise) cache.delete(key);
+    });
+    return promise;
+  };
 }
 
 export function detectLiveSessionsFromProcessLines(
@@ -51,6 +80,14 @@ export function detectLiveSessionsFromProcessLines(
   }
 
   return sessions;
+}
+
+function liveSessionSnapshotCacheKey(options: LoadLiveSessionOptions): string {
+  return JSON.stringify({
+    platform: options.platform ?? process.platform,
+    includeTrae: options.includeTrae !== false,
+    homeDir: options.homeDir ?? "",
+  });
 }
 
 export async function loadLiveSessionSnapshot(options: LoadLiveSessionOptions = {}): Promise<LiveSessionSnapshot> {
