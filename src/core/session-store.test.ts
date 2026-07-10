@@ -64,6 +64,35 @@ const traceEvents: SessionTraceEvent[] = [
 ];
 
 describe("SessionStore", () => {
+  it("returns structured message hits and metadata-only match reasons", () => {
+    const store = createInMemoryStore();
+    store.upsertIndexedSession(
+      sampleSession({ sessionKey: "codex:conversation", rawId: "conversation", originalTitle: "Auth work", firstQuestion: "Auth work" }),
+      [
+        { role: "user", content: "Investigate login behavior", timestamp: "2026-06-01T10:00:00Z", index: 0 },
+        { role: "assistant", content: "The token expired yesterday", timestamp: "2026-06-01T10:01:00Z", index: 1 },
+        { role: "user", content: "Login should recover after expired credentials", timestamp: "2026-06-01T10:02:00Z", index: 2 },
+      ],
+    );
+    store.upsertIndexedSession(
+      sampleSession({ sessionKey: "codex:title", rawId: "title", originalTitle: "login expired metadata", firstQuestion: "other" }),
+      [{ role: "user", content: "unrelated conversation", timestamp: "2026-06-01T10:00:00Z", index: 0 }],
+    );
+
+    const results = store.searchSessions({ query: "login AND expired" });
+    const conversation = results.find((result) => result.sessionKey === "codex:conversation");
+    const title = results.find((result) => result.sessionKey === "codex:title");
+
+    expect(conversation).toMatchObject({ messageMatchCount: 3, metadataMatch: null });
+    expect(conversation?.matchHits).toEqual([
+      expect.objectContaining({ messageIndex: 0, role: "user", matchedTerms: ["login"] }),
+      expect.objectContaining({ messageIndex: 1, role: "assistant", matchedTerms: ["expired"] }),
+    ]);
+    expect(title).toMatchObject({ messageMatchCount: 0, matchHits: [], metadataMatch: "title" });
+    expect(store.searchSessions({ query: "" })[0]).toMatchObject({ messageMatchCount: 0, matchHits: [], metadataMatch: null });
+    store.close();
+  });
+
   it("treats standalone explicit AND as the existing implicit AND operator", () => {
     const store = createInMemoryStore();
     const cases = [
