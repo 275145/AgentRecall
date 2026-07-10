@@ -374,6 +374,12 @@ describe("migrateSession", () => {
       "Remote session migration is not supported yet.",
     ],
     [
+      "imported local session",
+      session("claude-cli", { environmentKind: "local", environmentId: "imported-local" }),
+      "codex",
+      "Remote session migration is not supported yet.",
+    ],
+    [
       "empty project path",
       session("claude-cli", { projectPath: "   " }),
       "codex",

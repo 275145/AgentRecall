@@ -663,6 +663,53 @@ export function getMigrationResumeProcessSpec(
   };
 }
 
+export function getSafeMigrationResumeCommand(
+  target: MigrationTarget,
+  sessionId: string,
+  projectPath: string,
+  settings: AppSettings = defaultSettings,
+  options: { homeDir?: string; platform?: NodeJS.Platform } = {},
+): string {
+  const platform = options.platform ?? process.platform;
+  const command = migrationBinary(target, settings);
+  const args = migrationResumeArgs(target, sessionId);
+  const codexHome = target === "codex-internal"
+    ? migrationCodexHome(options.homeDir ?? homedir(), platform)
+    : null;
+
+  if (platform !== "win32") {
+    const invocation = [safePosixMigrationToken(command), ...args.map(safePosixMigrationToken)].join(" ");
+    const scoped = codexHome ? `CODEX_HOME=${safePosixMigrationToken(codexHome)} ${invocation}` : invocation;
+    return projectPath ? `cd ${safePosixMigrationToken(projectPath)} && ${scoped}` : scoped;
+  }
+
+  if (settings.defaultTerminal === "PowerShell") {
+    const invocation = `& ${[command, ...args].map(safePowerShellMigrationToken).join(" ")}`;
+    const located = projectPath ? `Set-Location -LiteralPath ${safePowerShellMigrationToken(projectPath)}; ${invocation}` : invocation;
+    if (!codexHome) return located;
+    return `$__assHadCodexHome = Test-Path Env:CODEX_HOME; $__assCodexHome = $env:CODEX_HOME; try { $env:CODEX_HOME = ${safePowerShellMigrationToken(codexHome)}; ${located} } finally { if ($__assHadCodexHome) { $env:CODEX_HOME = $__assCodexHome } else { Remove-Item Env:CODEX_HOME -ErrorAction SilentlyContinue } }`;
+  }
+
+  const invocation = [command, ...args].map(safeCmdMigrationToken).join(" ");
+  const located = projectPath ? `cd /d ${safeCmdMigrationToken(projectPath)} && ${invocation}` : invocation;
+  return codexHome
+    ? `setlocal & set "CODEX_HOME=${codexHome.replace(/[%!"]/g, (value) => value === "%" ? "%%" : value === "!" ? "^!" : '""')}" & ${located} & endlocal`
+    : located;
+}
+
+function safePosixMigrationToken(value: string): string {
+  return /^[A-Za-z0-9_\-./]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function safePowerShellMigrationToken(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function safeCmdMigrationToken(value: string): string {
+  if (/^[A-Za-z0-9_\-./:\\]+$/.test(value)) return value;
+  return `"${value.replace(/%/g, "%%").replace(/!/g, "^!").replace(/"/g, '""')}"`;
+}
+
 // Ghostty has no `--initial-command` option, so the previous flag was silently
 // ignored and the window opened without resuming. The documented way to run a
 // command is the special `-e <command>` argument; run it through the user's

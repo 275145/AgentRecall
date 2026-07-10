@@ -1,6 +1,7 @@
 import type { MigrationCompressionListener, PreparedMigrationSession } from "./session-migration-compression";
 import { BASE_MIGRATION_TARGETS, isMigrationTarget } from "./migration-targets";
 import type { WrittenMigratedSession } from "./session-migration-writers";
+import { isLocalSessionEnvironment } from "./session-environment";
 import type {
   MigrationAgent,
   MigrationCompressionEvent,
@@ -96,7 +97,7 @@ export function portableSessionFrom(
   if (!sourceAgent) {
     throw new Error(`Session source ${session.source} cannot be migrated.`);
   }
-  if (session.environmentKind !== "local" || session.environmentId !== "local") {
+  if (!isLocalSessionEnvironment(session)) {
     throw new Error("Remote session migration is not supported yet.");
   }
   if (!session.projectPath.trim()) {
@@ -262,7 +263,7 @@ async function validateMigrationRequest(
   if (!sourceAgent) {
     throw new Error(`Session source ${source.source} cannot be migrated.`);
   }
-  if (source.environmentKind !== "local" || source.environmentId !== "local") {
+  if (!isLocalSessionEnvironment(source)) {
     throw new Error("Remote session migration is not supported yet.");
   }
   if (!isMigrationTarget(target)) {

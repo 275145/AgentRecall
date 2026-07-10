@@ -5,6 +5,7 @@ import type { AppSettings } from "../../core/platform";
 import type { ResumeRouteResult } from "../../core/resume-router";
 import { localize, type LanguageMode } from "./language";
 import { liveStateLabel, type LiveSessionState, type LiveStatusFilter } from "./live-filter";
+import { isLocalSessionEnvironment } from "../../core/session-environment";
 
 export const SOURCE_LABEL: Record<SessionSource, string> = {
   "claude-cli": "Claude Code",
@@ -72,7 +73,7 @@ export function migrationTargetsForSession(
   session: Pick<SessionSearchResult, "source" | "environmentId" | "environmentKind">,
   settings: MigrationTargetSettings,
 ): MigrationTarget[] {
-  return isRemoteSession(session) ? [] : migrationTargetsForSource(session.source, settings);
+  return isLocalSessionEnvironment(session) ? migrationTargetsForSource(session.source, settings) : [];
 }
 
 export function migrationAgentLabel(target: MigrationTarget): string {
@@ -121,7 +122,7 @@ export function resumeRouteMessage(result: ResumeRouteResult, language: Language
 }
 
 export function isRemoteSession(session: Pick<SessionSearchResult, "environmentId" | "environmentKind">): boolean {
-  return session.environmentKind === "ssh" && session.environmentId !== "local";
+  return !isLocalSessionEnvironment(session);
 }
 
 export function environmentBadgeLabel(

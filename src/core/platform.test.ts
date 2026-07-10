@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { mergeApiConfigWithProfileDefaults, mergeClaudeApiConfigWithProfileDefaults } from "./api-config";
 import {
   buildGhosttyOpenArgs,
@@ -10,6 +11,7 @@ import {
   defaultSettings,
   defaultTerminalFor,
   getMigrationResumeProcessSpec,
+  getSafeMigrationResumeCommand,
   getResumeCommand,
   getResumeProcessSpec,
   inspectMigrationCli,
@@ -731,6 +733,53 @@ describe("resume process specs", () => {
 });
 
 describe("migration cli process specs", () => {
+  it("keeps the safe formatter independent from the primary formatter chain", () => {
+    const source = readFileSync(new URL("./platform.ts", import.meta.url), "utf8");
+    const safeFormatter = source.slice(
+      source.indexOf("export function getSafeMigrationResumeCommand"),
+      source.indexOf("// Ghostty has no", source.indexOf("export function getSafeMigrationResumeCommand")),
+    );
+    expect(safeFormatter).not.toContain("getMigrationResumeProcessSpec");
+    expect(safeFormatter).not.toContain("buildMigrationResumeShellCommand");
+    expect(safeFormatter).not.toContain("buildMigrationResumeCommands");
+  });
+  it("builds an independent safe resume command for all migration targets", () => {
+    const settings = {
+      ...defaultSettings,
+      claudeBinary: "/cli/claude safe",
+      codexBinary: "/cli/codex safe",
+      codeBuddyBinary: "/cli/codebuddy safe",
+      tclaudeBinary: "/cli/tclaude safe",
+      tcodexBinary: "/cli/tcodex safe",
+      claudeInternalBinary: "/cli/claude-internal safe",
+    };
+
+    for (const target of ["claude", "codex", "codebuddy", "tclaude", "tcodex", "claude-internal", "codex-internal"] as const) {
+      const command = getSafeMigrationResumeCommand(target, "id with space", "/repo with space", settings, {
+        platform: "linux",
+        homeDir: "/home/me",
+      });
+      expect(command).toContain("cd '/repo with space' &&");
+      expect(command).toContain("'id with space'");
+      expect(command).toContain(["codex", "tcodex", "codex-internal"].includes(target) ? " resume " : " --resume ");
+    }
+  });
+
+  it("keeps Codex Internal CODEX_HOME scoped in safe POSIX, PowerShell, and Cmd commands", () => {
+    const posix = getSafeMigrationResumeCommand("codex-internal", "id", "/repo", defaultSettings, {
+      platform: "linux", homeDir: "/home/me",
+    });
+    const powershell = getSafeMigrationResumeCommand("codex-internal", "id", "C:\\repo", {
+      ...defaultSettings, defaultTerminal: "PowerShell",
+    }, { platform: "win32", homeDir: "C:\\Users\\me" });
+    const cmd = getSafeMigrationResumeCommand("codex-internal", "id", "C:\\repo", {
+      ...defaultSettings, defaultTerminal: "Cmd",
+    }, { platform: "win32", homeDir: "C:\\Users\\me" });
+
+    expect(posix).toContain("CODEX_HOME=/home/me/.codex-internal");
+    expect(powershell).toContain("try { $env:CODEX_HOME = 'C:\\Users\\me\\.codex-internal'");
+    expect(cmd).toContain('setlocal & set "CODEX_HOME=C:\\Users\\me\\.codex-internal"');
+  });
   it("maps each migration target to its configured binary", () => {
     const settings = {
       ...defaultSettings,

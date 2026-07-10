@@ -73,9 +73,11 @@ describe("session source labels", () => {
       includeCodexInternal: true,
     };
     const local = { source: "claude-cli", environmentId: "local", environmentKind: "local" } as const;
+    const importedLocal = { source: "claude-cli", environmentId: "imported-local", environmentKind: "local" } as const;
     const remote = { source: "claude-cli", environmentId: "ssh-dev", environmentKind: "ssh" } as const;
 
     expect(migrationTargetsForSession(remote, settings)).toEqual([]);
+    expect(migrationTargetsForSession(importedLocal, settings)).toEqual([]);
     expect(migrationTargetsForSession(local, settings)).toEqual([
       "claude", "codex", "codebuddy", "tclaude", "tcodex", "claude-internal", "codex-internal",
     ]);

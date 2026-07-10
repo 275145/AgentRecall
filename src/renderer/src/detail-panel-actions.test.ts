@@ -151,8 +151,8 @@ describe("detail panel actions", () => {
     expect(mainSource).toContain("throw new Error(\"SSH environment is not available for this remote session.\")");
     expect(mainSource).toContain("openResumeInTerminal(session, getSettings(), { sshArgs })");
     expect(mainSource).toContain("openResumeInSpecificTerminal(session, getSettings(), \"iTerm\", { sshArgs })");
-    expect(mainSource).toContain("if (!isLocalSession(session)) return false");
-    expect(mainSource).toContain("if (!isLocalSession(session)) {");
+    expect(mainSource).toContain("if (!isLocalSessionEnvironment(session)) return false");
+    expect(mainSource).toContain("if (!isLocalSessionEnvironment(session)) {");
     expect(mainSource).toContain("return { route: \"resume\" as const };");
   });
 
@@ -193,19 +193,17 @@ describe("detail panel actions", () => {
     expect(mainSource).toContain('event.sender.send("session:migration-progress"');
     expect(mainHandlerSource("session:migrate")).not.toContain("ensureRemoteSessionDetailsLoaded");
     expect(mainHandlerSource("session:migrate")).not.toContain("runIndexSync");
-    expect(mainHandlerSource("session:migrate")).toContain("indexMigratedSessionFile");
-    expect(mainHandlerSource("session:migrate")).toContain("fallbackMigrationResumeDisplayCommand");
+    expect(mainSource).toContain("indexMigratedSessionFile");
+    expect(mainSource).toContain("getSafeMigrationResumeCommand");
   });
 
-  it("validates and settings-gates concrete migration targets before migration side effects", () => {
+  it("keeps the migration IPC handler on one immutable settings snapshot and delegates behavior", () => {
     const handler = mainHandlerSource("session:migrate");
-    const validationIndex = handler.indexOf("isMigrationTarget(target)");
-    const gateIndex = handler.indexOf("assertMigrationTargetEnabled(target, getSettings())");
-    const migrateIndex = handler.indexOf("migrateSession({");
-
-    expect(validationIndex).toBeGreaterThanOrEqual(0);
-    expect(gateIndex).toBeGreaterThan(validationIndex);
-    expect(migrateIndex).toBeGreaterThan(gateIndex);
+    expect(handler.match(/getHydratedSettings\(\)/g)).toHaveLength(1);
+    expect(handler).toContain("Object.freeze(await getHydratedSettings())");
+    expect(handler).toContain("runLocalSessionMigration");
+    expect(handler).toContain("localSessionMigrationRuntime(event)");
+    expect(handler).not.toContain("getSettings()");
     expect(preloadSource).toContain("target: MigrationTarget");
   });
 
