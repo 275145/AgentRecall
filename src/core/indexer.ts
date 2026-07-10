@@ -96,7 +96,7 @@ export function syncDefaultSessionsInBatches(store: SessionStore, options: Batch
   const shouldSkipFile = loadOptions.shouldSkipFile;
   const onSkippedFile = loadOptions.onSkippedFile;
   const scannedFilePaths = new Set<string>();
-  const loaded = loadDefaultSessionsIterator({
+  const rawLoaded = loadDefaultSessionsIterator({
     ...loadOptions,
     shouldSkipFile: (filePath, stat, dependencyMtimeMs = 0) => {
       scannedFilePaths.add(filePath);
@@ -110,13 +110,21 @@ export function syncDefaultSessionsInBatches(store: SessionStore, options: Batch
       onSkippedFile?.(filePath, stat);
     },
   });
+  const loaded = (function* () {
+    for (const item of rawLoaded) {
+      if (item.session.filePath) scannedFilePaths.add(item.session.filePath);
+      yield item;
+    }
+  })();
   return syncLoadedSessionsInBatches(store, loaded, {
     ...options,
     onProgress: (status) => options.onProgress?.({ ...status, skipped: status.skipped + fileSkipped, total: status.total + fileSkipped }),
   }).then((status) => {
     // Prune sessions whose source files no longer exist on disk. Only applies to
     // the local environment — remote sessions are synced independently and their
-    // file paths are not local filesystem paths.
+    // file paths are not local filesystem paths. scannedFilePaths is collected
+    // from shouldSkipFile (file-based sources) and from yielded LoadedSessions
+    // (DB-backed sources like Hermes/OpenCode whose file_path is the DB path).
     for (const staleKey of store.listSessionKeysByFilePath("local", scannedFilePaths)) {
       store.deleteSessionRecord(staleKey);
     }

@@ -490,7 +490,6 @@ export class SessionStore {
   }
 
   listSessionKeysByFilePath(environmentId: string, filePaths: ReadonlySet<string>): string[] {
-    if (filePaths.size === 0) return [];
     const rows = this.db
       .prepare("SELECT session_key, file_path FROM sessions WHERE environment_id = ? AND file_path != ''")
       .all(environmentId) as Array<{ session_key: string; file_path: string }>;
@@ -706,18 +705,24 @@ export class SessionStore {
       lastActivityAt: row.last_activity_at,
     }));
     const basenameCounts = new Map<string, number>();
+    const environmentsByPath = new Map<string, Set<string>>();
     for (const summary of summaries) {
       const basename = projectBasename(summary.path);
       basenameCounts.set(basename, (basenameCounts.get(basename) || 0) + 1);
+      const environmentIds = environmentsByPath.get(summary.path) ?? new Set<string>();
+      environmentIds.add(summary.environmentId);
+      environmentsByPath.set(summary.path, environmentIds);
     }
 
     return summaries
       .map((summary) => ({
         ...summary,
         label:
-          (basenameCounts.get(projectBasename(summary.path)) || 0) > 1
-            ? projectParentLabel(summary.path)
-            : summary.label,
+          (environmentsByPath.get(summary.path)?.size ?? 0) > 1
+            ? `${summary.label} · ${summary.environmentLabel}`
+            : (basenameCounts.get(projectBasename(summary.path)) || 0) > 1
+              ? projectParentLabel(summary.path)
+              : summary.label,
       }))
       .sort(
         (a, b) =>

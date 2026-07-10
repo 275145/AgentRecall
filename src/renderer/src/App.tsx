@@ -1762,7 +1762,7 @@ export function App(): ReactElement {
               {t("All Projects", "全部项目")}
             </button>
             {groupedProjects.map((group) => {
-              const groupId = group.environment?.id ?? "unknown";
+              const groupId = group.projects[0]?.environmentId ?? "unknown";
               const collapsed = collapsedProjectGroups.has(groupId);
               return (
               <div key={groupId} className="project-group">

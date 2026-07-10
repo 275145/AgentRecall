@@ -4,7 +4,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────
 # Agent-Session-Search — one-shot launcher for macOS
 #
-# Usage:  sh start.sh
+# Usage:  bash start.sh  (or: ./start.sh)
 #
 # Checks environment, installs missing pieces following the
 # README.md flow, then launches the app.

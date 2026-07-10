@@ -1780,7 +1780,9 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    showWindow();
+    // second-instance can fire before whenReady resolves; defer to avoid
+    // creating a BrowserWindow before Electron is fully initialized.
+    app.whenReady().then(() => showWindow());
   });
 }
 
