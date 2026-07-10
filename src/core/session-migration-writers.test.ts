@@ -322,6 +322,28 @@ describe("writeMigratedSession", () => {
     }
   });
 
+  it.each(TARGETS)("deletes $target output when beforeValidate fails", async ({ target, family }) => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), `migration-writer-before-validate-${target}-`));
+    try {
+      await expect(
+        writeMigratedSession({
+          target,
+          session: portable(),
+          homeDir,
+          now: NOW,
+          idFactory: idFactory(family === "codex" ? [SESSION_ID] : [SESSION_ID, ...MESSAGE_IDS]),
+          beforeValidate: () => {
+            throw new Error("beforeValidate exploded");
+          },
+        }),
+      ).rejects.toThrow("beforeValidate exploded");
+
+      expect(filesUnder(homeDir)).toEqual([]);
+    } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
   it("deletes the temporary file and leaves no final file when atomic rename fails", async () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "migration-writer-rename-"));
     let temporaryFile = "";
