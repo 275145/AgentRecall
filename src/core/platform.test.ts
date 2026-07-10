@@ -63,6 +63,11 @@ function withShell<T>(shell: string, fn: () => T | Promise<T>): T | Promise<T> {
   }
 }
 
+function encodedCmdPowerShell(script: string): string {
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  return `setlocal DisableDelayedExpansion & powershell.exe -NoLogo -NoProfile -EncodedCommand ${encoded} & endlocal`;
+}
+
 describe("platform application resolution", () => {
   it("hides subagent sessions by default and preserves the default for older saved settings", () => {
     expect(defaultSettings.hideSubagentSessions).toBe(true);
@@ -883,6 +888,42 @@ describe("migration cli process specs", () => {
     ).toBe(
       'setlocal & set "CODEX_HOME=C:\\Users\\A User/.codex-internal" & cd /d "C:\\repo with spaces" && "C:\\Program Files\\Codex CLI\\codex.exe" resume "id & next" & endlocal',
     );
+  });
+
+  it("encodes ordinary Cmd migration values so percent and delayed expansion cannot rewrite them", () => {
+    const settings = {
+      ...defaultSettings,
+      defaultTerminal: "Cmd" as const,
+      codexBinary: "C:\\Tools\\%PATH%\\!TEMP!\\codex & helper.exe",
+    };
+    const projectPath = "C:\\repo\\%PATH%\\!TEMP! & source";
+    const sessionId = "id-%PATH%-!TEMP!-&|<>^\"";
+    const expectedScript =
+      "$ErrorActionPreference = 'Stop'; Set-Location -LiteralPath 'C:\\repo\\%PATH%\\!TEMP! & source'; & 'C:\\Tools\\%PATH%\\!TEMP!\\codex & helper.exe' resume 'id-%PATH%-!TEMP!-&|<>^\"'";
+
+    expect(
+      getMigrationResumeProcessSpec("codex", sessionId, projectPath, settings, { platform: "win32" }).displayCommand,
+    ).toBe(encodedCmdPowerShell(expectedScript));
+  });
+
+  it("encodes Codex Internal Cmd values while keeping CODEX_HOME child-scoped", () => {
+    const settings = {
+      ...defaultSettings,
+      defaultTerminal: "Cmd" as const,
+      codexBinary: "C:\\Tools\\%PATH%\\!TEMP!\\codex ^ internal.exe",
+    };
+    const expectedScript =
+      "$ErrorActionPreference = 'Stop'; $env:CODEX_HOME = 'C:\\Users\\%PATH%\\!TEMP!/.codex-internal'; Set-Location -LiteralPath 'C:\\repo\\%PATH%\\!TEMP! | source'; & 'C:\\Tools\\%PATH%\\!TEMP!\\codex ^ internal.exe' resume 'id-%PATH%-!TEMP!-<next>'";
+
+    expect(
+      getMigrationResumeProcessSpec(
+        "codex-internal",
+        "id-%PATH%-!TEMP!-<next>",
+        "C:\\repo\\%PATH%\\!TEMP! | source",
+        settings,
+        { homeDir: "C:\\Users\\%PATH%\\!TEMP!", platform: "win32" },
+      ).displayCommand,
+    ).toBe(encodedCmdPowerShell(expectedScript));
   });
 
   it("rejects old, empty, and unparseable migration CLI versions", async () => {

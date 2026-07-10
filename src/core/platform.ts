@@ -359,11 +359,15 @@ function buildMigrationResumeShellCommand(
   shell: ShellKind,
   withCwd = true,
 ): string {
+  const codexHome = spec.env?.CODEX_HOME;
+  if (shell === "cmd" && requiresEncodedCmdCommand(spec, projectPath, withCwd)) {
+    return buildEncodedCmdCommand(spec, projectPath, withCwd);
+  }
+
   const invocation = buildShellCommand(spec.command, spec.args, projectPath, {
     shell,
     withCwd: withCwd && !spec.env?.CODEX_HOME,
   });
-  const codexHome = spec.env?.CODEX_HOME;
   if (!codexHome) return invocation;
 
   if (shell === "posix") {
@@ -377,6 +381,37 @@ function buildMigrationResumeShellCommand(
 
   const command = buildShellCommand(spec.command, spec.args, projectPath, { shell, withCwd });
   return `setlocal & set "CODEX_HOME=${codexHome.replace(/"/g, '""')}" & ${command} & endlocal`;
+}
+
+function requiresEncodedCmdCommand(
+  spec: Omit<ResumeProcessSpec, "displayCommand">,
+  projectPath: string,
+  withCwd: boolean,
+): boolean {
+  const values = [spec.command, ...spec.args, spec.env?.CODEX_HOME, withCwd ? projectPath : undefined];
+  // `%NAME%` is expanded by cmd.exe even inside quotes, while `!NAME!` is
+  // expanded when delayed expansion is enabled by the parent shell. Embedded
+  // quotes/newlines can also escape the token boundary. Avoid cmd's parser for
+  // these values instead of relying on batch-only percent escaping.
+  return values.some((value) => value !== undefined && /[%!"\r\n]/.test(value));
+}
+
+function buildEncodedCmdCommand(
+  spec: Omit<ResumeProcessSpec, "displayCommand">,
+  projectPath: string,
+  withCwd: boolean,
+): string {
+  const statements = ["$ErrorActionPreference = 'Stop'"];
+  if (spec.env?.CODEX_HOME) {
+    statements.push(`$env:CODEX_HOME = ${powershellQuote(spec.env.CODEX_HOME)}`);
+  }
+  if (withCwd && projectPath) {
+    statements.push(`Set-Location -LiteralPath ${powershellQuote(projectPath)}`);
+  }
+  statements.push(`& ${[spec.command, ...spec.args].map((token) => shellTokenQuote(token, "powershell")).join(" ")}`);
+  const script = statements.join("; ");
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  return `setlocal DisableDelayedExpansion & powershell.exe -NoLogo -NoProfile -EncodedCommand ${encoded} & endlocal`;
 }
 
 function buildMigrationResumeCommands(
