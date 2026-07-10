@@ -1120,7 +1120,7 @@ export class SessionStore {
 
   searchSessionPage(options: SearchOptions = {}): SessionSearchPage {
     const limit = options.limit ?? 200;
-    const query = options.query?.trim() || "";
+    const query = normalizeExplicitAnd(options.query?.trim() || "");
     const ftsMatches = query ? this.searchFts(query) : new Map<string, string | null>();
     const rows = this.getCandidateRows(options, query, limit);
     const tagsBySession = this.getTagsForSessions(rows.map((row) => row.session_key));
@@ -2146,6 +2146,14 @@ function buildFtsQuery(query: string): string {
     .filter(Boolean)
     .map((token) => `${token}*`)
     .join(" ");
+}
+
+function normalizeExplicitAnd(query: string): string {
+  return query
+    .split(/\s+/u)
+    .filter((token) => token.toLocaleLowerCase() !== "and")
+    .join(" ")
+    .trim();
 }
 
 function sessionSortSql(sortBy: SessionSortBy = "activity"): string {

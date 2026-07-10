@@ -64,6 +64,29 @@ const traceEvents: SessionTraceEvent[] = [
 ];
 
 describe("SessionStore", () => {
+  it("treats standalone explicit AND as the existing implicit AND operator", () => {
+    const store = createInMemoryStore();
+    const cases = [
+      ["both", "login expired"],
+      ["login", "login only"],
+      ["expired", "expired only"],
+      ["android", "android client"],
+    ] as const;
+    for (const [id, content] of cases) {
+      store.upsertIndexedSession(
+        sampleSession({ sessionKey: `codex:${id}`, rawId: id, originalTitle: content, firstQuestion: content }),
+        [{ role: "user", content, timestamp: "2026-06-01T10:00:00Z", index: 0 }],
+      );
+    }
+
+    for (const query of ["login AND expired", "login and expired", "login expired"]) {
+      expect(store.searchSessions({ query }).map((item) => item.sessionKey)).toEqual(["codex:both"]);
+    }
+    expect(store.searchSessions({ query: "android" }).map((item) => item.sessionKey)).toEqual(["codex:android"]);
+    expect(store.searchSessionPage({ query: "AND" }).totalCount).toBe(4);
+    store.close();
+  });
+
   it("persists subagent relationships and excludes them consistently when requested", () => {
     const store = createInMemoryStore();
     store.upsertIndexedSession(sampleSession({ sessionKey: "codex:root", rawId: "root", isSubagent: false }), messages, [], []);
