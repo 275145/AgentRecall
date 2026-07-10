@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Desktop console for searching, tagging, and resuming AI agent coding sessions.",
+  "license": "MIT",
   "main": "out/main/index.js",
   "type": "module",
   "bin": {
