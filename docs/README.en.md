@@ -11,6 +11,8 @@
   <img src="https://img.shields.io/badge/Electron-42-47848F?logo=electron&logoColor=white" alt="Electron">
   <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white" alt="React">
   <img src="https://img.shields.io/badge/Node-%E2%89%A5%2022.13-339933?logo=nodedotjs&logoColor=white" alt="Node">
+  <a href="https://github.com/zszz3/agent-session-search/stargazers"><img src="https://img.shields.io/github/stars/zszz3/agent-session-search?style=flat&logo=github" alt="GitHub Stars"></a>
+  <a href="../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
 </p>
 
 <p align="center">
@@ -237,6 +239,10 @@ npm run build
 - `docs/README.en.md` is the English project overview.
 - `Install.md` covers install, update, and uninstall steps, plus a safe setup guide for Coding Agents.
 - `start.sh` is the macOS one-command launcher that checks the environment, installs missing dependencies, and starts the app.
+
+## License
+
+This project is licensed under the [MIT License](../LICENSE). You may use, modify, and distribute it, provided that the original copyright and license notices are retained.
 
 ## Star History
 
