@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { defaultSettings } from "../../core/platform";
-import { projectSortTimestamp, sessionSortTimestamp, sourceFilterLabel, sourceFilters } from "./session-ui";
+import {
+  migrationTargetsForSource,
+  projectSortTimestamp,
+  sessionSortTimestamp,
+  sourceFilterLabel,
+  sourceFilters,
+} from "./session-ui";
 
 describe("session source labels", () => {
   it("keeps Claude Code and Codex as the only first-party source filters", () => {
@@ -28,6 +34,33 @@ describe("session source labels", () => {
     }).map((filter) => sourceFilterLabel(filter, "en"));
 
     expect(enabledLabels).toEqual(expect.arrayContaining(["OpenClaw", "Hermes", "OpenCode", "Cursor Agent", "Trae"]));
+  });
+
+  it("uses Internal labels for all four optional migration sources", () => {
+    const labels = sourceFilters({
+      ...defaultSettings,
+      includeTclaude: true,
+      includeTcodex: true,
+      includeClaudeInternal: true,
+      includeCodexInternal: true,
+    }).map((filter) => sourceFilterLabel(filter, "en"));
+
+    expect(labels).toEqual(expect.arrayContaining(["TClaude", "TCodex", "Claude Code Internal", "Codex Internal"]));
+  });
+
+  it("derives migration targets from enabled settings in registry order", () => {
+    expect(migrationTargetsForSource("claude-cli", defaultSettings)).toEqual(["claude", "codex", "codebuddy"]);
+    expect(migrationTargetsForSource("claude-cli", { ...defaultSettings, includeTcodex: true })).toEqual([
+      "claude", "codex", "codebuddy", "tcodex",
+    ]);
+    expect(migrationTargetsForSource("claude-cli", {
+      ...defaultSettings,
+      includeTclaude: true,
+      includeTcodex: true,
+      includeClaudeInternal: true,
+      includeCodexInternal: true,
+    })).toEqual(["claude", "codex", "codebuddy", "tclaude", "tcodex", "claude-internal", "codex-internal"]);
+    expect(migrationTargetsForSource("hermes", defaultSettings)).toEqual([]);
   });
 
   it("uses the latest activity timestamp shown in session rows", () => {

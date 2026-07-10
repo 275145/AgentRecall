@@ -1,19 +1,20 @@
 import type { ReactElement } from "react";
 import { Copy, X } from "lucide-react";
 import type {
-  MigrationAgent,
+  MigrationTarget,
   SessionMigrationProgress,
   SessionMigrationResult,
   SessionSearchResult,
 } from "../../../core/types";
 import { localize, type LanguageMode } from "../language";
-import { isRemoteSession, migrationAgentLabel, migrationTargetsForSource } from "../session-ui";
+import { isRemoteSession, migrationAgentLabel } from "../session-ui";
 
 export function SessionMigrationDialog({
   session,
   language,
   busy,
   progress,
+  targets,
   onSelect,
   onClose,
 }: {
@@ -21,11 +22,11 @@ export function SessionMigrationDialog({
   language: LanguageMode;
   busy: boolean;
   progress?: SessionMigrationProgress | null;
-  onSelect: (target: MigrationAgent) => void;
+  targets: readonly MigrationTarget[];
+  onSelect: (target: MigrationTarget) => void;
   onClose: () => void;
 }): ReactElement {
   const l = (en: string, zh: string) => localize(language, en, zh);
-  const targets = migrationTargetsForSource(session.source);
   const remote = isRemoteSession(session);
 
   return (
@@ -43,8 +44,8 @@ export function SessionMigrationDialog({
         {remote ? <p className="dialog-copy danger-copy">{l("Remote session migration is not supported yet.", "首版仅支持本地会话迁移。")}</p> : null}
         {busy ? <MigrationProgressPanel progress={progress ?? null} language={language} /> : null}
         <div className="migration-targets">
-          {(["claude", "codex", "codebuddy"] as const).map((target) => {
-            const disabled = busy || remote || !targets.includes(target);
+          {targets.map((target) => {
+            const disabled = busy || remote;
             return (
               <button key={target} type="button" onClick={() => onSelect(target)} disabled={disabled}>
                 {migrationAgentLabel(target)}

@@ -68,7 +68,11 @@ export const MIGRATION_TARGET_IDS = [
 
 export const BASE_MIGRATION_TARGETS = ["claude", "codex", "codebuddy"] as const satisfies readonly MigrationTarget[];
 
-export function migrationTargetDescriptor(target: MigrationTarget): MigrationTargetDescriptor {
+export function isMigrationTarget(value: unknown): value is MigrationTarget {
+  return typeof value === "string" && (MIGRATION_TARGET_IDS as readonly string[]).includes(value);
+}
+
+export function migrationTargetDescriptor(target: unknown): MigrationTargetDescriptor {
   const descriptor = MIGRATION_TARGETS.find(({ id }) => id === target);
   if (!descriptor) throw new Error(`Unsupported migration target: ${target}`);
   return descriptor;

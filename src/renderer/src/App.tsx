@@ -47,6 +47,7 @@ import type { IndexStatus } from "../../core/indexer";
 import { formatRelativeTime } from "../../core/format-session";
 import { LIVE_SESSION_REFRESH_INTERVAL_MS, QUOTA_REFRESH_INTERVAL_MS } from "../../core/refresh-policy";
 import type { AppSettings, AppSettingsUpdate } from "../../core/platform";
+import type { MigrationTargetSettings } from "../../core/migration-targets";
 import type { RemoteHealthReport } from "../../core/remote-health";
 import type { RemoteSessionDetailSnapshot } from "../../core/remote-session-sync";
 import type { TraceEventQueryOptions } from "../../core/session-store";
@@ -132,6 +133,7 @@ import {
   supportsResumeSource,
   unsupportedMigrationTitle,
   migrationAgentLabel,
+  migrationTargetsForSource,
 } from "./session-ui";
 
 const STATS_PERIOD_OPTIONS: Array<{ label: string; value: SessionStatsPeriod }> = [
@@ -152,6 +154,13 @@ const LIVE_STATUS_FILTERS: Array<{ label: string; value: LiveStatusFilter }> = [
   { label: "Open", value: "open" },
   { label: "Closed", value: "closed" },
 ];
+
+const DEFAULT_MIGRATION_TARGET_SETTINGS = {
+  includeTclaude: false,
+  includeTcodex: false,
+  includeClaudeInternal: false,
+  includeCodexInternal: false,
+} satisfies MigrationTargetSettings;
 
 type ViewMode = "default" | "favorites" | "pinned" | "hidden";
 type PendingSourceKey = "claude" | "codex" | "tclaude" | "tcodex" | "codebuddy" | "openclaw" | "hermes" | "opencode" | "cursor" | "trae";
@@ -2141,6 +2150,7 @@ export function App(): ReactElement {
       {migrationDialog?.kind === "select" ? (
         <SessionMigrationDialog
           session={migrationDialog.session}
+          targets={migrationTargetsForSource(migrationDialog.session.source, appSettings ?? DEFAULT_MIGRATION_TARGET_SETTINGS)}
           language={language}
           busy={actionStatus?.kind === "running"}
           progress={migrationProgress}
@@ -2969,7 +2979,7 @@ function SettingsDialog({
                 <label className="settings-field settings-toggle">
                   <div className="settings-field-text">
                     <span className="settings-field-title">Include ~/.claude-internal</span>
-                    <span className="settings-field-sub">{l("Adds a separate Claude Extra source filter.", "添加独立的 Claude Extra 来源过滤项。")}</span>
+                    <span className="settings-field-sub">{l("Indexes Claude Code Internal sessions and allows migration to that CLI.", "索引 Claude Code Internal 会话，并允许迁移到该 CLI。")}</span>
                   </div>
                   <input
                     type="checkbox"
@@ -2982,7 +2992,7 @@ function SettingsDialog({
                 <label className="settings-field settings-toggle">
                   <div className="settings-field-text">
                     <span className="settings-field-title">Include ~/.codex-internal</span>
-                    <span className="settings-field-sub">{l("Adds a separate Codex Extra source filter.", "添加独立的 Codex Extra 来源过滤项。")}</span>
+                    <span className="settings-field-sub">{l("Indexes Codex Internal sessions and allows migration to that CLI.", "索引 Codex Internal 会话，并允许迁移到该 CLI。")}</span>
                   </div>
                   <input
                     type="checkbox"
@@ -2995,7 +3005,7 @@ function SettingsDialog({
                 <label className="settings-field settings-toggle">
                   <div className="settings-field-text">
                     <span className="settings-field-title">Include ~/.tclaude</span>
-                    <span className="settings-field-sub">{l("Indexes TClaude CLI sessions (Claude Code fork).", "索引 TClaude CLI 会话（Claude Code 分支）。")}</span>
+                    <span className="settings-field-sub">{l("Indexes TClaude CLI sessions and allows migration to that CLI.", "索引 TClaude CLI 会话，并允许迁移到该 CLI。")}</span>
                   </div>
                   <input
                     type="checkbox"
@@ -3008,7 +3018,7 @@ function SettingsDialog({
                 <label className="settings-field settings-toggle">
                   <div className="settings-field-text">
                     <span className="settings-field-title">Include ~/.tcodex</span>
-                    <span className="settings-field-sub">{l("Indexes TCodex CLI sessions (Codex fork).", "索引 TCodex CLI 会话（Codex 分支）。")}</span>
+                    <span className="settings-field-sub">{l("Indexes TCodex CLI sessions and allows migration to that CLI.", "索引 TCodex CLI 会话，并允许迁移到该 CLI。")}</span>
                   </div>
                   <input
                     type="checkbox"

@@ -28,4 +28,17 @@ describe("session migration UI wiring", () => {
     expect(dialogSource).toContain("migration-progress-fill");
     expect(dialogSource).toContain('role="progressbar"');
   });
+
+  it("renders caller-provided concrete targets instead of a hardcoded family list", () => {
+    expect(dialogSource).toContain("targets: readonly MigrationTarget[]");
+    expect(dialogSource).toContain("targets.map((target)");
+    expect(dialogSource).not.toContain('(["claude", "codex", "codebuddy"] as const)');
+    expect(appSource).toContain("targets={migrationTargetsForSource(");
+  });
+
+  it("keeps Node-backed platform helpers out of the renderer bundle", () => {
+    expect(appSource).toContain('import type { AppSettings, AppSettingsUpdate } from "../../core/platform"');
+    expect(appSource).not.toContain("defaultSettings");
+    expect(appSource).toContain("DEFAULT_MIGRATION_TARGET_SETTINGS");
+  });
 });

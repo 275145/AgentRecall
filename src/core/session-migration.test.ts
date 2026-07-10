@@ -294,6 +294,26 @@ describe("session migration model", () => {
 });
 
 describe("migrateSession", () => {
+  it("preserves a concrete migration target while keeping the portable source agent family", async () => {
+    const { deps, inspectCli, write, launch, refreshIndex, seenRecords } = createDependencies();
+
+    const result = await migrateSession({
+      source: session("tclaude-cli"),
+      messages,
+      target: "codex-internal",
+      deps,
+    });
+
+    expect(result.target).toBe("codex-internal");
+    expect(inspectCli).toHaveBeenCalledWith("codex-internal");
+    expect(write).toHaveBeenCalledWith("codex-internal", expect.objectContaining({ sourceAgent: "claude" }));
+    expect(refreshIndex).toHaveBeenCalledWith("codex-internal", "/tmp/target-session-1.jsonl");
+    expect(launch).toHaveBeenCalledWith("codex-internal", "target-session-1", "/repo");
+    expect(seenRecords).toEqual([
+      expect.objectContaining({ sourceAgent: "claude", targetAgent: "codex-internal" }),
+    ]);
+  });
+
   it.each([
     ["claude-cli", "claude"],
     ["claude-cli", "codex"],

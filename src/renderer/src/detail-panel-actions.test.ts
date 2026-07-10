@@ -197,6 +197,27 @@ describe("detail panel actions", () => {
     expect(mainHandlerSource("session:migrate")).toContain("fallbackMigrationResumeDisplayCommand");
   });
 
+  it("validates and settings-gates concrete migration targets before migration side effects", () => {
+    const handler = mainHandlerSource("session:migrate");
+    const validationIndex = handler.indexOf("isMigrationTarget(target)");
+    const gateIndex = handler.indexOf("assertMigrationTargetEnabled(target, getSettings())");
+    const migrateIndex = handler.indexOf("migrateSession({");
+
+    expect(validationIndex).toBeGreaterThanOrEqual(0);
+    expect(gateIndex).toBeGreaterThan(validationIndex);
+    expect(migrateIndex).toBeGreaterThan(gateIndex);
+    expect(preloadSource).toContain("target: MigrationTarget");
+  });
+
+  it("builds remote restore commands with POSIX syntax regardless of the local platform", () => {
+    const remoteCommand = mainSource.slice(
+      mainSource.indexOf("function remoteMigrationResumeDisplayCommand"),
+      mainSource.indexOf("async function writeMigratedSessionToSshEnvironment"),
+    );
+    expect(remoteCommand).toContain('getMigrationResumeProcessSpec(target, sessionId, projectPath, getSettings(), { platform: "linux" })');
+    expect(remoteCommand).not.toContain("fallbackMigrationResumeDisplayCommand(target");
+  });
+
   it("exposes visible session bulk remote upload and remote-environment restore actions", () => {
     expect(appSource).toContain("uploadVisibleRemoteSessions");
     expect(appSource).not.toContain("CloudUpload");

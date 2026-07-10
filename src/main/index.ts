@@ -64,6 +64,7 @@ import {
 } from "../core/ai-assistant";
 import { applyMigrationLengthPolicy, createMigrationCompressor } from "../core/session-migration-compression";
 import { migrateSession } from "../core/session-migration";
+import { assertMigrationTargetEnabled, isMigrationTarget } from "../core/migration-targets";
 import { targetFilePath, writeMigratedSession } from "../core/session-migration-writers";
 import { writeDbPointer } from "../core/app-paths";
 import { routeResumeSession } from "../core/resume-router";
@@ -120,6 +121,7 @@ import type { AppSettings, AppSettingsUpdate } from "../core/platform";
 import type {
   EnvironmentUpsertInput,
   MigrationAgent,
+  MigrationTarget,
   PortableSession,
   SearchOptions,
   SessionEnvironment,
@@ -1255,7 +1257,7 @@ async function pathIsDirectory(targetPath: string): Promise<boolean> {
   }
 }
 
-function migrationResumeDisplayCommand(target: MigrationAgent, sessionId: string, projectPath: string): string {
+function migrationResumeDisplayCommand(target: MigrationTarget, sessionId: string, projectPath: string): string {
   return getMigrationResumeProcessSpec(target, sessionId, projectPath, getSettings()).displayCommand;
 }
 
@@ -1263,12 +1265,8 @@ function quotePosixToken(value: string): string {
   return /^[A-Za-z0-9_\-./]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-function fallbackMigrationResumeDisplayCommand(target: MigrationAgent, sessionId: string, projectPath: string): string {
-  const settings = getSettings();
-  const binary =
-    target === "claude" ? settings.claudeBinary : target === "codex" ? settings.codexBinary : settings.codeBuddyBinary;
-  const args = target === "codex" ? ["resume", sessionId] : ["--resume", sessionId];
-  return `cd ${quotePosixToken(projectPath)} && ${[binary, ...args].map(quotePosixToken).join(" ")}`;
+function fallbackMigrationResumeDisplayCommand(target: MigrationTarget, sessionId: string, projectPath: string): string {
+  return getMigrationResumeProcessSpec(target, sessionId, projectPath, getSettings()).displayCommand;
 }
 
 function remoteMigrationResumeDisplayCommand(
@@ -1277,7 +1275,7 @@ function remoteMigrationResumeDisplayCommand(
   sessionId: string,
   projectPath: string,
 ): string {
-  const remoteCommand = fallbackMigrationResumeDisplayCommand(target, sessionId, projectPath);
+  const remoteCommand = getMigrationResumeProcessSpec(target, sessionId, projectPath, getSettings(), { platform: "linux" }).displayCommand;
   return ["ssh", ...buildRemoteSyncSshArgs(environment, remoteCommand).map(quotePosixToken)].join(" ");
 }
 
@@ -1749,7 +1747,9 @@ function registerIpc(): void {
     await openResumeInSpecificTerminal(session, getSettings(), "iTerm", { sshArgs });
     store.markResumed(sessionKey);
   });
-  ipcMain.handle("session:migrate", async (event, sessionKey: string, target: MigrationAgent) => {
+  ipcMain.handle("session:migrate", async (event, sessionKey: string, target: unknown) => {
+    if (!isMigrationTarget(target)) throw new Error(`Migration target ${String(target)} is not supported.`);
+    assertMigrationTargetEnabled(target, getSettings());
     const session = store.getSession(sessionKey);
     if (!session) throw new Error("Session not found.");
 

@@ -1,5 +1,5 @@
 import type { MigrationCompressionListener, PreparedMigrationSession } from "./session-migration-compression";
-import { BASE_MIGRATION_TARGETS } from "./migration-targets";
+import { BASE_MIGRATION_TARGETS, isMigrationTarget } from "./migration-targets";
 import type { WrittenMigratedSession } from "./session-migration-writers";
 import type {
   MigrationAgent,
@@ -17,29 +17,29 @@ import type {
 export const MIGRATION_TOKEN_LIMIT = 60_000;
 
 export interface SessionMigrationDependencies {
-  inspectCli: (target: MigrationAgent) => Promise<void> | void;
+  inspectCli: (target: MigrationTarget) => Promise<void> | void;
   prepare: (
     session: PortableSession,
     onProgress?: MigrationCompressionListener,
   ) => Promise<PreparedMigrationSession>;
   write: (
-    target: MigrationAgent,
+    target: MigrationTarget,
     session: PortableSession,
   ) => Promise<WrittenMigratedSession>;
   record: (record: SessionMigrationRecord) => Promise<void> | void;
-  refreshIndex: (target: MigrationAgent, targetFilePath: string) => Promise<void>;
+  refreshIndex: (target: MigrationTarget, targetFilePath: string) => Promise<void>;
   launch: (
-    target: MigrationAgent,
+    target: MigrationTarget,
     sessionId: string,
     projectPath: string,
   ) => Promise<void>;
   resumeCommand: (
-    target: MigrationAgent,
+    target: MigrationTarget,
     sessionId: string,
     projectPath: string,
   ) => string;
   fallbackResumeCommand: (
-    target: MigrationAgent,
+    target: MigrationTarget,
     sessionId: string,
     projectPath: string,
   ) => string;
@@ -53,7 +53,7 @@ export interface SessionMigrationDependencies {
 export interface MigrateSessionOptions {
   source: SessionSearchResult;
   messages: SessionMessage[];
-  target: MigrationAgent;
+  target: MigrationTarget;
   deps: SessionMigrationDependencies;
 }
 
@@ -255,7 +255,7 @@ export async function migrateSession({
 
 async function validateMigrationRequest(
   source: SessionSearchResult,
-  target: MigrationAgent,
+  target: MigrationTarget,
   deps: SessionMigrationDependencies,
 ): Promise<void> {
   const sourceAgent = migrationAgentForSource(source.source);
@@ -265,7 +265,7 @@ async function validateMigrationRequest(
   if (source.environmentKind !== "local" || source.environmentId !== "local") {
     throw new Error("Remote session migration is not supported yet.");
   }
-  if (!BASE_MIGRATION_TARGETS.includes(target)) {
+  if (!isMigrationTarget(target)) {
     throw new Error(`Migration target ${target} is not supported.`);
   }
 
@@ -316,7 +316,7 @@ function errorMessage(error: unknown): string {
 function safeResumeCommand(
   deps: SessionMigrationDependencies,
   warnings: string[],
-  target: MigrationAgent,
+  target: MigrationTarget,
   sessionId: string,
   projectPath: string,
 ): string {
