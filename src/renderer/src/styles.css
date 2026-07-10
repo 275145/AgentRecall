@@ -1639,6 +1639,89 @@ select:focus-visible {
   white-space: nowrap;
 }
 
+.search-match-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 7px;
+}
+
+.search-match-count,
+.search-metadata-match > span:first-child {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.search-match-hit {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--panel-subtle);
+  color: var(--text-muted);
+  text-align: left;
+}
+
+.search-match-hit:hover,
+.search-match-hit:focus-visible {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.search-match-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.search-match-meta strong {
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.search-match-snippet {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.search-match-snippet mark,
+.message.match-context mark {
+  border-radius: 2px;
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+  font-weight: 700;
+}
+
+.search-metadata-match {
+  display: grid;
+  gap: 2px;
+  margin-top: 7px;
+}
+
+.search-metadata-match .snippet {
+  margin-top: 0;
+}
+
+.matched .message.match-context {
+  opacity: 0.78;
+}
+
+.matched .message.match-target {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  opacity: 1;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 .row-tags {
   display: flex;
   max-width: 150px;

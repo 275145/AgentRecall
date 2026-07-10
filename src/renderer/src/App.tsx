@@ -66,6 +66,7 @@ import type {
   SessionMigrationProgress,
   SessionMigrationResult,
   SessionMessage,
+  SessionMatchHit,
   SessionSearchResult,
   SessionStats,
   SessionStatsPeriod,
@@ -93,6 +94,7 @@ import { LANGUAGE_STORAGE_KEY, localize, readInitialLanguage, type LanguageMode 
 import { readInitialTheme, THEME_STORAGE_KEY, type ThemeMode } from "./theme";
 import { loadSkillsPanelData } from "./skills-load";
 import { clearSearchHistory, deleteSearch, readSearchHistory, recordSearch } from "./search-history";
+import { HighlightedSearchText } from "./search-highlight";
 import type {
   ActionStatus,
   ContextMenuState,
@@ -469,6 +471,8 @@ export function App(): ReactElement {
   const [detail, setDetail] = useState<SessionSearchResult | null>(null);
   const [remoteDetail, setRemoteDetail] = useState<{ snapshot: RemoteSessionDetailSnapshot; query: string } | null>(null);
   const [messages, setMessages] = useState<SessionMessage[]>([]);
+  const [matchedContextMessages, setMatchedContextMessages] = useState<SessionMessage[]>([]);
+  const [matchedMessageIndex, setMatchedMessageIndex] = useState<number | null>(null);
   const [messageOffset, setMessageOffset] = useState(0);
   const [traceEvents, setTraceEvents] = useState<SessionTraceEvent[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
@@ -1137,12 +1141,14 @@ export function App(): ReactElement {
     setProjectEnvironmentId(project.environmentId);
   }
 
-  async function openDetail(session: SessionSearchResult): Promise<void> {
+  async function openDetail(session: SessionSearchResult, matchHit?: SessionMatchHit): Promise<void> {
     const requestId = ++detailLoadSeqRef.current;
     setContextMenu(null);
     setRemoteDetail(null);
     setDetail(session);
     setMessages([]);
+    setMatchedContextMessages([]);
+    setMatchedMessageIndex(matchHit?.messageIndex ?? null);
     setMessageOffset(0);
     setTraceEvents([]);
     setMessagesLoading(true);
@@ -1157,7 +1163,12 @@ export function App(): ReactElement {
       }
 
       const initialOffset = Math.max(0, fresh.messageCount - INITIAL_MESSAGE_LIMIT);
-      const loadedMessages = await window.sessionSearch.getMessages(sessionKey, initialOffset, INITIAL_MESSAGE_LIMIT);
+      const [loadedMessages, loadedMatchContext] = await Promise.all([
+        window.sessionSearch.getMessages(sessionKey, initialOffset, INITIAL_MESSAGE_LIMIT),
+        matchHit
+          ? window.sessionSearch.getMessages(sessionKey, Math.max(0, matchHit.messageIndex - 1), 3)
+          : Promise.resolve([]),
+      ]);
       if (requestId !== detailLoadSeqRef.current) return;
       const loadedTraceEvents = await window.sessionSearch.getTraceEvents(sessionKey, traceWindowForMessages(loadedMessages));
       if (requestId !== detailLoadSeqRef.current) return;
@@ -1165,6 +1176,7 @@ export function App(): ReactElement {
       setDetail(fresh);
       setMessageOffset(initialOffset);
       setMessages(loadedMessages);
+      setMatchedContextMessages(loadedMatchContext);
       setTraceEvents(loadedTraceEvents);
       setMessagesLoading(false);
     } catch (error) {
@@ -1179,6 +1191,8 @@ export function App(): ReactElement {
     detailLoadSeqRef.current++;
     setDetail(null);
     setMessages([]);
+    setMatchedContextMessages([]);
+    setMatchedMessageIndex(null);
     setMessageOffset(0);
     setTraceEvents([]);
     setMessagesLoading(false);
@@ -1659,6 +1673,10 @@ export function App(): ReactElement {
   rowHandlersRef.current = { openDetail, beginRename, toggleFavorite };
   const handleRowSelect = useCallback((sessionKey: string) => setSelectedKey(sessionKey), []);
   const handleRowOpen = useCallback((session: SessionSearchResult) => void rowHandlersRef.current.openDetail(session), []);
+  const handleRowOpenMatch = useCallback(
+    (session: SessionSearchResult, hit: SessionMatchHit) => void rowHandlersRef.current.openDetail(session, hit),
+    [],
+  );
   const handleRowRename = useCallback((session: SessionSearchResult) => rowHandlersRef.current.beginRename(session), []);
   const handleRowFavorite = useCallback((session: SessionSearchResult) => void rowHandlersRef.current.toggleFavorite(session), []);
   const handleRowContextMenu = useCallback((event: ReactMouseEvent, session: SessionSearchResult) => {
@@ -2022,6 +2040,7 @@ export function App(): ReactElement {
               selected={selected?.sessionKey === session.sessionKey}
               liveState={getLiveSessionState(session, liveSessionKeys, liveDetectionFailed)}
               language={language}
+              onOpenMatch={handleRowOpenMatch}
               onSelect={handleRowSelect}
               onOpen={handleRowOpen}
               onRename={handleRowRename}
@@ -2043,6 +2062,8 @@ export function App(): ReactElement {
         <DetailPanel
           session={detail}
           messages={messages}
+          matchedContextMessages={matchedContextMessages}
+          matchedMessageIndex={matchedMessageIndex}
           traceEvents={traceEvents}
           loading={messagesLoading}
           actionStatus={actionStatus}
@@ -2103,6 +2124,8 @@ export function App(): ReactElement {
         <DetailPanel
           session={remoteDetail.snapshot.session}
           messages={remoteDetail.snapshot.messages}
+          matchedContextMessages={[]}
+          matchedMessageIndex={null}
           traceEvents={remoteDetail.snapshot.traceEvents}
           loading={false}
           actionStatus={null}
@@ -2466,6 +2489,7 @@ const SessionRow = memo(function SessionRow({
   language,
   onSelect,
   onOpen,
+  onOpenMatch,
   onRename,
   onFavorite,
   onContextMenu,
@@ -2476,11 +2500,21 @@ const SessionRow = memo(function SessionRow({
   language: LanguageMode;
   onSelect: (sessionKey: string) => void;
   onOpen: (session: SessionSearchResult) => void;
+  onOpenMatch: (session: SessionSearchResult, hit: SessionMatchHit) => void;
   onRename: (session: SessionSearchResult) => void;
   onFavorite: (session: SessionSearchResult) => void;
   onContextMenu: (event: ReactMouseEvent, session: SessionSearchResult) => void;
 }): ReactElement {
   const l = (en: string, zh: string) => localize(language, en, zh);
+  const matchHits = session.matchHits ?? [];
+  const metadataMatchLabel =
+    session.metadataMatch === "title"
+      ? l("Matched session title", "命中会话标题")
+      : session.metadataMatch === "project"
+        ? l("Matched project path", "命中项目路径")
+        : session.metadataMatch === "summary"
+          ? l("Matched session summary", "命中会话摘要")
+          : null;
   return (
     <article
       className={`session-row ${selected ? "selected" : ""}`}
@@ -2534,7 +2568,41 @@ const SessionRow = memo(function SessionRow({
           <span>{l(`${session.messageCount} messages`, `${session.messageCount} 条消息`)}</span>
           <span>{l(`${formatTokenCount(session.tokenUsage.totalTokens)} tokens`, `${formatTokenCount(session.tokenUsage.totalTokens)} token`)}</span>
         </div>
-        {session.matchSnippet ? <div className="snippet">{session.matchSnippet}</div> : null}
+        {matchHits.length > 0 ? (
+          <div className="search-match-list">
+            <div className="search-match-count">
+              {l(`${session.messageMatchCount ?? matchHits.length} message matches`, `${session.messageMatchCount ?? matchHits.length} 条消息命中`)}
+            </div>
+            {matchHits.map((hit) => {
+              const timestamp = Date.parse(hit.timestamp);
+              return (
+                <button
+                  type="button"
+                  className="search-match-hit"
+                  key={hit.messageIndex}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpenMatch(session, hit);
+                  }}
+                  onDoubleClick={(event) => event.stopPropagation()}
+                >
+                  <span className="search-match-meta">
+                    <strong>{hit.role === "user" ? l("User", "用户") : l("Assistant", "助手")}</strong>
+                    {Number.isFinite(timestamp) ? <time>{formatRelativeTime(timestamp)}</time> : null}
+                  </span>
+                  <span className="search-match-snippet">
+                    <HighlightedSearchText text={hit.snippet} terms={hit.matchedTerms} />
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        ) : metadataMatchLabel ? (
+          <div className="search-metadata-match">
+            <span>{metadataMatchLabel}</span>
+            {session.matchSnippet ? <span className="snippet">{session.matchSnippet}</span> : null}
+          </div>
+        ) : session.matchSnippet ? <div className="snippet">{session.matchSnippet}</div> : null}
       </div>
       <div className="row-tags">
         {session.tags.slice(0, 3).map((tagName) => (
