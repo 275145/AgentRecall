@@ -95,9 +95,11 @@ export function syncDefaultSessionsInBatches(store: SessionStore, options: Batch
   const loadOptions = options.loadOptions ?? {};
   const shouldSkipFile = loadOptions.shouldSkipFile;
   const onSkippedFile = loadOptions.onSkippedFile;
+  const scannedFilePaths = new Set<string>();
   const loaded = loadDefaultSessionsIterator({
     ...loadOptions,
     shouldSkipFile: (filePath, stat, dependencyMtimeMs = 0) => {
+      scannedFilePaths.add(filePath);
       const customDecision = shouldSkipFile?.(filePath, stat, dependencyMtimeMs);
       if (customDecision !== undefined) return customDecision;
       const snapshot = findSessionFileSnapshot(indexedFiles, filePath, stat);
@@ -111,7 +113,15 @@ export function syncDefaultSessionsInBatches(store: SessionStore, options: Batch
   return syncLoadedSessionsInBatches(store, loaded, {
     ...options,
     onProgress: (status) => options.onProgress?.({ ...status, skipped: status.skipped + fileSkipped, total: status.total + fileSkipped }),
-  }).then((status) => ({ ...status, skipped: status.skipped + fileSkipped, total: status.total + fileSkipped }));
+  }).then((status) => {
+    // Prune sessions whose source files no longer exist on disk. Only applies to
+    // the local environment — remote sessions are synced independently and their
+    // file paths are not local filesystem paths.
+    for (const staleKey of store.listSessionKeysByFilePath("local", scannedFilePaths)) {
+      store.deleteSessionRecord(staleKey);
+    }
+    return { ...status, skipped: status.skipped + fileSkipped, total: status.total + fileSkipped };
+  });
 }
 
 interface SessionFileSnapshot {

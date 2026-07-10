@@ -476,6 +476,27 @@ export class SessionStore {
     return deleted;
   }
 
+  deleteSessionRecord(sessionKey: string): boolean {
+    let deleted = false;
+    this.transaction(() => {
+      const row = this.db.prepare("SELECT session_key FROM sessions WHERE session_key = ?").get(sessionKey);
+      if (!row) return;
+      this.db.prepare("DELETE FROM session_fts WHERE session_key = ?").run(sessionKey);
+      this.db.prepare("DELETE FROM sessions WHERE session_key = ?").run(sessionKey);
+      this.deleteUnusedTags();
+      deleted = true;
+    });
+    return deleted;
+  }
+
+  listSessionKeysByFilePath(environmentId: string, filePaths: ReadonlySet<string>): string[] {
+    if (filePaths.size === 0) return [];
+    const rows = this.db
+      .prepare("SELECT session_key, file_path FROM sessions WHERE environment_id = ? AND file_path != ''")
+      .all(environmentId) as Array<{ session_key: string; file_path: string }>;
+    return rows.filter((row) => !filePaths.has(row.file_path)).map((row) => row.session_key);
+  }
+
   markOpened(sessionKey: string): void {
     this.db.prepare("UPDATE sessions SET last_opened_at = ? WHERE session_key = ?").run(Date.now(), sessionKey);
   }
@@ -685,30 +706,23 @@ export class SessionStore {
       lastActivityAt: row.last_activity_at,
     }));
     const basenameCounts = new Map<string, number>();
-    const environmentsByPath = new Map<string, Set<string>>();
     for (const summary of summaries) {
       const basename = projectBasename(summary.path);
       basenameCounts.set(basename, (basenameCounts.get(basename) || 0) + 1);
-      const environmentIds = environmentsByPath.get(summary.path) ?? new Set<string>();
-      environmentIds.add(summary.environmentId);
-      environmentsByPath.set(summary.path, environmentIds);
     }
 
     return summaries
       .map((summary) => ({
         ...summary,
         label:
-          (environmentsByPath.get(summary.path)?.size ?? 0) > 1
-            ? `${summary.label} · ${summary.environmentLabel}`
-            : (basenameCounts.get(projectBasename(summary.path)) || 0) > 1
-              ? projectParentLabel(summary.path)
-              : summary.label,
+          (basenameCounts.get(projectBasename(summary.path)) || 0) > 1
+            ? projectParentLabel(summary.path)
+            : summary.label,
       }))
       .sort(
         (a, b) =>
-          b.sessionCount - a.sessionCount ||
-          a.path.localeCompare(b.path) ||
           environmentSortValue(a.environmentId) - environmentSortValue(b.environmentId) ||
+          b.lastActivityAt - a.lastActivityAt ||
           a.label.localeCompare(b.label),
       );
   }
