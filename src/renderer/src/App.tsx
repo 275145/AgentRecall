@@ -344,7 +344,7 @@ const SearchBox = forwardRef<
     clearRecentLabel: string;
     deleteRecentLabel: string;
     onQueryChange: (value: string) => void;
-    onSubmit: () => void;
+    onSubmit: (value: string) => void;
   }
 >(function SearchBox({ placeholder, recentLabel, clearRecentLabel, deleteRecentLabel, onQueryChange, onSubmit }, ref) {
   const [value, setValue] = useState("");
@@ -353,7 +353,6 @@ const SearchBox = forwardRef<
   );
   const [focused, setFocused] = useState(false);
   const commitTimerRef = useRef<number | undefined>(undefined);
-  const lastSubmittedRef = useRef("");
 
   function cancelPendingCommit(): void {
     if (commitTimerRef.current === undefined) return;
@@ -371,32 +370,16 @@ const SearchBox = forwardRef<
   function handleChange(next: string): void {
     setValue(next);
     setFocused(true);
-    if (next.trim() !== lastSubmittedRef.current) lastSubmittedRef.current = "";
     cancelPendingCommit();
     commitTimerRef.current = window.setTimeout(() => {
       startTransition(() => onQueryChange(next));
     }, SEARCH_DEBOUNCE_MS);
   }
 
-  function submitOrOpen(): void {
-    const trimmed = value.trim();
-    if (!trimmed || trimmed === lastSubmittedRef.current) {
-      onSubmit();
-      return;
-    }
-    cancelPendingCommit();
-    onQueryChange(value);
-    setHistory((current) => recordSearch(window.localStorage, current, value));
-    lastSubmittedRef.current = trimmed;
-    setFocused(false);
-  }
-
   function selectRecentSearch(query: string): void {
     cancelPendingCommit();
     setValue(query);
     onQueryChange(query);
-    setHistory((current) => recordSearch(window.localStorage, current, query));
-    lastSubmittedRef.current = query.trim();
     setFocused(false);
   }
 
@@ -409,7 +392,10 @@ const SearchBox = forwardRef<
         ref={ref}
         value={value}
         onChange={(event) => handleChange(event.target.value)}
-        onFocus={() => setFocused(true)}
+        onFocus={() => {
+          setHistory(readSearchHistory(window.localStorage));
+          setFocused(true);
+        }}
         onBlur={(event) => {
           if (!event.currentTarget.parentElement?.contains(event.relatedTarget as Node | null)) setFocused(false);
         }}
@@ -418,7 +404,7 @@ const SearchBox = forwardRef<
             setFocused(false);
             event.currentTarget.blur();
           } else if (!event.metaKey && !event.ctrlKey && event.key === "Enter") {
-            submitOrOpen();
+            onSubmit(value);
           }
         }}
         placeholder={placeholder}
@@ -1081,13 +1067,13 @@ export function App(): ReactElement {
         const session = displayedResults.find((item) => item.sessionKey === selectedKey);
         if (session) {
           event.preventDefault();
-          void openDetail(session);
+          openSearchResult(session);
         }
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [displayedResults, selectedKey, detail, remoteDetail, dialog, migrationDialog, deleteSessionCandidate, deletingSession, deleteTagName, contextMenu, skillsOpen, apiConfigOpen, aiAssistantOpen, settingsOpen, sshDialogOpen, remoteSessionsOpen, actionStatus, t]);
+  }, [displayedResults, selectedKey, detail, remoteDetail, dialog, migrationDialog, deleteSessionCandidate, deletingSession, deleteTagName, contextMenu, skillsOpen, apiConfigOpen, aiAssistantOpen, settingsOpen, sshDialogOpen, remoteSessionsOpen, actionStatus, query, t]);
 
   useEffect(() => {
     if (!selectedKey) return;
@@ -1205,6 +1191,14 @@ export function App(): ReactElement {
         setActionStatus({ kind: "error", message: error instanceof Error ? error.message : String(error) });
       }
     }
+  }
+
+  function openSearchResult(session: SessionSearchResult, searchQuery = query): void {
+    const normalizedQuery = searchQuery.trim();
+    if (normalizedQuery) {
+      recordSearch(window.localStorage, readSearchHistory(window.localStorage), normalizedQuery);
+    }
+    void openDetail(session);
   }
 
   function closeDetail(): void {
@@ -1687,10 +1681,10 @@ export function App(): ReactElement {
   // Stable callbacks for SessionRow so the memoized rows don't re-render on every
   // App render (e.g. when a search commits). The latest closures are read via a
   // ref so the callbacks can stay referentially stable without going stale.
-  const rowHandlersRef = useRef({ openDetail, beginRename, toggleFavorite });
-  rowHandlersRef.current = { openDetail, beginRename, toggleFavorite };
+  const rowHandlersRef = useRef({ openSearchResult, beginRename, toggleFavorite });
+  rowHandlersRef.current = { openSearchResult, beginRename, toggleFavorite };
   const handleRowSelect = useCallback((sessionKey: string) => setSelectedKey(sessionKey), []);
-  const handleRowOpen = useCallback((session: SessionSearchResult) => void rowHandlersRef.current.openDetail(session), []);
+  const handleRowOpen = useCallback((session: SessionSearchResult) => rowHandlersRef.current.openSearchResult(session), []);
   const handleRowRename = useCallback((session: SessionSearchResult) => rowHandlersRef.current.beginRename(session), []);
   const handleRowFavorite = useCallback((session: SessionSearchResult) => void rowHandlersRef.current.toggleFavorite(session), []);
   const handleRowContextMenu = useCallback((event: ReactMouseEvent, session: SessionSearchResult) => {
@@ -1919,8 +1913,8 @@ export function App(): ReactElement {
             clearRecentLabel={t("Clear", "清空")}
             deleteRecentLabel={t("Delete recent search", "删除最近搜索")}
             onQueryChange={setQuery}
-            onSubmit={() => {
-              if (selected) void openDetail(selected);
+            onSubmit={(searchQuery) => {
+              if (selected) openSearchResult(selected, searchQuery);
             }}
           />
           <div className="toolbar-filters">

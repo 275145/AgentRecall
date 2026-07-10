@@ -12,16 +12,23 @@ function sourceBlock(startNeedle: string, endNeedles: string[]): string {
 }
 
 describe("app loading performance", () => {
-  it("keeps recent history and two-step Enter behavior inside the isolated search box", () => {
+  it("keeps recent history inside the isolated search box without adding a submit state", () => {
     const searchBox = sourceBlock("const SearchBox = forwardRef", ["export function App"]);
     expect(searchBox).toContain("readSearchHistory(window.localStorage)");
-    expect(searchBox).toContain("recordSearch(window.localStorage");
     expect(searchBox).toContain("deleteSearch(window.localStorage");
     expect(searchBox).toContain("clearSearchHistory(window.localStorage)");
     expect(searchBox).toContain("recent-search-dropdown");
-    expect(searchBox).toContain("trimmed === lastSubmittedRef.current");
-    expect(searchBox).toContain("onQueryChange(value)");
+    expect(searchBox).toContain("onSubmit(value)");
+    expect(searchBox).not.toContain("lastSubmittedRef");
+    expect(searchBox).not.toContain("recordSearch(");
     expect(searchBox).toContain("selectRecentSearch(query)");
+  });
+
+  it("records a non-empty query only when a search result is actually opened", () => {
+    const openSearchResult = sourceBlock("function openSearchResult", ["function closeDetail"]);
+    expect(openSearchResult).toContain("searchQuery.trim()");
+    expect(openSearchResult).toContain("recordSearch(window.localStorage, readSearchHistory(window.localStorage), normalizedQuery)");
+    expect(openSearchResult).toContain("void openDetail(session)");
   });
 
   it("keeps session search isolated from sidebar metadata and stats refreshes", () => {

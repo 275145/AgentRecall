@@ -11,7 +11,7 @@ This change adds:
 - up to 10 recent non-empty searches stored locally;
 - a recent-search dropdown when the empty search input receives focus;
 - click-to-run, per-item deletion, and clear-all actions;
-- first-Enter search submission and second-Enter selected-session opening;
+- recording a non-empty query when it actually leads to opening a search result;
 - case-insensitive standalone `AND` as an alias for the existing implicit AND behavior.
 
 It does not add quoted phrases, exclusion operators, role search, cloud synchronization, or a general query parser.
@@ -51,17 +51,16 @@ A `Clear recent searches / 清空最近搜索` action removes all entries. The d
 
 No dropdown is shown when history is empty.
 
-## Enter Behavior
+## Open and Record Behavior
 
-The search box tracks the last explicitly submitted normalized input.
+Search remains live and has no separate submission state.
 
-- For a non-empty value different from the last submitted value, Enter immediately cancels the debounce timer, commits the value, records it, and does not open a session.
-- For the same non-empty value, the next Enter invokes the existing selected-session open action.
-- Changing the typed value resets the second-Enter eligibility.
-- Choosing a recent search counts as a submitted search; a following Enter may open the selected result.
-- With an empty value, Enter keeps the existing behavior and opens the selected session without recording history.
-
-Normalization for this comparison trims only outer whitespace; it does not rewrite the user's displayed query.
+- Enter always keeps the existing behavior and opens the selected session immediately.
+- Double-clicking a result or using the existing keyboard open action behaves the same way.
+- When a result is actually opened from the main search list and the current query is non-empty, record the trimmed query.
+- Opening a session from unrelated surfaces such as the AI assistant does not record the main search query.
+- Choosing a recent search only fills and commits the query so live results refresh; it does not reorder or record the history until a result is opened.
+- Empty searches are never recorded.
 
 ## Explicit AND Semantics
 
@@ -82,10 +81,10 @@ A query containing only `AND` normalizes to an empty query and behaves like an e
 ## Data Flow
 
 1. Typing updates local SearchBox state and retains the existing debounce.
-2. First Enter commits immediately and records the trimmed display query through the history module.
-3. The renderer sends the original display query in `SearchOptions`.
-4. `SessionStore.searchSessionPage` normalizes standalone `AND` before FTS and fallback matching.
-5. Results render through the existing list and selection flow.
+2. The renderer sends the original display query in `SearchOptions`.
+3. `SessionStore.searchSessionPage` normalizes standalone `AND` before FTS and fallback matching.
+4. Results render through the existing list and selection flow.
+5. Opening a main-list result records the trimmed query locally.
 
 ## Error Handling
 
@@ -115,10 +114,10 @@ A query containing only `AND` normalizes to an empty query and behaves like an e
 ### Renderer contract tests
 
 - the dropdown renders history items, deletion, and clear-all controls;
-- first Enter commits and records without opening;
-- second Enter opens the selected session;
-- empty Enter retains the existing open behavior;
-- selecting history immediately commits it.
+- Enter retains the existing immediate-open behavior;
+- opening a main-list result records a non-empty query;
+- opening an unrelated session does not record the current query;
+- selecting history immediately fills and commits the search without recording it.
 
 ## Compatibility
 
