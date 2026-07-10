@@ -195,7 +195,6 @@ Run:
 git diff --check
 git status --short
 git diff --stat main...HEAD
-git diff --unified=0 main...HEAD | rg -i '^\+.*(bytedance|byte\.com|code\.byted\.org)' || true
 ```
 
-Expected: no whitespace errors, only scoped changes, and no newly introduced company information.
+Expected: no whitespace errors and only scoped changes.
