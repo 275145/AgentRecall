@@ -363,7 +363,7 @@ const SearchBox = forwardRef<
   function handleChange(next: string): void {
     if (value.length > 0 && next.length === 0) onSearch("");
     setValue(next);
-    setFocused(true);
+    setFocused(next.length > 0);
   }
 
   function selectRecentSearch(query: string): void {
