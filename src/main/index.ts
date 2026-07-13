@@ -19,7 +19,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import * as os from "node:os";
 import {
   apiProviderPreset,
   mergeApiConfigWithProfileDefaults,
@@ -120,6 +121,7 @@ import {
 import { globalShortcutLabel, normalizeGlobalShortcut } from "../core/shortcuts";
 import { isLocalSessionEnvironment } from "../core/session-environment";
 import type { AppSettings, AppSettingsUpdate } from "../core/platform";
+import type { AppUpdateInstallResult, AppUpdateManifest, AppUpdateStatus } from "../core/app-update-types";
 import type {
   EnvironmentUpsertInput,
   MigrationAgent,
@@ -175,6 +177,21 @@ interface McpSetup {
 }
 function loadMcpSetup(): McpSetup {
   return requireCjs(MCP_SETUP_PATH) as McpSetup;
+}
+
+const UPDATE_CLIENT_PATH = path.join(__dirname, "../../bin/update-client.cjs");
+const APPLY_UPDATE_PATH = path.join(__dirname, "../../bin/apply-update.cjs");
+interface UpdateClientModule {
+  checkForUpdate(options?: { currentVersion?: string; force?: boolean }): Promise<AppUpdateStatus>;
+  clearAppProcess(pid?: number): Promise<void>;
+  currentVersion(): string;
+  parseUpdateManifest(value: unknown): AppUpdateManifest;
+  readInstallStatus(): Promise<{ status?: string; version?: string; error?: string | null } | null>;
+  writeAppProcess(pid?: number): Promise<string>;
+  writeUpdatePreference(enabled: boolean): Promise<void>;
+}
+function loadUpdateClient(): UpdateClientModule {
+  return requireCjs(UPDATE_CLIENT_PATH) as UpdateClientModule;
 }
 
 function ensureSessionSearchMcpPreference(): boolean {
@@ -488,6 +505,8 @@ let remoteWatchManager: RemoteWatchManager | null = null;
 let remoteEnvironmentLifecycle: RemoteEnvironmentLifecycle | null = null;
 let codexChatProxy: CodexChatProxy | null = null;
 let codexChatProxySignature: string | null = null;
+let appUpdateStatus: AppUpdateStatus | null = null;
+let activeAppUpdateCheck: Promise<AppUpdateStatus> | null = null;
 const remoteDetailLoads = new Map<string, Promise<void>>();
 
 const settingsStore = new Store<AppSettings>({
@@ -514,6 +533,67 @@ function getSettings(): AppSettings {
     globalShortcut: normalizeGlobalShortcut(settings.globalShortcut),
     defaultTerminal: normalizeTerminal(settings.defaultTerminal),
   };
+}
+
+function emptyAppUpdateStatus(): AppUpdateStatus {
+  return {
+    currentVersion: loadUpdateClient().currentVersion(),
+    checkedAt: 0,
+    fromCache: false,
+    updateAvailable: false,
+    manifest: null,
+    error: null,
+  };
+}
+
+async function refreshAppUpdateStatus(force = false): Promise<AppUpdateStatus> {
+  if (activeAppUpdateCheck) return activeAppUpdateCheck;
+  activeAppUpdateCheck = loadUpdateClient()
+    .checkForUpdate({ currentVersion: loadUpdateClient().currentVersion(), force })
+    .then(async (status) => {
+      const installStatus = await loadUpdateClient().readInstallStatus().catch(() => null);
+      const nextStatus = installStatus?.status === "error" && installStatus.error
+        ? { ...status, error: `上次更新失败：${installStatus.error}` }
+        : status;
+      appUpdateStatus = nextStatus;
+      mainWindow?.webContents.send("app-update:status", nextStatus);
+      return nextStatus;
+    })
+    .finally(() => {
+      activeAppUpdateCheck = null;
+    });
+  return activeAppUpdateCheck;
+}
+
+async function getAppUpdateStatus(force = false): Promise<AppUpdateStatus> {
+  if (!force && !getSettings().autoCheckUpdates) return appUpdateStatus ?? emptyAppUpdateStatus();
+  if (!force && appUpdateStatus) return appUpdateStatus;
+  return refreshAppUpdateStatus(force);
+}
+
+async function startAppUpdate(): Promise<AppUpdateInstallResult> {
+  const manifest = loadUpdateClient().parseUpdateManifest(appUpdateStatus?.manifest);
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agent-session-search-app-update-"));
+  const manifestPath = path.join(directory, "update.json");
+  await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(process.execPath, [APPLY_UPDATE_PATH, "--manifest", manifestPath, "--wait-pid", String(process.pid)], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    });
+    await new Promise<void>((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+  } catch (error) {
+    await fs.rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+  child.unref();
+  setTimeout(() => app.quit(), 100);
+  return { started: true, version: manifest.version };
 }
 
 function visibleSearchOptions(options: SearchOptions = {}): SearchOptions {
@@ -1686,6 +1766,8 @@ function registerIpc(): void {
   ipcMain.handle("session:delete", (_event, sessionKey: string) => store.deleteSession(sessionKey));
   ipcMain.handle("index:refresh", () => runIndexSync());
   ipcMain.handle("index:status", () => indexStatus);
+  ipcMain.handle("app-update:get-status", (_event, force?: boolean) => getAppUpdateStatus(Boolean(force)));
+  ipcMain.handle("app-update:install", () => startAppUpdate());
   ipcMain.handle("settings:get", () => getHydratedSettings());
   ipcMain.handle("codex-profile:apply", (_event, apiConfig: Partial<ApiConfig>) => applyCodexApiConfigWithProxy(apiConfig));
   ipcMain.handle("claude-profile:apply", (_event, apiConfig: Partial<ClaudeApiConfig>) => applyClaudeApiConfig({ apiConfig }));
@@ -1694,7 +1776,7 @@ function registerIpc(): void {
     await stopCodexChatProxy();
     return null;
   });
-  ipcMain.handle("settings:set", (_event, settings: AppSettingsUpdate) => {
+  ipcMain.handle("settings:set", async (_event, settings: AppSettingsUpdate) => {
     const previous = getSettings();
     const next = mergeAppSettings(previous, settings);
     if (next.globalShortcut !== previous.globalShortcut && !registerAppGlobalShortcut(next.globalShortcut)) {
@@ -1704,6 +1786,10 @@ function registerIpc(): void {
     }
     persistApiProviderKeysFromUpdate(settings, next);
     settingsStore.set(withoutApiProviderKeys(next));
+    if ("autoCheckUpdates" in settings) {
+      await loadUpdateClient().writeUpdatePreference(next.autoCheckUpdates);
+      if (next.autoCheckUpdates) void refreshAppUpdateStatus(false);
+    }
     pruneDisabledOptionalSources(next);
     return withStoredApiProviderKeys(next);
   });
@@ -1853,6 +1939,8 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.whenReady().then(() => {
+  void loadUpdateClient().writeAppProcess(process.pid).catch((error) => console.error(`Failed to write app process state: ${String(error)}`));
+  void loadUpdateClient().writeUpdatePreference(getSettings().autoCheckUpdates).catch((error) => console.error(`Failed to write update preference: ${String(error)}`));
   const dbPath = path.join(app.getPath("userData"), "session-search.sqlite");
   store = new SessionStore(dbPath);
   // Publish the live database path so the standalone MCP server can find it.
@@ -1881,6 +1969,7 @@ app.whenReady().then(() => {
   setTimeout(() => void runIndexSync(), INITIAL_INDEX_DELAY_MS);
   startAutoIndexRefresh();
   startAutoSkillUsageRefresh();
+  if (getSettings().autoCheckUpdates) setTimeout(() => void refreshAppUpdateStatus(false), 1_000);
 });
 
 app.on("window-all-closed", () => {
@@ -1892,6 +1981,7 @@ app.on("activate", () => {
 });
 
 app.on("before-quit", () => {
+  void loadUpdateClient().clearAppProcess(process.pid).catch(() => undefined);
   stopAutoIndexRefresh();
   stopAutoSkillUsageRefresh();
   remoteEnvironmentLifecycle?.stopAll();

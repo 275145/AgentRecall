@@ -6,6 +6,7 @@ import {
   ArrowRightLeft,
   Activity,
   CalendarDays,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clipboard,
@@ -21,6 +22,7 @@ import {
   Gauge,
   GitBranch,
   History,
+  Info,
   KeyRound,
   Keyboard,
   Languages,
@@ -45,6 +47,7 @@ import {
 } from "lucide-react";
 import type { ApiConfig, ClaudeApiConfig } from "../../core/api-config";
 import type { IndexStatus } from "../../core/indexer";
+import type { AppUpdateStatus } from "../../core/app-update-types";
 import { formatRelativeTime } from "../../core/format-session";
 import { LIVE_SESSION_REFRESH_INTERVAL_MS, QUOTA_REFRESH_INTERVAL_MS } from "../../core/refresh-policy";
 import type { AppSettings, AppSettingsUpdate } from "../../core/platform";
@@ -170,6 +173,7 @@ const DEFAULT_MIGRATION_TARGET_SETTINGS = {
 } satisfies MigrationTargetSettings;
 
 type ViewMode = "default" | "favorites" | "pinned" | "hidden";
+type SettingsSection = "terminal" | "shortcut" | "connections" | "sources" | "usage" | "ai" | "remote" | "skills" | "appearance" | "about";
 type PendingSourceKey = "claude" | "codex" | "tclaude" | "tcodex" | "codebuddy" | "openclaw" | "hermes" | "opencode" | "cursor" | "trae";
 type OptionalSourceSettingKey = keyof Pick<
   AppSettings,
@@ -503,6 +507,10 @@ export function App(): ReactElement {
   const [summarizing, setSummarizing] = useState(false);
   const [refreshFeedback, setRefreshFeedback] = useState<RefreshFeedback>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>("terminal");
+  const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus | null>(null);
+  const [appUpdateBusy, setAppUpdateBusy] = useState(false);
+  const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
   const [sshDialogOpen, setSshDialogOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [apiConfigOpen, setApiConfigOpen] = useState(false);
@@ -996,8 +1004,10 @@ export function App(): ReactElement {
     const offOpenSettings = window.sessionSearch.onOpenSettings(() => {
       setSkillsOpen(false);
       setApiConfigOpen(false);
+      setSettingsInitialSection("terminal");
       setSettingsOpen(true);
     });
+    const offAppUpdate = window.sessionSearch.onAppUpdateStatus(setAppUpdateStatus);
     const offEnvironments = window.sessionSearch.onEnvironmentsUpdated((nextEnvironments) => {
       setEnvironments(nextEnvironments);
       setEnvironmentId((current) =>
@@ -1016,9 +1026,14 @@ export function App(): ReactElement {
       offIndex();
       offFocus();
       offOpenSettings();
+      offAppUpdate();
       offEnvironments();
     };
   }, [load, loadSidebarMetadata, loadStats]);
+
+  useEffect(() => {
+    void window.sessionSearch.getAppUpdateStatus(false).then(setAppUpdateStatus).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     return window.sessionSearch.onMigrationProgress((progress) => {
@@ -1043,6 +1058,7 @@ export function App(): ReactElement {
         setContextMenu(null);
         setSkillsOpen(false);
         setApiConfigOpen(false);
+        setSettingsInitialSection("terminal");
         setSettingsOpen(true);
         return;
       }
@@ -1583,6 +1599,29 @@ export function App(): ReactElement {
     await updateSettings({ globalShortcut });
   }
 
+  async function checkAppUpdate(): Promise<void> {
+    setAppUpdateBusy(true);
+    setAppUpdateError(null);
+    try {
+      setAppUpdateStatus(await window.sessionSearch.getAppUpdateStatus(true));
+    } catch (error) {
+      setAppUpdateError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAppUpdateBusy(false);
+    }
+  }
+
+  async function installAppUpdate(): Promise<void> {
+    setAppUpdateBusy(true);
+    setAppUpdateError(null);
+    try {
+      await window.sessionSearch.installAppUpdate();
+    } catch (error) {
+      setAppUpdateError(error instanceof Error ? error.message : String(error));
+      setAppUpdateBusy(false);
+    }
+  }
+
   async function updateSettings(next: AppSettingsUpdate): Promise<void> {
     const newlyEnabledSources = OPTIONAL_SOURCE_SETTINGS.filter((item) => next[item.key] === true && !appSettings?.[item.key]);
     const quotaVisibilityChanged =
@@ -2104,17 +2143,19 @@ export function App(): ReactElement {
               <KeyRound size={15} />
             </button>
             <button
-              className="icon-button toolbar-icon-button"
+              className={`icon-button toolbar-icon-button ${appUpdateStatus?.updateAvailable ? "update-available" : ""}`}
               onClick={() => {
                 setSkillsOpen(false);
                 setApiConfigOpen(false);
                 setRemoteSessionsOpen(false);
+                setSettingsInitialSection(appUpdateStatus?.updateAvailable ? "about" : "terminal");
                 setSettingsOpen(true);
               }}
-              title={t("Settings", "设置")}
-              aria-label={t("Settings", "设置")}
+              title={appUpdateStatus?.updateAvailable ? t("Update available", "有新版本可用") : t("Settings", "设置")}
+              aria-label={appUpdateStatus?.updateAvailable ? t("Update available", "有新版本可用") : t("Settings", "设置")}
             >
               <Settings size={15} />
+              {appUpdateStatus?.updateAvailable ? <span className="update-indicator" aria-hidden="true" /> : null}
             </button>
           </div>
         </header>
@@ -2378,7 +2419,11 @@ export function App(): ReactElement {
 
       {settingsOpen ? (
         <SettingsDialog
+          initialSection={settingsInitialSection}
           settings={appSettings}
+          appUpdateStatus={appUpdateStatus}
+          appUpdateBusy={appUpdateBusy}
+          appUpdateError={appUpdateError}
           environments={environments}
           environmentHealthReports={environmentHealthReports}
           diagnosingEnvironmentId={diagnosingEnvironmentId}
@@ -2386,6 +2431,8 @@ export function App(): ReactElement {
           language={language}
           feedback={settingsFeedback}
           onSettingsChange={(next) => void updateSettings(next)}
+          onCheckAppUpdate={() => void checkAppUpdate()}
+          onInstallAppUpdate={() => void installAppUpdate()}
           onThemeChange={setTheme}
           onLanguageChange={setLanguage}
           onDefaultTerminalChange={(terminal) => void updateDefaultTerminal(terminal)}
@@ -2875,8 +2922,35 @@ function ContextMenu({
   );
 }
 
+function UpdateBrandMark(): ReactElement {
+  return (
+    <svg className="update-brand-mark" viewBox="0 0 96 96" aria-hidden="true">
+      <defs>
+        <linearGradient id="update-brand-gradient" x1="14" y1="8" x2="82" y2="88" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#1687ff" />
+          <stop offset="0.55" stopColor="#3d63ed" />
+          <stop offset="1" stopColor="#7047d7" />
+        </linearGradient>
+        <radialGradient id="update-brand-glow" cx="0" cy="0" r="1" gradientTransform="translate(25 20) rotate(46) scale(69)">
+          <stop stopColor="#ffffff" stopOpacity="0.32" />
+          <stop offset="0.62" stopColor="#ffffff" stopOpacity="0" />
+        </radialGradient>
+      </defs>
+      <rect x="3" y="3" width="90" height="90" rx="27" fill="url(#update-brand-gradient)" />
+      <rect x="3" y="3" width="90" height="90" rx="27" fill="url(#update-brand-glow)" />
+      <circle cx="43" cy="41" r="21" fill="none" stroke="#ffffff" strokeWidth="6" />
+      <path d="M58.5 56.5 73 71" fill="none" stroke="#ffffff" strokeWidth="7" strokeLinecap="round" />
+      <path d="m35.5 33.5 7.5 7.5-7.5 7.5M47.5 49h8.5" fill="none" stroke="#ffffff" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function SettingsDialog({
+  initialSection,
   settings,
+  appUpdateStatus,
+  appUpdateBusy,
+  appUpdateError,
   environments,
   environmentHealthReports,
   diagnosingEnvironmentId,
@@ -2884,6 +2958,8 @@ function SettingsDialog({
   language,
   feedback,
   onSettingsChange,
+  onCheckAppUpdate,
+  onInstallAppUpdate,
   onThemeChange,
   onLanguageChange,
   onDefaultTerminalChange,
@@ -2899,7 +2975,11 @@ function SettingsDialog({
   onOpenRemoteSessions,
   onClose,
 }: {
+  initialSection: SettingsSection;
   settings: AppSettings | null;
+  appUpdateStatus: AppUpdateStatus | null;
+  appUpdateBusy: boolean;
+  appUpdateError: string | null;
   environments: SessionEnvironment[];
   environmentHealthReports: Record<string, RemoteHealthReport>;
   diagnosingEnvironmentId: string | null;
@@ -2907,6 +2987,8 @@ function SettingsDialog({
   language: LanguageMode;
   feedback: SettingsFeedback;
   onSettingsChange: (settings: AppSettingsUpdate) => void;
+  onCheckAppUpdate: () => void;
+  onInstallAppUpdate: () => void;
   onThemeChange: (theme: ThemeMode) => void;
   onLanguageChange: (language: LanguageMode) => void;
   onDefaultTerminalChange: (terminal: AppSettings["defaultTerminal"]) => void;
@@ -2977,7 +3059,7 @@ function SettingsDialog({
     }
   }
   const l = (en: string, zh: string) => localize(language, en, zh);
-  const [activeSection, setActiveSection] = useState<"terminal" | "shortcut" | "connections" | "sources" | "usage" | "ai" | "remote" | "skills" | "appearance">("terminal");
+  const [activeSection, setActiveSection] = useState<SettingsSection>(initialSection);
 
   return (
     <div className="dialog-backdrop" onMouseDown={onClose}>
@@ -3025,6 +3107,11 @@ function SettingsDialog({
             <button className={activeSection === "appearance" ? "active" : ""} onClick={() => setActiveSection("appearance")}>
               <Sun size={15} />
               <span>{l("Appearance", "外观")}</span>
+            </button>
+            <button className={activeSection === "about" ? "active" : ""} onClick={() => setActiveSection("about")}>
+              <Info size={15} />
+              <span>{l("About", "关于")}</span>
+              {appUpdateStatus?.updateAvailable ? <span className="settings-update-dot" aria-hidden="true" /> : null}
             </button>
           </nav>
           <div className="settings-content">
@@ -3620,6 +3707,84 @@ function SettingsDialog({
                     </button>
                   </div>
                 </div>
+              </section>
+            ) : null}
+            {activeSection === "about" ? (
+              <section className="settings-pane update-about-pane">
+                <div className="update-app-identity">
+                  <UpdateBrandMark />
+                  <h3>Agent-Session-Search</h3>
+                  <p>v{appUpdateStatus?.currentVersion ?? "0.0.0"}</p>
+                </div>
+
+                {appUpdateStatus?.updateAvailable && appUpdateStatus.manifest ? (
+                  <>
+                    <div className="update-version-pill">
+                      <span>v{appUpdateStatus.currentVersion}</span>
+                      <span aria-hidden="true">→</span>
+                      <strong>v{appUpdateStatus.manifest.version}</strong>
+                    </div>
+                    <div className="update-release-card">
+                      <h4>{appUpdateStatus.manifest.title}</h4>
+                      {appUpdateStatus.manifest.notes.features.length > 0 ? (
+                        <div>
+                          <strong>{l("New features", "新增功能")}</strong>
+                          <ul>{appUpdateStatus.manifest.notes.features.map((item) => <li key={`feature:${item}`}>{item}</li>)}</ul>
+                        </div>
+                      ) : null}
+                      {appUpdateStatus.manifest.notes.fixes.length > 0 ? (
+                        <div>
+                          <strong>{l("Bug fixes", "Bug 修复")}</strong>
+                          <ul>{appUpdateStatus.manifest.notes.fixes.map((item) => <li key={`fix:${item}`}>{item}</li>)}</ul>
+                        </div>
+                      ) : null}
+                    </div>
+                    <button type="button" className="update-primary-button" disabled={appUpdateBusy} onClick={onInstallAppUpdate}>
+                      {appUpdateBusy ? l("Preparing update...", "正在准备更新...") : l("Update now", "立即更新")}
+                    </button>
+                    {appUpdateError || appUpdateStatus.error ? <div className="update-current-state error">{appUpdateError || appUpdateStatus.error}</div> : null}
+                  </>
+                ) : (
+                  <div
+                    className={`update-current-state ${
+                      appUpdateError || appUpdateStatus?.error ? "error" : appUpdateBusy ? "checking" : "latest"
+                    }`}
+                  >
+                    <span className="update-state-icon" aria-hidden="true">
+                      {appUpdateBusy ? <RefreshCw size={19} className="spin" /> : appUpdateError || appUpdateStatus?.error ? <Info size={19} /> : <CheckCircle2 size={20} />}
+                    </span>
+                    <span className="update-state-copy">
+                      <strong>
+                        {appUpdateBusy
+                          ? l("Checking for updates...", "正在检查更新...")
+                          : appUpdateError || appUpdateStatus?.error || l("You're up to date", "当前已是最新版本")}
+                      </strong>
+                      {!appUpdateBusy && !appUpdateError && !appUpdateStatus?.error ? (
+                        <span>{l("Automatic checks will keep you on the newest release.", "自动检查会让你及时获取后续新版本。")}</span>
+                      ) : null}
+                    </span>
+                  </div>
+                )}
+
+                <div className="update-about-actions">
+                  <button type="button" className="settings-action-button" disabled={appUpdateBusy} onClick={onCheckAppUpdate}>
+                    <RefreshCw size={14} className={appUpdateBusy ? "spin" : ""} />
+                    {l("Check for updates", "检查更新")}
+                  </button>
+                </div>
+                <label className="settings-field settings-toggle update-auto-check">
+                  <div className="settings-field-text">
+                    <span className="settings-field-title">{l("Automatically check for updates", "自动检查更新")}</span>
+                    <span className="settings-field-sub">{l("The terminal and App share one daily GitHub check.", "终端与 App 共用每天一次的 GitHub 检查结果。")}</span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    className="switch"
+                    checked={Boolean(settings?.autoCheckUpdates)}
+                    disabled={!settings || saving}
+                    onChange={(event) => onSettingsChange({ autoCheckUpdates: event.currentTarget.checked })}
+                  />
+                </label>
               </section>
             ) : null}
           </div>

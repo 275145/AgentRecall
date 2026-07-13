@@ -1320,8 +1320,21 @@ select:focus-visible {
 }
 
 .toolbar-icon-button {
+  position: relative;
   width: 38px;
   height: 38px;
+}
+
+.update-indicator {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid var(--panel-bg);
+  border-radius: 999px;
+  background: var(--danger);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 18%, transparent);
 }
 
 .toolbar-icon-button.active {
@@ -3356,6 +3369,16 @@ select:focus-visible {
   background: var(--accent);
 }
 
+.settings-sidebar button .settings-update-dot {
+  width: 7px;
+  min-width: 7px;
+  height: 7px;
+  margin-left: auto;
+  overflow: visible;
+  border-radius: 999px;
+  background: var(--danger);
+}
+
 .settings-content {
   display: grid;
   align-content: start;
@@ -3369,6 +3392,184 @@ select:focus-visible {
 .settings-pane {
   display: grid;
   gap: 13px;
+}
+
+.update-about-pane {
+  justify-items: center;
+  gap: 16px;
+  padding: 12px 4px 4px;
+}
+
+.update-app-identity {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+}
+
+.update-brand-mark {
+  width: 82px;
+  height: 82px;
+  margin-bottom: 5px;
+  overflow: visible;
+  filter: drop-shadow(0 15px 19px rgba(44, 89, 212, 0.2));
+}
+
+.update-app-identity h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 22px;
+  letter-spacing: -0.5px;
+}
+
+.update-app-identity p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.update-version-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-bg);
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.update-version-pill strong {
+  color: var(--text);
+}
+
+.update-release-card {
+  display: grid;
+  width: min(100%, 520px);
+  max-height: 250px;
+  gap: 14px;
+  overflow-y: auto;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-bg);
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.update-release-card h4,
+.update-release-card p,
+.update-release-card ul {
+  margin: 0;
+}
+
+.update-release-card h4 {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.update-release-card ul {
+  padding-left: 20px;
+}
+
+.update-primary-button {
+  width: min(100%, 300px);
+  min-height: 42px;
+  border: 1px solid var(--accent-line);
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.update-primary-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 20%, var(--panel-bg));
+}
+
+.update-current-state {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(100%, 520px);
+  min-height: 72px;
+  padding: 14px 17px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel-bg);
+  color: var(--text-dim);
+  text-align: left;
+}
+
+.update-current-state.latest {
+  border-color: color-mix(in srgb, var(--success-text) 24%, var(--border));
+  background: linear-gradient(120deg, var(--success-bg), color-mix(in srgb, var(--success-bg) 35%, var(--panel-bg)));
+}
+
+.update-state-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  min-width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: var(--panel-bg);
+  color: var(--success-text);
+  box-shadow: 0 5px 16px color-mix(in srgb, var(--success-text) 12%, transparent);
+}
+
+.update-current-state.checking .update-state-icon {
+  color: var(--accent-bright);
+}
+
+.update-state-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.update-state-copy strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.update-state-copy > span {
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.update-current-state.error {
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.update-current-state.error .update-state-icon {
+  color: var(--danger);
+}
+
+.update-about-actions {
+  display: flex;
+  justify-content: center;
+}
+
+.update-about-actions .settings-action-button {
+  height: 34px;
+  padding: 0 13px;
+  border-radius: 999px;
+  background: var(--panel-subtle);
+}
+
+.update-auto-check {
+  width: min(100%, 520px);
+  border-radius: 14px;
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
 }
 
 .settings-pane-head h3 {

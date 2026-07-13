@@ -5,6 +5,7 @@ import type { ApplyClaudeProfileResult } from "../core/claude-profile";
 import type { CodexChatProxyStatus } from "../core/codex-chat-proxy";
 import type { ApplyCodexProfileResult } from "../core/codex-profile";
 import type { AppSettings, AppSettingsUpdate } from "../core/platform";
+import type { AppUpdateInstallResult, AppUpdateStatus } from "../core/app-update-types";
 import type { IndexStatus } from "../core/indexer";
 import type { RemoteHealthReport } from "../core/remote-health";
 import type {
@@ -90,6 +91,8 @@ const api = {
   deleteSession: (sessionKey: string): Promise<boolean> => ipcRenderer.invoke("session:delete", sessionKey),
   refreshIndex: (): Promise<IndexStatus> => ipcRenderer.invoke("index:refresh"),
   getIndexStatus: (): Promise<IndexStatus> => ipcRenderer.invoke("index:status"),
+  getAppUpdateStatus: (force = false): Promise<AppUpdateStatus> => ipcRenderer.invoke("app-update:get-status", force),
+  installAppUpdate: (): Promise<AppUpdateInstallResult> => ipcRenderer.invoke("app-update:install"),
   getSettings: (): Promise<AppSettings> => ipcRenderer.invoke("settings:get"),
   setSettings: (settings: AppSettingsUpdate): Promise<AppSettings> => ipcRenderer.invoke("settings:set", settings),
   applyCodexProfile: (apiConfig: ApiConfig): Promise<ApplyCodexProfileResult> => ipcRenderer.invoke("codex-profile:apply", apiConfig),
@@ -136,6 +139,11 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, status: IndexStatus) => callback(status);
     ipcRenderer.on("index-status", listener);
     return () => ipcRenderer.removeListener("index-status", listener);
+  },
+  onAppUpdateStatus: (callback: (status: AppUpdateStatus) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, status: AppUpdateStatus) => callback(status);
+    ipcRenderer.on("app-update:status", listener);
+    return () => ipcRenderer.removeListener("app-update:status", listener);
   },
   onMigrationProgress: (callback: (progress: SessionMigrationProgress) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: SessionMigrationProgress) => callback(progress);
