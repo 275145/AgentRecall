@@ -390,8 +390,9 @@ export class SessionStore {
       .all(environmentId) as Array<{ filePath: string; fileMtimeMs: number; fileSize: number; indexedAt: number }>;
   }
 
-  upsertIndexedSessionSummary(session: IndexedSession, messageCount: number): void {
-    const tokenUsage = normalizeTokenUsage(session.tokenUsage);
+  upsertIndexedSessionSummary(session: IndexedSession, messageCount: number, tokenEvents?: TokenUsageEvent[]): void {
+    const normalizedTokenEvents = tokenEvents?.map(normalizeTokenEvent).filter((event) => event.totalTokens > 0 && event.dedupeKey);
+    const tokenUsage = normalizedTokenEvents === undefined ? normalizeTokenUsage(session.tokenUsage) : tokenUsageFromEvents(normalizedTokenEvents);
     const indexedAt = Date.now();
     this.transaction(() => {
       this.db
@@ -447,6 +448,31 @@ export class SessionStore {
           tokenUsage.totalTokens,
           indexedAt,
         );
+
+      if (normalizedTokenEvents !== undefined) {
+        this.db.prepare("DELETE FROM token_events WHERE session_key = ?").run(session.sessionKey);
+        const insertTokenEvent = this.db.prepare(
+          `
+          INSERT INTO token_events (
+            session_key, dedupe_key, timestamp, input_tokens, output_tokens,
+            cached_input_tokens, reasoning_output_tokens, total_tokens
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        );
+        for (const event of normalizedTokenEvents) {
+          insertTokenEvent.run(
+            session.sessionKey,
+            event.dedupeKey,
+            event.timestamp,
+            event.inputTokens,
+            event.outputTokens,
+            event.cachedInputTokens,
+            event.reasoningOutputTokens,
+            event.totalTokens,
+          );
+        }
+      }
 
       this.refreshFtsForSession(session.sessionKey);
       const branchTag = branchTagName(session.gitBranch);

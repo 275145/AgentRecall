@@ -17,7 +17,7 @@
 - Modify: `src/core/remote-sync.ts`
 - Modify: `src/core/session-store.ts`
 
-- [ ] **Step 1: Write failing remote-statistics and compatibility tests**
+- [x] **Step 1: Write failing remote-statistics and compatibility tests**
 
 Add tests that send a lightweight summary containing two timestamped `tokenEvents`, assert Today and All-time totals, insert a local mirror with the same dedupe key to assert global deduplication, and resync an old summary without `tokenEvents` to assert existing events are preserved. Add a separate invalid-payload test with a string timestamp and assert the sync rejects with a `tokenEvents` error.
 
@@ -47,13 +47,13 @@ expect(store.getStats({ period: "today" }, now).total.totalTokens).toBe(115);
 expect(store.getStats({ period: "allTime" }, now).total.totalTokens).toBe(155);
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `npm test -- src/core/remote-sync.test.ts`
 
 Expected: FAIL because `parseRemoteSummaryRecord` discards `tokenEvents`, so the remote totals are absent from period statistics and malformed events are not rejected.
 
-- [ ] **Step 3: Extend the wire type and validate events**
+- [x] **Step 3: Extend the wire type and validate events**
 
 Import `TokenUsageEvent`, add `tokenEvents?: TokenUsageEvent[]` to `RemoteSessionSummaryPayload`, and parse the optional array strictly. Each item must be an object with a finite non-negative timestamp, non-empty dedupe key, finite non-negative token buckets, and a total equal to the sum of the buckets.
 
@@ -68,7 +68,7 @@ function tokenEventsField(value: Record<string, unknown>, key: string, lineNumbe
 
 Pass the parsed field through `parseRemoteSummaryRecord` and `syncRemoteEnvironment`.
 
-- [ ] **Step 4: Store summary events transactionally**
+- [x] **Step 4: Store summary events transactionally**
 
 Change the method signature to:
 
@@ -78,7 +78,7 @@ upsertIndexedSessionSummary(session: IndexedSession, messageCount: number, token
 
 When the argument is defined, normalize it, derive the session aggregate from those events, delete the session's previous `token_events`, and insert the replacements inside the existing summary transaction. When it is undefined, retain existing events and use `session.tokenUsage`, preserving compatibility with older summaries.
 
-- [ ] **Step 5: Run the focused test and verify GREEN**
+- [x] **Step 5: Run the focused test and verify GREEN**
 
 Run: `npm test -- src/core/remote-sync.test.ts`
 
@@ -90,7 +90,7 @@ Expected: PASS.
 - Modify: `src/core/remote-sync.test.ts`
 - Modify: `src/core/remote-sync.ts`
 
-- [ ] **Step 1: Write a failing collector integration test**
+- [x] **Step 1: Write a failing collector integration test**
 
 Capture and decode the Python collector command, execute it with a temporary HOME containing a Codex JSONL session with two cumulative token-count rows, and assert the emitted summary contains two events with the original timestamps, stable `codex-total` keys, delta totals, and an aggregate equal to the final cumulative total.
 
@@ -102,13 +102,13 @@ expect(summary.tokenUsage.totalTokens).toBe(200);
 
 Use `fs.rmSync(tempHome, { recursive: true, force: true })` in `finally`.
 
-- [ ] **Step 2: Run the collector test and verify RED**
+- [x] **Step 2: Run the collector test and verify RED**
 
 Run: `npm test -- src/core/remote-sync.test.ts -t "emits timestamped remote token events"`
 
 Expected: FAIL because the collector currently emits only aggregate `tokenUsage`.
 
-- [ ] **Step 3: Add timestamped event construction to the Python collector**
+- [x] **Step 3: Add timestamped event construction to the Python collector**
 
 Add a timestamp parser equivalent to the TypeScript loader, store full event records in `_tok_put`, and make Codex choose cumulative delta events when available or last-usage events otherwise. Match the local dedupe keys exactly:
 
@@ -121,7 +121,7 @@ key = "codex-total:%s:%s:%s:%s:%s:%s" % (
 
 For Claude, attach the row timestamp to the existing `claude-code:<message-or-row-id>` event. Emit both `tokenUsage` and `tokenEvents` from `emit_codex_summary` and `emit_claude_summary`.
 
-- [ ] **Step 4: Run the focused collector test and verify GREEN**
+- [x] **Step 4: Run the focused collector test and verify GREEN**
 
 Run: `npm test -- src/core/remote-sync.test.ts -t "emits timestamped remote token events"`
 
@@ -132,31 +132,31 @@ Expected: PASS.
 **Files:**
 - Modify: `docs/superpowers/plans/2026-07-13-remote-session-token-events.md`
 
-- [ ] **Step 1: Run all remote and store tests**
+- [x] **Step 1: Run all remote and store tests**
 
 Run: `npm test -- src/core/remote-sync.test.ts src/core/session-store.test.ts src/core/remote-session-loader.test.ts`
 
 Expected: all tests pass with no warnings.
 
-- [ ] **Step 2: Run the complete test suite**
+- [x] **Step 2: Run the complete test suite**
 
 Run: `npm test`
 
 Expected: all tests pass.
 
-- [ ] **Step 3: Run type checking and production build**
+- [x] **Step 3: Run type checking and production build**
 
 Run: `npm run build`
 
 Expected: TypeScript, MCP bundle, main/preload, and renderer builds succeed.
 
-- [ ] **Step 4: Check the final diff**
+- [x] **Step 4: Check the final diff**
 
 Run: `git diff --check && git status --short`
 
 Expected: no whitespace errors; only the planned source, test, and plan files are modified.
 
-- [ ] **Step 5: Commit the implementation**
+- [x] **Step 5: Commit the implementation**
 
 ```bash
 git add src/core/remote-sync.ts src/core/remote-sync.test.ts src/core/session-store.ts docs/superpowers/plans/2026-07-13-remote-session-token-events.md
