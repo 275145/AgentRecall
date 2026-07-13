@@ -25,6 +25,15 @@ test("rejects missing and vague release notes", () => {
   assert.throws(() => parseReleaseNote("# Vague\n\n## Bug 修复\n\n- 修复一些问题\n"), /vague/);
 });
 
+test("repository guidance treats release notes as sanitized product copy", async () => {
+  const instructions = await readFile("AGENTS.md", "utf8");
+  const templateGuidance = await readFile(".release-notes/README.md", "utf8");
+  assert.match(instructions, /product copy for end users, not engineering change logs/);
+  assert.match(instructions, /Remove internal-only changes entirely/);
+  assert.match(instructions, /omit identifiers, hosts, paths, table names, credentials/);
+  assert.match(templateGuidance, /Write this as product copy for users, not as an engineering log/);
+});
+
 test("bumps minor for features and patch for fix-only releases", () => {
   const feature = { title: "Feature", features: ["New behavior"], fixes: [] };
   const fix = { title: "Fix", features: [], fixes: ["Fixed behavior"] };
