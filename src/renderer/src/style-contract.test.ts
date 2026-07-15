@@ -122,7 +122,10 @@ describe("stylesheet theme contract", () => {
     expect(toolbar).toMatch(/display:\s*grid/);
     expect(toolbar).toMatch(/position:\s*relative/);
     expect(toolbar).toMatch(/z-index:\s*5/);
-    expect(toolbar).toMatch(/grid-template-columns:\s*minmax\(180px,\s*1fr\)\s+minmax\(0,\s*min\(660px,\s*48vw\)\)\s+auto/);
+    expect(toolbar).toMatch(/--toolbar-filter-track:\s*388px/);
+    expect(toolbar).toMatch(/grid-template-columns:\s*minmax\(180px,\s*1fr\)\s+minmax\(0,\s*min\(var\(--toolbar-filter-track\),\s*48vw\)\)\s+auto/);
+    expect(stylesheet).toMatch(/\.toolbar\[data-scope-count="1"\]\s*\{[^}]*--toolbar-filter-track:\s*556px/);
+    expect(stylesheet).toMatch(/\.toolbar\[data-scope-count="2"\],[\s\S]*?\.toolbar\[data-scope-count="3"\]\s*\{[^}]*--toolbar-filter-track:\s*636px/);
     expect(toolbarFilters).toMatch(/--live-filter-width:\s*166px/);
     expect(toolbarFilters).toMatch(/--date-filter-width:\s*214px/);
     expect(toolbarFilters).toMatch(/width:\s*100%/);

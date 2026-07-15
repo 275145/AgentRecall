@@ -1292,12 +1292,22 @@ select:focus-visible {
 }
 
 .toolbar {
+  --toolbar-filter-track: 388px;
   position: relative;
   z-index: 5;
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(0, min(660px, 48vw)) auto;
+  grid-template-columns: minmax(180px, 1fr) minmax(0, min(var(--toolbar-filter-track), 48vw)) auto;
   align-items: center;
   gap: 8px;
+}
+
+.toolbar[data-scope-count="1"] {
+  --toolbar-filter-track: 556px;
+}
+
+.toolbar[data-scope-count="2"],
+.toolbar[data-scope-count="3"] {
+  --toolbar-filter-track: 636px;
 }
 
 .toolbar-filters {

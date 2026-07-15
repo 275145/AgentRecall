@@ -2080,7 +2080,7 @@ export function App(): ReactElement {
       </section>
 
       <section className="content">
-        <header className="toolbar">
+        <header className="toolbar" data-scope-count={activeScopeFilters.length}>
           <SearchBox
             ref={searchRef}
             placeholder={searchPlaceholder}
