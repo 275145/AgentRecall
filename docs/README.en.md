@@ -78,11 +78,11 @@ This version is designed for **single-user, manual snapshot sync**:
 
 1. Create or select a project in the [Supabase Dashboard](https://supabase.com/dashboard).
 2. Copy the Project URL and anon key from Project Settings -> API.
-3. In the app, open Settings -> Remote sync, paste the Supabase URL and anon key, and enable remote session sync.
-4. Open Remote Sessions from the cloud icon in the top toolbar, then click Copy SQL.
-5. Paste the copied SQL into the Supabase SQL Editor and run it once.
+3. In the app, open Settings -> Remote sync and paste the Supabase URL and anon key.
+4. Under First-time setup, click Copy latest SQL and then Open SQL Editor. The app opens the SQL Editor for the configured project.
+5. Paste and run the SQL, return to the app, and enable remote sync. If Session sync or Skills later reports that the schema or permissions need an update, run the latest SQL offered there and click Refresh.
 
-The setup SQL creates:
+The first-time script initializes both session and Skill sync. For session sync it creates:
 
 - Table: `public.agent_session_remote_sessions`
 - Storage bucket: `agent-session-remote`
@@ -121,8 +121,8 @@ To sync your personal skills between machines, enable Settings -> Skills -> Supa
 
 1. Create or select a project in the [Supabase Dashboard](https://supabase.com/dashboard).
 2. Copy the Project URL and anon key from Project Settings -> API.
-3. Paste them into Settings -> Skills and enable Supabase sync.
-4. If the remote table does not exist yet, open the Remote view in the Skills window, click Copy setup SQL, and run it once in the Supabase SQL Editor.
+3. Paste them into Settings -> Skills. First-time setup offers the same combined script used by session sync and opens the configured project's SQL Editor directly.
+4. Run the SQL and enable sync. If the table, Storage bucket, columns, or permissions later need an update, the Local view offers the latest Skill SQL, an Open SQL Editor action, and an in-place Refresh action.
 5. In the Local view, select a local skill and click Upload. A stable fingerprint identifies skills by agent and name. Each upload that actually changes the content adds a new version (v1, v2, …); uploads with unchanged content are skipped, and if the latest remote version came from a different same-named skill you are asked to confirm before appending a version.
 6. On another machine, configure the same Supabase URL and anon key, open the Remote view, pick a version from the dropdown to preview any point in history (the newest is tagged latest), then click Install locally / Update local to install that version.
 

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import {
   createMcpTemporarySessionCleaner,
   loadMcpSourceSession,
@@ -20,9 +20,17 @@ import { migrationTargetDescriptor } from "./migration-targets";
 import { defaultSettings } from "./platform";
 import type { IndexedSession, MigrationTarget, SessionMessage, SessionMigrationStrategy, SessionSource } from "./types";
 
+const temporaryProjectDirectories = new Set<string>();
+
 function makeProjectDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "mcp-mig-project-"));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-mig-project-"));
+  temporaryProjectDirectories.add(directory);
+  return directory;
 }
+
+afterAll(() => {
+  for (const directory of temporaryProjectDirectories) fs.rmSync(directory, { recursive: true, force: true });
+});
 
 function seedLocalSession(
   store: ReturnType<typeof createInMemoryStore>,

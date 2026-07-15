@@ -139,6 +139,7 @@ export function DetailPanel({
   onDelete,
   onReveal,
   readOnly = false,
+  backdropClassName = "",
 }: {
   session: SessionSearchResult;
   messages: SessionMessage[];
@@ -176,6 +177,7 @@ export function DetailPanel({
   onDelete: () => void;
   onReveal: () => void;
   readOnly?: boolean;
+  backdropClassName?: string;
 }): ReactElement {
   const context = matchedContextMessages;
   const actionRunning = actionStatus?.kind === "running";
@@ -357,7 +359,7 @@ export function DetailPanel({
   }, [panelSearchOpen]);
 
   return (
-    <div className="detail-backdrop" onClick={onClose}>
+    <div className={`detail-backdrop ${backdropClassName}`.trim()} onClick={onClose}>
       <aside className="detail" onClick={(event) => event.stopPropagation()}>
         <div className="detail-header">
           <div>

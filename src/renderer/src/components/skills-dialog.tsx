@@ -2,12 +2,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactElement } from "react";
 import { Copy, Download, FolderOpen, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
 import type { RemoteSkill, RemoteSkillGroup, RemoteSkillVersion, SkillSyncSnapshot, SkillSyncUploadConflict, SkillSyncUploadOutcome } from "../../../core/skill-sync";
+import type { SkillDiffSnapshot } from "../../../core/skill-diff";
 import type { InstalledSkill, InstalledSkillsSnapshot, SkillRootStatus, SkillSource } from "../../../core/skill-manager";
 import { formatCompactNumber } from "../format-count";
 import { localize, type LanguageMode } from "../language";
-import { filterInstalledSkills, sortInstalledSkills, skillSourceLabel, type SkillSortKey, type SkillSourceFilter } from "../skill-manager";
+import { Markdown } from "../lightweight-markdown";
+import { skillSourceLabel, type SkillSortKey, type SkillSourceFilter } from "../skill-manager";
+import { buildUnifiedSkillEntries, type UnifiedSkillEntry } from "../skill-sync-view-model";
 import type { SkillsFeedback } from "../app-types";
 import { useClampedContextMenuStyle } from "../context-menu-position";
+import { SupabaseSetupGuide } from "./supabase-setup-guide";
 
 export function SkillsDialog({
   snapshot,
@@ -23,6 +27,7 @@ export function SkillsDialog({
   onFetchVersion,
   onRefreshRemote,
   onCopySetupSql,
+  onOpenSqlEditor,
   onCopyPath,
   onReveal,
   onDelete,
@@ -41,6 +46,7 @@ export function SkillsDialog({
   onFetchVersion: (remoteSkillId: string) => Promise<RemoteSkill>;
   onRefreshRemote: () => void;
   onCopySetupSql: () => void;
+  onOpenSqlEditor: () => void | Promise<void>;
   onCopyPath: (skillPath: string) => void;
   onReveal: (skillPath: string) => void;
   onDelete: (skill: InstalledSkill) => Promise<void>;
@@ -48,78 +54,94 @@ export function SkillsDialog({
 }): ReactElement {
   const l = (en: string, zh: string) => localize(language, en, zh);
   const [query, setQuery] = useState("");
-  const [syncView, setSyncView] = useState<"local" | "remote">("local");
+  const [detailView, setDetailView] = useState<"local" | "remote" | "diff">("local");
   const [sourceFilter, setSourceFilter] = useState<SkillSourceFilter>("all");
   const [sortKey, setSortKey] = useState<SkillSortKey>("usage");
-  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
-  const [selectedSkillIds, setSelectedSkillIds] = useState<Set<string>>(() => new Set());
-  const [selectedGroupFingerprint, setSelectedGroupFingerprint] = useState<string | null>(null);
+  const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
+  const [selectedEntryIds, setSelectedEntryIds] = useState<Set<string>>(() => new Set());
+  const [batchFeedback, setBatchFeedback] = useState<string | null>(null);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [remoteDeleteConfirm, setRemoteDeleteConfirm] = useState(false);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [versionContent, setVersionContent] = useState<Record<string, string>>({});
   const [versionLoadingId, setVersionLoadingId] = useState<string | null>(null);
   const [versionError, setVersionError] = useState<string | null>(null);
+  const [diffSnapshot, setDiffSnapshot] = useState<SkillDiffSnapshot | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState<string | null>(null);
   const [skillContextMenu, setSkillContextMenu] = useState<{ x: number; y: number; skill: InstalledSkill } | null>(null);
   const [deleteCandidate, setDeleteCandidate] = useState<InstalledSkill | null>(null);
   const [deletingSkill, setDeletingSkill] = useState(false);
   const [uploadConfirm, setUploadConfirm] = useState<{ skill: InstalledSkill; conflict: SkillSyncUploadConflict } | null>(null);
-  const filteredSkills = useMemo(() => {
-    const filtered = filterInstalledSkills(snapshot.skills, query, sourceFilter);
-    return sortInstalledSkills(filtered, sortKey);
-  }, [snapshot.skills, query, sourceFilter, sortKey]);
+  const entries = useMemo(() => buildUnifiedSkillEntries(snapshot, syncSnapshot), [snapshot, syncSnapshot]);
+  const filteredEntries = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    return entries
+      .filter((entry) => {
+        const matchesSource = sourceFilter === "all"
+          || (sourceFilter === "codex" && (entry.local?.agent ?? entry.remote?.agent) === "codex")
+          || (sourceFilter === "claude" && (entry.local?.agent ?? entry.remote?.agent) === "claude")
+          || (sourceFilter === "shared" && entry.source === "codex-shared")
+          || (sourceFilter === "project" && (entry.source === "codex-project" || entry.source === "claude-project"));
+        if (!matchesSource || !normalizedQuery) return matchesSource;
+        return [entry.name, entry.description, entry.identity, entry.local?.path ?? "", entry.remote?.relativePath ?? ""]
+          .join("\n")
+          .toLowerCase()
+          .includes(normalizedQuery);
+      })
+      .sort((a, b) => {
+        const usageOrder = sortKey === "usage-asc"
+          ? (a.local?.usageCount ?? 0) - (b.local?.usageCount ?? 0)
+          : (b.local?.usageCount ?? 0) - (a.local?.usageCount ?? 0);
+        return usageOrder || a.name.localeCompare(b.name) || a.identity.localeCompare(b.identity);
+      });
+  }, [entries, query, sourceFilter, sortKey]);
   const visibleRoots = useMemo(() => summarizeSkillRoots(snapshot.roots), [snapshot.roots]);
-  const remoteGroups = useMemo(() => filterRemoteSkillGroups(syncSnapshot.remoteSkillGroups, query), [syncSnapshot.remoteSkillGroups, query]);
-  const selectedSkill =
-    filteredSkills.find((skill) => skill.id === selectedSkillId) ??
-    filteredSkills[0] ??
-    null;
-  const selectedGroup =
-    remoteGroups.find((group) => group.fingerprint === selectedGroupFingerprint) ??
-    remoteGroups[0] ??
-    null;
+  const selectedEntry = filteredEntries.find((entry) => entry.id === selectedEntryId) ?? filteredEntries[0] ?? null;
+  const selectedSkill = selectedEntry?.local ?? null;
+  const selectedGroup = selectedEntry?.remote ?? null;
+  const selectedVersions = selectedEntry ? skillSyncVersions(selectedEntry, language) : null;
   const selectedVersion =
     selectedGroup?.versions.find((version) => version.id === selectedVersionId) ?? selectedGroup?.latest ?? null;
   const selectedSkillBinding = selectedSkill ? syncSnapshot.bindings.find((binding) => binding.localSkillPath === selectedSkill.path) : null;
   const selectedGroupBinding = selectedGroup ? bindingForGroup(syncSnapshot, selectedGroup) : null;
-  const uploadableVisibleSkills = useMemo(() => filteredSkills.filter((skill) => skill.source !== "codex-system"), [filteredSkills]);
-  const selectedUploadableSkills = useMemo(() => uploadableVisibleSkills.filter((skill) => selectedSkillIds.has(skill.id)), [selectedSkillIds, uploadableVisibleSkills]);
-  const allUploadableVisibleSelected = uploadableVisibleSkills.length > 0 && selectedUploadableSkills.length === uploadableVisibleSkills.length;
   const syncReady = syncSnapshot.status.kind === "ready";
+  const selectableVisibleEntries = useMemo(() => syncReady ? filteredEntries.filter((entry) => entry.syncable) : [], [filteredEntries, syncReady]);
+  const selectedVisibleEntries = useMemo(() => selectableVisibleEntries.filter((entry) => selectedEntryIds.has(entry.id)), [selectableVisibleEntries, selectedEntryIds]);
+  const selectedUploadableSkills = useMemo(() => selectedVisibleEntries.flatMap((entry) =>
+    entry.local && (entry.state === "local-only" || entry.state === "local-newer" || entry.state === "conflict") ? [entry.local] : []
+  ), [selectedVisibleEntries]);
+  const selectedRemoteGroups = useMemo(() => selectedVisibleEntries.flatMap((entry) => entry.remote ? [entry.remote] : []), [selectedVisibleEntries]);
+  const allSelectableVisibleSelected = selectableVisibleEntries.length > 0 && selectedVisibleEntries.length === selectableVisibleEntries.length;
   const codexCount = snapshot.skills.filter((skill) => skill.agent === "codex").length;
   const claudeCount = snapshot.skills.filter((skill) => skill.agent === "claude").length;
   const activeItemRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!filteredSkills.length) {
-      if (selectedSkillId) setSelectedSkillId(null);
+    if (!filteredEntries.length) {
+      if (selectedEntryId) setSelectedEntryId(null);
       return;
     }
-    if (!selectedSkillId || !filteredSkills.some((skill) => skill.id === selectedSkillId)) setSelectedSkillId(filteredSkills[0].id);
-  }, [filteredSkills, selectedSkillId]);
+    if (!selectedEntryId || !filteredEntries.some((entry) => entry.id === selectedEntryId)) setSelectedEntryId(filteredEntries[0].id);
+  }, [filteredEntries, selectedEntryId]);
 
   useEffect(() => {
     activeItemRef.current?.scrollIntoView({ block: "nearest" });
-  }, [selectedSkill?.id]);
+  }, [selectedEntry?.id]);
 
   useEffect(() => {
-    const uploadableIds = new Set(uploadableVisibleSkills.map((skill) => skill.id));
-    setSelectedSkillIds((current) => {
-      const next = new Set([...current].filter((id) => uploadableIds.has(id)));
+    const selectableIds = new Set(selectableVisibleEntries.map((entry) => entry.id));
+    setSelectedEntryIds((current) => {
+      const next = new Set([...current].filter((id) => selectableIds.has(id)));
       return next.size === current.size ? current : next;
     });
-  }, [uploadableVisibleSkills]);
-
-  useEffect(() => {
-    if (!remoteGroups.length) {
-      if (selectedGroupFingerprint) setSelectedGroupFingerprint(null);
-      return;
-    }
-    if (!selectedGroupFingerprint || !remoteGroups.some((group) => group.fingerprint === selectedGroupFingerprint)) {
-      setSelectedGroupFingerprint(remoteGroups[0].fingerprint);
-    }
-  }, [remoteGroups, selectedGroupFingerprint]);
+  }, [selectableVisibleEntries]);
 
   // Default to the latest version whenever the selected skill group changes.
   useEffect(() => {
+    if (detailView === "diff" && (!selectedSkill || !selectedGroup)) {
+      setDetailView(selectedSkill ? "local" : "remote");
+    }
     if (!selectedGroup) {
       if (selectedVersionId) setSelectedVersionId(null);
       return;
@@ -127,12 +149,12 @@ export function SkillsDialog({
     if (!selectedVersionId || !selectedGroup.versions.some((version) => version.id === selectedVersionId)) {
       setSelectedVersionId(selectedGroup.latest.id);
     }
-  }, [selectedGroup, selectedVersionId]);
+  }, [detailView, selectedGroup, selectedSkill, selectedVersionId]);
 
   // The version list is lightweight (no markdown); fetch the body on demand for preview.
   useEffect(() => {
-    const id = selectedVersion?.id;
-    if (!id || versionContent[id] !== undefined) return;
+    const id = detailView === "remote" ? selectedVersion?.id : null;
+    if (!syncReady || !id || versionContent[id] !== undefined) return;
     let cancelled = false;
     setVersionLoadingId(id);
     setVersionError(null);
@@ -149,7 +171,31 @@ export function SkillsDialog({
     return () => {
       cancelled = true;
     };
-  }, [selectedVersion?.id, versionContent, onFetchVersion]);
+  }, [detailView, selectedVersion?.id, versionContent, onFetchVersion, syncReady]);
+
+  useEffect(() => {
+    if (detailView !== "diff" || !selectedEntry || !syncReady || !selectedSkill || !selectedVersion) {
+      setDiffSnapshot(null);
+      setDiffError(null);
+      return;
+    }
+    let cancelled = false;
+    setDiffLoading(true);
+    setDiffError(null);
+    window.sessionSearch.getSyncedSkillDiff(selectedSkill.path, selectedVersion.id)
+      .then((result) => {
+        if (!cancelled) setDiffSnapshot(result);
+      })
+      .catch((error) => {
+        if (!cancelled) setDiffError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (!cancelled) setDiffLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [detailView, selectedEntry?.id, selectedSkill?.path, selectedVersion?.id, syncReady]);
 
   const handleListKeyDown = (event: ReactKeyboardEvent) => {
     if (event.key === "Escape") {
@@ -161,14 +207,13 @@ export function SkillsDialog({
       event.stopPropagation();
       return;
     }
-    if (syncView !== "local") return;
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    if (!filteredSkills.length) return;
+    if (!filteredEntries.length) return;
     event.preventDefault();
-    const currentIndex = filteredSkills.findIndex((skill) => skill.id === selectedSkill?.id);
+    const currentIndex = filteredEntries.findIndex((entry) => entry.id === selectedEntry?.id);
     const delta = event.key === "ArrowDown" ? 1 : -1;
-    const nextIndex = Math.min(filteredSkills.length - 1, Math.max(0, (currentIndex < 0 ? 0 : currentIndex) + delta));
-    setSelectedSkillId(filteredSkills[nextIndex].id);
+    const nextIndex = Math.min(filteredEntries.length - 1, Math.max(0, (currentIndex < 0 ? 0 : currentIndex) + delta));
+    setSelectedEntryId(filteredEntries[nextIndex].id);
   };
 
   const requestDelete = (skill: InstalledSkill) => {
@@ -192,31 +237,76 @@ export function SkillsDialog({
     if (outcome && outcome.status === "needs-confirmation") setUploadConfirm({ skill, conflict: outcome.conflict });
   };
 
-  const toggleSkillSelection = (skill: InstalledSkill) => {
-    if (skill.source === "codex-system") return;
-    setSelectedSkillIds((current) => {
+  const toggleEntrySelection = (entryId: string) => {
+    setSelectedEntryIds((current) => {
       const next = new Set(current);
-      if (next.has(skill.id)) next.delete(skill.id);
-      else next.add(skill.id);
+      if (next.has(entryId)) next.delete(entryId);
+      else next.add(entryId);
       return next;
     });
   };
 
   const toggleVisibleSelection = () => {
-    setSelectedSkillIds((current) => {
+    setSelectedEntryIds((current) => {
       const next = new Set(current);
-      if (allUploadableVisibleSelected) {
-        for (const skill of uploadableVisibleSkills) next.delete(skill.id);
+      if (allSelectableVisibleSelected) {
+        for (const entry of selectableVisibleEntries) next.delete(entry.id);
       } else {
-        for (const skill of uploadableVisibleSkills) next.add(skill.id);
+        for (const entry of selectableVisibleEntries) next.add(entry.id);
       }
       return next;
     });
   };
 
   const uploadSelected = async () => {
-    const result = await onUploadSelected(selectedUploadableSkills);
-    setSelectedSkillIds(new Set(result.remainingSkillIds));
+    setBatchBusy(true);
+    setBatchFeedback(null);
+    try {
+      const result = await onUploadSelected(selectedUploadableSkills);
+      const remaining = new Set(result.remainingSkillIds);
+      setSelectedEntryIds(new Set(selectedVisibleEntries.filter((entry) => entry.local && remaining.has(entry.local.id)).map((entry) => entry.id)));
+    } catch (error) {
+      setBatchFeedback(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBatchBusy(false);
+    }
+  };
+
+  const toggleRemoteSelection = (entryId: string) => toggleEntrySelection(entryId);
+
+  const downloadRemote = async (groups: RemoteSkillGroup[]) => {
+    setBatchBusy(true);
+    setBatchFeedback(null);
+    try {
+      const result = await window.sessionSearch.downloadSyncedSkills(groups.map((group) => group.fingerprint));
+      const retryFingerprints = new Set([...result.conflicts, ...result.failures.map((failure) => failure.id)]);
+      setSelectedEntryIds(new Set(entries.filter((entry) => entry.remote && retryFingerprints.has(entry.remote.fingerprint)).map((entry) => entry.id)));
+      setBatchFeedback(l(
+        `${result.succeeded.length} installed · ${result.skipped.length} skipped · ${result.conflicts.length} conflicts · ${result.failures.length} failed`,
+        `已安装 ${result.succeeded.length} 个 · 跳过 ${result.skipped.length} 个 · 冲突 ${result.conflicts.length} 个 · 失败 ${result.failures.length} 个`,
+      ));
+      onRefreshRemote();
+    } catch (error) {
+      setBatchFeedback(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBatchBusy(false);
+    }
+  };
+
+  const deleteRemote = async () => {
+    setBatchBusy(true);
+    setBatchFeedback(null);
+    try {
+      const result = await window.sessionSearch.deleteSyncedSkills(selectedRemoteGroups.map((group) => group.fingerprint));
+      const failures = new Set(result.failures.map((failure) => failure.id));
+      setSelectedEntryIds(new Set(entries.filter((entry) => entry.remote && failures.has(entry.remote.fingerprint)).map((entry) => entry.id)));
+      setBatchFeedback(l(`${result.succeeded.length} cloud Skills deleted · ${result.failures.length} failed`, `已删除 ${result.succeeded.length} 个云端 Skill · ${result.failures.length} 个失败`));
+      onRefreshRemote();
+    } catch (error) {
+      setBatchFeedback(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBatchBusy(false);
+    }
   };
 
   const confirmUpload = async () => {
@@ -239,19 +329,11 @@ export function SkillsDialog({
         <div className="dialog-title">
           <span>{l("Skills", "Skills 管理")}</span>
           <span className="skills-dialog-count">
-            Codex {formatCompactNumber(codexCount)} · Claude Code {formatCompactNumber(claudeCount)} · Remote {formatCompactNumber(syncSnapshot.remoteSkillGroups.length)}
+            Codex {formatCompactNumber(codexCount)} · Claude Code {formatCompactNumber(claudeCount)}
+            {syncReady ? ` · Remote ${formatCompactNumber(syncSnapshot.remoteSkillGroups.length)}` : ""}
           </span>
           <button type="button" className="icon-button" onClick={onClose} aria-label={l("Close", "关闭")}>
             <X size={16} />
-          </button>
-        </div>
-
-        <div className="skills-view-tabs" role="tablist" aria-label={l("Skills view", "Skills 视图")}>
-          <button type="button" className={syncView === "local" ? "active" : ""} onClick={() => setSyncView("local")}>
-            {l("Local", "本地")}
-          </button>
-          <button type="button" className={syncView === "remote" ? "active" : ""} onClick={() => setSyncView("remote")}>
-            {l("Remote", "远程")}
           </button>
         </div>
 
@@ -261,235 +343,164 @@ export function SkillsDialog({
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={l("Search name, description, or path", "搜索名称、描述或路径")} autoFocus />
           </label>
           <div className="skills-filter" role="group" aria-label={l("Skill source filter", "Skill 来源筛选")}>
-            {syncView === "local"
-              ? SKILL_SOURCE_FILTERS.map((filter) => (
-                  <button key={filter} className={sourceFilter === filter ? "active" : ""} onClick={() => setSourceFilter(filter)}>
-                    {skillFilterLabel(filter, language)}
-                  </button>
-                ))
-              : null}
+            {SKILL_SOURCE_FILTERS.map((filter) => (
+              <button key={filter} className={sourceFilter === filter ? "active" : ""} onClick={() => setSourceFilter(filter)}>
+                {skillFilterLabel(filter, language)}
+              </button>
+            ))}
           </div>
-          {syncView === "local" ? <label className="skills-sort" title={l("Sort skills", "排序 Skills")}>
+          <label className="skills-sort" title={l("Sort skills", "排序 Skills")}>
             <span>{l("Sort", "排序")}</span>
             <select value={sortKey} onChange={(event) => setSortKey(event.currentTarget.value as SkillSortKey)} aria-label={l("Sort skills", "排序 Skills")}>
               <option value="usage">{l("Most used", "最多使用")}</option>
               <option value="usage-asc">{l("Least used", "最少使用")}</option>
             </select>
-          </label> : null}
-          {syncView === "local" ? (
-            <button
-              type="button"
-              className="settings-action-button"
-              onClick={toggleVisibleSelection}
-              disabled={loading || uploadableVisibleSkills.length === 0}
-              title={l("Select visible non-system skills", "选择当前可见的非系统 Skills")}
-            >
-              <span>{allUploadableVisibleSelected ? l("Clear selected", "清空选择") : l("Select visible", "选择当前可见")}</span>
-            </button>
-          ) : null}
-          {syncView === "local" ? (
-            <button
-              type="button"
-              className="settings-action-button"
-              onClick={() => void uploadSelected()}
-              disabled={!syncReady || loading || selectedUploadableSkills.length === 0}
-              title={!syncReady ? syncDisabledTitle(syncSnapshot, language) : l("Upload selected non-system skills", "上传选中的非系统 Skills")}
-            >
-              <Upload size={13} />
-              <span>{l(`Upload selected (${selectedUploadableSkills.length})`, `上传选中（${selectedUploadableSkills.length}）`)}</span>
-            </button>
-          ) : null}
-          <button className="stats-refresh" onClick={syncView === "local" ? onRefresh : onRefreshRemote} disabled={loading} title={l("Refresh skills", "刷新 Skills")} aria-label={l("Refresh skills", "刷新 Skills")}>
+          </label>
+          <button type="button" className="settings-action-button" onClick={toggleVisibleSelection} disabled={loading || batchBusy || selectableVisibleEntries.length === 0}>
+            {allSelectableVisibleSelected ? l("Clear selected", "清空选择") : l("Select visible", "选择当前可见")}
+          </button>
+          <button type="button" className="settings-action-button" onClick={() => void uploadSelected()} disabled={!syncReady || loading || batchBusy || selectedUploadableSkills.length === 0} title={!syncReady ? syncDisabledTitle(syncSnapshot, language) : l("Upload selected Skills", "上传选中的 Skills")}>
+            <Upload size={13} /> {l(`Upload (${selectedUploadableSkills.length})`, `上传（${selectedUploadableSkills.length}）`)}
+          </button>
+          <button type="button" className="settings-action-button" onClick={() => void downloadRemote(syncSnapshot.remoteSkillGroups)} disabled={!syncReady || loading || batchBusy || syncSnapshot.remoteSkillGroups.length === 0}>
+            <Download size={13} /> {l(`Download all (${syncSnapshot.remoteSkillGroups.length})`, `下载全部（${syncSnapshot.remoteSkillGroups.length}）`)}
+          </button>
+          <button type="button" className="settings-action-button danger" onClick={() => setRemoteDeleteConfirm(true)} disabled={!syncReady || loading || batchBusy || selectedRemoteGroups.length === 0}>
+            <Trash2 size={13} /> {l(`Delete cloud (${selectedRemoteGroups.length})`, `删除云端（${selectedRemoteGroups.length}）`)}
+          </button>
+          <button className="stats-refresh" onClick={onRefresh} disabled={loading || batchBusy} title={l("Refresh local and cloud Skills", "刷新本地和云端 Skills")} aria-label={l("Refresh skills", "刷新 Skills")}>
             <RefreshCw size={13} />
           </button>
         </div>
 
-        {syncView === "local" ? <div className="skills-roots">
+        <div className="skills-roots">
           {visibleRoots.map((root) => (
             <span key={`${root.source}:${root.path}`} className={root.exists ? "" : "missing"} title={root.path}>
               <strong>{skillSourceUiLabel(root.source, language)}</strong>
               {root.exists ? l(`${root.skillCount} skills`, `${root.skillCount} 个`) : l("Missing", "未找到")}
             </span>
           ))}
-        </div> : <SkillSyncStatusPanel snapshot={syncSnapshot} language={language} onCopySetupSql={onCopySetupSql} />}
+        </div>
 
         {feedback ? <div className={`skills-feedback ${feedback.kind}`}>{feedback.message}</div> : null}
+        {batchFeedback ? <div className="skills-feedback success">{batchFeedback}</div> : null}
         <div className="skills-shell">
           <div className="skills-list">
-            {loading ? <div className="skills-empty">{syncView === "local" ? l("Loading installed skills...", "正在加载已安装 Skills...") : l("Loading remote skills...", "正在加载远程 Skills...")}</div> : null}
-            {!loading && syncView === "local" && filteredSkills.length === 0 ? <div className="skills-empty">{l("No skills found.", "没有找到 Skill。")}</div> : null}
-            {!loading && syncView === "remote" && remoteGroups.length === 0 ? <div className="skills-empty">{remoteEmptyLabel(syncSnapshot, language)}</div> : null}
-            {!loading && syncView === "local"
-              ? filteredSkills.map((skill) => (
-                  <div
-                    key={skill.id}
-                    ref={selectedSkill?.id === skill.id ? activeItemRef : undefined}
-                    role="button"
-                    tabIndex={0}
-                    className={`skill-item ${selectedSkill?.id === skill.id ? "active" : ""}`}
-                    onClick={() => setSelectedSkillId(skill.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        setSelectedSkillId(skill.id);
-                      }
-                    }}
-                    onContextMenu={(event) => {
-                      event.preventDefault();
-                      setSelectedSkillId(skill.id);
-                      setSkillContextMenu({ x: event.clientX, y: event.clientY, skill });
-                    }}
-                  >
-                    <span className="skill-item-head">
-                      <label className="skill-select" title={skill.source === "codex-system" ? l("System skills are excluded from upload", "系统内置 Skills 不参与上传") : l("Select for upload", "选择上传")}>
-                        <input
-                          type="checkbox"
-                          checked={selectedSkillIds.has(skill.id)}
-                          disabled={skill.source === "codex-system"}
-                          onClick={(event) => event.stopPropagation()}
-                          onChange={() => toggleSkillSelection(skill)}
-                          aria-label={l(`Select ${skill.name}`, `选择 ${skill.name}`)}
-                        />
-                      </label>
-                      <strong>{skill.name}</strong>
-                      {skill.usageCount ? <span className="skill-usage-count" title={l("Times used", "使用次数")}>{formatCompactNumber(skill.usageCount)}</span> : null}
-                      <SkillSourceBadge source={skill.source} language={language} />
-                    </span>
-                    <span className="skill-item-desc">{skill.description || l("No description", "无描述")}</span>
-                    <span className="skill-item-path">{skill.path}</span>
-                  </div>
-                ))
-              : null}
-            {!loading && syncView === "remote"
-              ? remoteGroups.map((group) => {
-                  const binding = bindingForGroup(syncSnapshot, group);
-                  return (
-                    <button
-                      key={group.fingerprint}
-                      type="button"
-                      className={`skill-item ${selectedGroup?.fingerprint === group.fingerprint ? "active" : ""}`}
-                      onClick={() => setSelectedGroupFingerprint(group.fingerprint)}
-                    >
-                      <span className="skill-item-head">
-                        <strong>{group.name}</strong>
-                        <span className="skill-usage-count" title={l("Latest version", "最新版本")}>v{group.latest.version}</span>
-                        {binding ? <span className="skill-usage-count">{l(`Local v${binding.remoteVersion}`, `本地 v${binding.remoteVersion}`)}</span> : null}
-                        <span className={`skill-source-badge ${group.source}`}>{group.agent === "codex" ? "Codex" : "Claude Code"}</span>
-                      </span>
-                      <span className="skill-item-desc">{group.description || l("No description", "无描述")}</span>
-                      <span className="skill-item-path">
-                        {l(`${group.versions.length} versions`, `${group.versions.length} 个版本`)} · {new Date(group.latest.updatedAt).toLocaleString()}
-                      </span>
-                    </button>
-                  );
-                })
-              : null}
+            {loading && filteredEntries.length === 0 ? <div className="skills-empty">{l("Loading Skills...", "正在加载 Skills...")}</div> : null}
+            {!loading && filteredEntries.length === 0 ? <div className="skills-empty">{l("No skills found.", "没有找到 Skill。")}</div> : null}
+            {filteredEntries.map((entry) => {
+              const versions = skillSyncVersions(entry, language);
+              return (
+              <div
+                key={entry.id}
+                ref={selectedEntry?.id === entry.id ? activeItemRef : undefined}
+                role="button"
+                tabIndex={0}
+                className={`skill-item ${selectedEntry?.id === entry.id ? "active" : ""}`}
+                onClick={() => setSelectedEntryId(entry.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setSelectedEntryId(entry.id);
+                  }
+                }}
+                onContextMenu={(event) => {
+                  if (!entry.local) return;
+                  event.preventDefault();
+                  setSelectedEntryId(entry.id);
+                  setSkillContextMenu({ x: event.clientX, y: event.clientY, skill: entry.local });
+                }}
+              >
+                <span className="unified-skill-item-head">
+                  {syncReady && entry.syncable ? <label className="skill-select" title={l("Select for cloud actions", "选择云端操作")}>
+                    <input type="checkbox" checked={selectedEntryIds.has(entry.id)} onClick={(event) => event.stopPropagation()} onChange={() => toggleRemoteSelection(entry.id)} aria-label={l(`Select ${entry.name}`, `选择 ${entry.name}`)} />
+                  </label> : null}
+                  <span className="unified-skill-name">
+                    <strong title={entry.name}>{entry.name}</strong>
+                    <SkillSourceBadge source={entry.source} language={language} />
+                  </span>
+                  {entry.state ? <SkillSyncStateBadge state={entry.state} language={language} /> : null}
+                </span>
+                <span className="skill-item-desc">{entry.description || l("No description", "无描述")}</span>
+                <span className="skill-item-path">
+                  {versions.managed ?? l(`Local ${versions.local} · Cloud ${versions.cloud}`, `本地 ${versions.local} · 云端 ${versions.cloud}`)}
+                </span>
+              </div>
+              );
+            })}
           </div>
 
           <div className="skill-preview">
-            {syncView === "local" && selectedSkill ? (
-              <>
-                <div className="skill-preview-head">
-                  <div>
-                    <div className="skill-preview-title">
-                      <h3>{selectedSkill.name}</h3>
-                      <SkillSourceBadge source={selectedSkill.source} language={language} />
-                    </div>
-                    <p>{selectedSkill.description || l("No description", "无描述")}</p>
-                  </div>
-                  <div className="skill-preview-actions">
-                    <button type="button" disabled={!syncReady || loading} onClick={() => void handleUpload(selectedSkill)} title={!syncReady ? syncDisabledTitle(syncSnapshot, language) : ""}>
-                      <Upload size={14} />
-                      {selectedSkillBinding ? l("Upload new version", "上传新版本") : l("Upload", "上传")}
-                    </button>
-                  </div>
+            {selectedEntry ? <>
+              <div className="skill-preview-head">
+                <div className="skill-preview-title">
+                  <h3>{selectedEntry.name}</h3>
+                  <SkillSourceBadge source={selectedEntry.source} language={language} />
+                  {selectedEntry.state ? <SkillSyncStateBadge state={selectedEntry.state} language={language} /> : null}
                 </div>
-                <dl className="skill-meta">
-                  <div>
-                    <dt>{l("Agent", "Agent")}</dt>
-                    <dd>{selectedSkill.agent === "codex" ? "Codex" : "Claude Code"}</dd>
-                  </div>
-                  <div>
-                    <dt>{l("Used", "使用次数")}</dt>
-                    <dd>
-                      {selectedSkill.usageCount
-                        ? l(`${selectedSkill.usageCount} times`, `${selectedSkill.usageCount} 次`) + (selectedSkill.lastUsedAt ? ` · ${new Date(selectedSkill.lastUsedAt).toLocaleString()}` : "")
-                        : l("Not yet", "暂无")}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>{l("Updated", "更新时间")}</dt>
-                    <dd>{new Date(selectedSkill.mtimeMs).toLocaleString()}</dd>
-                  </div>
-                  <div>
-                    <dt>{l("Path", "路径")}</dt>
-                    <dd title={selectedSkill.path}>{selectedSkill.path}</dd>
-                  </div>
-                  {selectedSkillBinding ? (
-                    <div>
-                      <dt>{l("Remote", "远程")}</dt>
-                      <dd>{l(`v${selectedSkillBinding.remoteVersion} · ${new Date(selectedSkillBinding.lastSyncedAt).toLocaleString()}`, `v${selectedSkillBinding.remoteVersion} · ${new Date(selectedSkillBinding.lastSyncedAt).toLocaleString()}`)}</dd>
+                <p>{selectedEntry.description || l("No description", "无描述")}</p>
+              </div>
+              {selectedVersions ? <div className="skill-version-strip">
+                {selectedVersions.managed ? <span className="skill-version-managed">{selectedVersions.managed}</span> : <>
+                  <span className="skill-version-copy"><small>{l("Local", "本地")}</small><strong>{selectedVersions.local}</strong></span>
+                  <span className="skill-version-divider" aria-hidden="true" />
+                  <span className="skill-version-copy"><small>{l("Cloud", "云端")}</small><strong>{selectedVersions.cloud}</strong></span>
+                </>}
+              </div> : null}
+              <div className="skill-detail-tabs" role="tablist" aria-label={l("Skill details", "Skill 详情")}>
+                <button type="button" className={detailView === "local" ? "active" : ""} onClick={() => setDetailView("local")}>{l("Local", "本地")}</button>
+                <button type="button" className={detailView === "remote" ? "active" : ""} onClick={() => setDetailView("remote")}>{l("Remote", "云端")}</button>
+                <button type="button" className={detailView === "diff" ? "active" : ""} onClick={() => setDetailView("diff")} disabled={!selectedSkill || !selectedGroup}>{l("Diff", "差异")}</button>
+              </div>
+              <div className="skill-preview-content">
+                {detailView === "local" ? (
+                  selectedSkill ? <>
+                    <div className="skill-detail-actions">
+                      <span>{skillManagementLabel(selectedSkill.source, language) ?? l("Installed on this device", "已安装在此设备")}</span>
+                      {(selectedSkill.source === "codex-user" || selectedSkill.source === "claude-user" || selectedSkill.source === "codex-shared")
+                        && syncReady
+                        && (selectedEntry.state === "local-only" || selectedEntry.state === "local-newer" || selectedEntry.state === "conflict")
+                        ? <button type="button" disabled={loading} onClick={() => void handleUpload(selectedSkill)}><Upload size={14} />{selectedSkillBinding ? l("Upload new version", "上传新版本") : l("Upload", "上传")}</button>
+                        : null}
                     </div>
-                  ) : null}
-                </dl>
-                <pre className="skill-markdown-preview">{skillPreviewMarkdown(selectedSkill.markdown, language)}</pre>
-              </>
-            ) : syncView === "remote" && selectedGroup && selectedVersion ? (
-              <>
-                <div className="skill-preview-head">
-                  <div>
-                    <div className="skill-preview-title">
-                      <h3>{selectedGroup.name}</h3>
-                      <span className={`skill-source-badge ${selectedGroup.source}`}>{selectedGroup.agent === "codex" ? "Codex" : "Claude Code"}</span>
-                    </div>
-                    <p>{selectedGroup.description || l("No description", "无描述")}</p>
-                  </div>
-                  <div className="skill-preview-actions">
-                    <label className="skills-sort" title={l("Version", "版本")}>
-                      <span>{l("Version", "版本")}</span>
-                      <select
-                        value={selectedVersion.id}
-                        onChange={(event) => setSelectedVersionId(event.currentTarget.value)}
-                        aria-label={l("Select version", "选择版本")}
-                      >
-                        {selectedGroup.versions.map((version) => (
-                          <option key={version.id} value={version.id}>
-                            {versionOptionLabel(version, selectedGroup.latest.id, language)}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <button type="button" disabled={!syncReady || loading} onClick={() => void onInstallRemote(selectedVersion.id)}>
-                      <Download size={14} />
-                      {selectedGroupBinding ? l("Update local", "更新本地") : l("Install locally", "安装到本地")}
-                    </button>
-                  </div>
-                </div>
-                <dl className="skill-meta">
-                  <div>
-                    <dt>{l("Agent", "Agent")}</dt>
-                    <dd>{selectedGroup.agent === "codex" ? "Codex" : "Claude Code"}</dd>
-                  </div>
-                  <div>
-                    <dt>{l("Version", "版本")}</dt>
-                    <dd>{versionOptionLabel(selectedVersion, selectedGroup.latest.id, language)}</dd>
-                  </div>
-                  <div>
-                    <dt>{l("Updated", "更新时间")}</dt>
-                    <dd>{new Date(selectedVersion.updatedAt).toLocaleString()}</dd>
-                  </div>
-                  {selectedGroupBinding ? (
-                    <div>
-                      <dt>{l("Local", "本地")}</dt>
-                      <dd title={selectedGroupBinding.localSkillPath}>{l(`v${selectedGroupBinding.remoteVersion}`, `v${selectedGroupBinding.remoteVersion}`)} · {selectedGroupBinding.localSkillPath}</dd>
-                    </div>
-                  ) : null}
-                </dl>
-                <pre className="skill-markdown-preview">{remoteVersionPreview(selectedVersion.id, versionContent, versionLoadingId, versionError, language)}</pre>
-              </>
-            ) : (
-              <div className="skills-empty">{l("Select a skill to preview it.", "选择一个 Skill 查看内容。")}</div>
-            )}
+                    <dl className="skill-meta">
+                      <div><dt>{l("Agent", "Agent")}</dt><dd>{selectedSkill.agent === "codex" ? "Codex" : "Claude Code"}</dd></div>
+                      <div><dt>{l("Used", "使用次数")}</dt><dd>{selectedSkill.usageCount ? l(`${selectedSkill.usageCount} times`, `${selectedSkill.usageCount} 次`) : l("Not yet", "暂无")}</dd></div>
+                      <div><dt>{l("Updated", "更新时间")}</dt><dd>{new Date(selectedSkill.mtimeMs).toLocaleString()}</dd></div>
+                      <div><dt>{l("Path", "路径")}</dt><dd title={selectedSkill.path}>{selectedSkill.path}</dd></div>
+                    </dl>
+                    <div className="skill-markdown-preview"><Markdown text={skillPreviewMarkdown(selectedSkill.markdown, language)} /></div>
+                  </> : <div className="skills-empty">{l("This Skill is not installed on this device.", "此设备尚未安装这个 Skill。")}</div>
+                ) : null}
+                {detailView === "remote" ? (
+                  !syncReady ? <SkillSyncStatusPanel snapshot={syncSnapshot} language={language} busy={loading || batchBusy} onCopySetupSql={onCopySetupSql} onOpenSqlEditor={onOpenSqlEditor} onRefresh={onRefreshRemote} />
+                    : selectedGroup && selectedVersion ? <>
+                      <div className="skill-detail-actions">
+                        <label className="skills-sort" title={l("Version", "版本")}>
+                          <span>{l("Version", "版本")}</span>
+                          <select value={selectedVersion.id} onChange={(event) => setSelectedVersionId(event.currentTarget.value)} aria-label={l("Select version", "选择版本")}>
+                            {selectedGroup.versions.map((version) => <option key={version.id} value={version.id}>{versionOptionLabel(version, selectedGroup.latest.id, language)}</option>)}
+                          </select>
+                        </label>
+                        <button type="button" disabled={loading || selectedGroup.legacy || selectedEntry.state === "local-newer" || selectedEntry.state === "conflict"} onClick={() => void onInstallRemote(selectedVersion.id)} title={selectedGroup.legacy ? l("Legacy record has no safe install location.", "旧版记录无法安全确定安装位置。") : ""}><Download size={14} />{selectedGroupBinding ? l("Update local", "更新本地") : l("Install locally", "安装到本地")}</button>
+                      </div>
+                      <dl className="skill-meta">
+                        <div><dt>{l("Version", "版本")}</dt><dd>{versionOptionLabel(selectedVersion, selectedGroup.latest.id, language)}</dd></div>
+                        <div><dt>{l("Updated", "更新时间")}</dt><dd>{new Date(selectedVersion.updatedAt).toLocaleString()}</dd></div>
+                        <div><dt>{l("Location", "位置")}</dt><dd>{selectedGroup.legacy ? l("Legacy record", "旧版记录") : `${selectedGroup.portableScope}/${selectedGroup.relativePath}`}</dd></div>
+                      </dl>
+                      <div className="skill-markdown-preview"><Markdown text={remoteVersionPreview(selectedVersion.id, versionContent, versionLoadingId, versionError, language)} /></div>
+                    </> : <div className="skills-empty skill-cloud-empty"><p>{l("No cloud copy yet.", "还没有云端副本。")}</p>{selectedSkill && selectedEntry.syncable ? <button type="button" onClick={() => void handleUpload(selectedSkill)}><Upload size={14} />{l("Upload this Skill", "上传这个 Skill")}</button> : null}</div>
+                ) : null}
+                {detailView === "diff" ? (
+                  !syncReady ? <SkillSyncStatusPanel snapshot={syncSnapshot} language={language} busy={loading || batchBusy} onCopySetupSql={onCopySetupSql} onOpenSqlEditor={onOpenSqlEditor} onRefresh={onRefreshRemote} />
+                    : diffLoading ? <div className="skills-empty">{l("Comparing local and cloud files...", "正在比较本地与云端文件...")}</div>
+                      : diffError ? <div className="skills-empty danger-copy">{diffError}</div>
+                        : diffSnapshot ? <SkillDiffView snapshot={diffSnapshot} language={language} />
+                          : <div className="skills-empty">{l("Both a local and cloud copy are required to compare.", "需要同时存在本地和云端副本才能比较。")}</div>
+                ) : null}
+              </div>
+            </> : <div className="skills-empty">{l("Select a skill to preview it.", "选择一个 Skill 查看内容。")}</div>}
           </div>
         </div>
         {skillContextMenu ? (
@@ -528,7 +539,68 @@ export function SkillsDialog({
             onCancel={() => setUploadConfirm(null)}
           />
         ) : null}
+        {remoteDeleteConfirm ? (
+          <div className="dialog-backdrop" onMouseDown={() => setRemoteDeleteConfirm(false)}>
+            <div className="command-dialog delete-skill-dialog" onMouseDown={(event) => event.stopPropagation()}>
+              <div className="dialog-title">
+                <span>{l("Delete cloud Skills", "删除云端 Skills")}</span>
+                <button type="button" className="icon-button" onClick={() => setRemoteDeleteConfirm(false)}><X size={16} /></button>
+              </div>
+              <p className="dialog-copy">{l(`Delete ${selectedRemoteGroups.length} selected cloud Skills and all their versions?`, `确定删除选中的 ${selectedRemoteGroups.length} 个云端 Skill 及其全部历史版本吗？`)}</p>
+              <p className="dialog-copy danger-copy">{l("Only cloud copies will be deleted. Local Skill folders will not change.", "只会删除云端副本，本地 Skill 目录不会改变。")}</p>
+              <div className="dialog-actions">
+                <button type="button" onClick={() => setRemoteDeleteConfirm(false)}>{l("Cancel", "取消")}</button>
+                <button type="button" className="danger-action" onClick={async () => { setRemoteDeleteConfirm(false); await deleteRemote(); }}>{l("Delete cloud copies", "删除云端副本")}</button>
+              </div>
+            </div>
+          </div>
+        ) : null}
       </section>
+    </div>
+  );
+}
+
+function skillSyncVersions(entry: UnifiedSkillEntry, language: LanguageMode): { managed: string | null; local: string; cloud: string } {
+  const managed = entry.local ? skillManagementLabel(entry.local.source, language) : null;
+  const localVersion = entry.relation?.localSkillPath
+    ? entry.remote && entry.relation.remoteContentHash === entry.relation.localContentHash
+      ? `v${entry.remote.latest.version}`
+      : localize(language, "present", "已安装")
+    : localize(language, "not installed", "未安装");
+  const cloudVersion = entry.remote ? `v${entry.remote.latest.version}` : localize(language, "not uploaded", "未上传");
+  return { managed, local: localVersion, cloud: cloudVersion };
+}
+
+function SkillDiffView({ snapshot, language }: { snapshot: SkillDiffSnapshot; language: LanguageMode }): ReactElement {
+  const l = (en: string, zh: string) => localize(language, en, zh);
+  const changedFiles = snapshot.files.filter((file) => file.status !== "unchanged");
+  return (
+    <div className="skill-diff-view">
+      <div className={`skill-diff-summary ${snapshot.state}`}>
+        <strong>{snapshot.state === "identical" ? l("Local and cloud files are identical", "本地与云端文件完全一致") : l(`${changedFiles.length} files differ`, `${changedFiles.length} 个文件有差异`)}</strong>
+        <span>{l(`${snapshot.files.length} files compared`, `已比较 ${snapshot.files.length} 个文件`)}</span>
+      </div>
+      <div className="skill-diff-files">
+        {changedFiles.length === 0 ? <div className="skill-diff-empty">{l("No different files to display.", "没有需要显示的差异文件。")}</div> : null}
+        {changedFiles.map((file) => (
+          <details key={file.relativePath} className={`skill-diff-file ${file.status}`} open={file.relativePath === "SKILL.md"}>
+            <summary>
+              <span className="skill-diff-status">
+                {file.status === "added"
+                  ? l("Cloud only", "仅云端")
+                  : file.status === "removed"
+                    ? l("Local only", "仅本地")
+                    : file.status === "modified"
+                      ? l("Changed", "已修改")
+                      : l("Same", "相同")}
+              </span>
+              <code>{file.relativePath}</code>
+              <span>{file.binary ? l("Binary", "二进制") : `${file.localSize} B → ${file.remoteSize} B`}</span>
+            </summary>
+            {file.diff ? <pre>{file.diff}</pre> : <div className="skill-diff-note">{file.status === "unchanged" ? l("No content changes.", "内容没有变化。") : l("Preview is unavailable for binary files.", "二进制文件不提供内容预览。")}</div>}
+          </details>
+        ))}
+      </div>
     </div>
   );
 }
@@ -583,6 +655,26 @@ function skillSourceUiLabel(source: SkillSource, language: LanguageMode): string
   return skillSourceLabel(source);
 }
 
+function skillManagementLabel(source: SkillSource, language: LanguageMode): string | null {
+  if (source === "claude-plugin") return localize(language, "Managed by Claude Plugin", "由 Claude Plugin 管理");
+  if (source === "codex-project" || source === "claude-project") return localize(language, "Synced with the Git repository", "随 Git 仓库同步");
+  if (source === "codex-system") return localize(language, "Built into the system", "系统内置");
+  return null;
+}
+
+function SkillSyncStateBadge({ state, language }: { state: import("../../../core/skill-sync").SkillSyncState; language: LanguageMode }): ReactElement {
+  const labels: Record<import("../../../core/skill-sync").SkillSyncState, [string, string]> = {
+    "local-only": ["Not uploaded", "未上传"],
+    synced: ["Synced", "已同步"],
+    "local-newer": ["Local newer", "本地较新"],
+    "remote-newer": ["Cloud newer", "云端较新"],
+    "remote-only": ["Not installed", "本地未安装"],
+    conflict: ["Conflict", "冲突"],
+    legacy: ["Legacy record", "旧版记录"],
+  };
+  return <span className={`sync-state-badge ${state}`}>{localize(language, ...labels[state])}</span>;
+}
+
 function bindingForGroup(snapshot: SkillSyncSnapshot, group: RemoteSkillGroup) {
   const versionIds = new Set(group.versions.map((version) => version.id));
   return snapshot.bindings.find((binding) => versionIds.has(binding.remoteSkillId)) ?? null;
@@ -590,14 +682,6 @@ function bindingForGroup(snapshot: SkillSyncSnapshot, group: RemoteSkillGroup) {
 
 function versionOptionLabel(version: RemoteSkillVersion, latestId: string, language: LanguageMode): string {
   return version.id === latestId ? localize(language, `v${version.version} · latest`, `v${version.version} · 最新`) : `v${version.version}`;
-}
-
-function filterRemoteSkillGroups(groups: RemoteSkillGroup[], query: string): RemoteSkillGroup[] {
-  const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) return groups;
-  return groups.filter((group) =>
-    [group.name, group.description, group.agent, group.source, group.fingerprint].join("\n").toLowerCase().includes(normalizedQuery),
-  );
 }
 
 function remoteVersionPreview(
@@ -615,24 +699,26 @@ function remoteVersionPreview(
 
 function syncDisabledTitle(snapshot: SkillSyncSnapshot, language: LanguageMode): string {
   if (snapshot.status.kind === "missing-table") return localize(language, "Initialize the Supabase table first.", "请先初始化 Supabase 表。");
+  if (snapshot.status.kind === "missing-storage") return localize(language, "Run the latest Supabase setup SQL first.", "请先执行最新的 Supabase 初始化 SQL。");
   if (snapshot.status.kind === "unconfigured") return localize(language, "Configure Supabase sync in Settings first.", "请先在设置中配置 Supabase 同步。");
   if (snapshot.status.kind === "error") return snapshot.status.message;
   return "";
 }
 
-function remoteEmptyLabel(snapshot: SkillSyncSnapshot, language: LanguageMode): string {
-  if (snapshot.status.kind === "ready") return localize(language, "No remote skills found.", "没有远程 Skill。");
-  return syncDisabledTitle(snapshot, language);
-}
-
 function SkillSyncStatusPanel({
   snapshot,
   language,
+  busy,
   onCopySetupSql,
+  onOpenSqlEditor,
+  onRefresh,
 }: {
   snapshot: SkillSyncSnapshot;
   language: LanguageMode;
+  busy: boolean;
   onCopySetupSql: () => void;
+  onOpenSqlEditor: () => void | Promise<void>;
+  onRefresh: () => void;
 }): ReactElement {
   const l = (en: string, zh: string) => localize(language, en, zh);
   if (snapshot.status.kind === "ready") {
@@ -643,15 +729,20 @@ function SkillSyncStatusPanel({
     );
   }
   return (
-    <div className={`skill-sync-panel ${snapshot.status.kind}`}>
-      <span>{snapshot.status.message}</span>
-      {snapshot.status.kind === "missing-table" ? (
-        <button type="button" className="setup-copy-button" onClick={onCopySetupSql}>
-          <Copy size={14} />
-          {l("Copy setup SQL", "复制初始化 SQL")}
-        </button>
-      ) : null}
-    </div>
+    <SupabaseSetupGuide
+      language={language}
+      tone={snapshot.status.kind === "error" ? "error" : "warning"}
+      title={l("Skill sync is not ready", "Skill 同步尚未准备完成")}
+      message={snapshot.status.remediation === "settings"
+        ? l("Check the Supabase URL and anon key in Settings, then refresh.", "请检查设置中的 Supabase URL 和 anon key，然后刷新。")
+        : undefined}
+      detail={snapshot.status.kind === "unconfigured" ? null : snapshot.status.message}
+      busy={busy}
+      showSqlActions={snapshot.status.remediation === "sql"}
+      onCopySql={onCopySetupSql}
+      onOpenSqlEditor={onOpenSqlEditor}
+      onRefresh={onRefresh}
+    />
   );
 }
 
@@ -776,14 +867,14 @@ function UploadVersionConfirmDialog({
         </div>
         <p className="dialog-copy">
           {l(
-            `The latest remote version (v${conflict.latestVersion}) of "${skill.name}" was uploaded from a different skill.`,
-            `"${skill.name}" 的最新远程版本（v${conflict.latestVersion}）是从另一个 Skill 上传的。`,
+            `Cloud v${conflict.latestVersion} of "${skill.name}" changed after the last sync or has not been linked on this device.`,
+            `"${skill.name}" 的云端 v${conflict.latestVersion} 在上次同步后发生了变化，或尚未与此设备建立同步关系。`,
           )}
         </p>
         <p className="dialog-copy danger-copy">
           {l(
-            `Uploading will add v${conflict.latestVersion + 1} to the same skill (matched by name).`,
-            `上传会把 v${conflict.latestVersion + 1} 追加到同一个 Skill（按名称匹配）。`,
+            `Uploading will keep the cloud history and add your local copy as v${conflict.latestVersion + 1}.`,
+            `继续上传会保留云端历史版本，并把当前本地内容保存为 v${conflict.latestVersion + 1}。`,
           )}
         </p>
         <div className="delete-skill-path" title={conflict.latestPath}>

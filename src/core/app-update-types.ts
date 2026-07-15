@@ -19,6 +19,7 @@ export interface AppUpdateManifest {
 
 export interface AppUpdateStatus {
   currentVersion: string;
+  developmentBuild: boolean;
   checkedAt: number;
   fromCache: boolean;
   updateAvailable: boolean;

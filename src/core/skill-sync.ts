@@ -1,14 +1,19 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import type { SkillSyncBinding } from "./session-store";
-import type { InstalledSkill } from "./skill-manager";
+import {
+  portableScopeForSkillSource,
+  portableSkillLocation,
+  type InstalledSkill,
+  type SkillPortableScope,
+} from "./skill-manager";
 
 export const AGENT_SESSION_SEARCH_SKILLS_TABLE = "agent_session_search_skills";
 export const AGENT_SESSION_SKILLS_BUCKET = "agent-session-skills";
 const REMOTE_SKILL_VERSION_COLUMNS =
-  "id,name,description,agent,source,local_fingerprint,content_hash,uploaded_from_path,version,created_at,updated_at";
+  "id,name,description,agent,source,local_fingerprint,content_hash,uploaded_from_path,portable_scope,relative_path,identity_version,version,created_at,updated_at";
 const SKILL_FILES_STORAGE_THRESHOLD_BYTES = 512 * 1024;
 const DEFAULT_SKILL_STORAGE_TIMEOUT_MS = 120_000;
 const GZIP_SKILL_FILES_ENCODING = "gzip-json-v1";
@@ -24,6 +29,10 @@ export interface RemoteSkill {
   localFingerprint: string;
   contentHash: string;
   uploadedFromPath: string;
+  portableScope?: SkillPortableScope | null;
+  relativePath?: string;
+  identityVersion?: number;
+  legacy?: boolean;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -40,18 +49,27 @@ export interface RemoteSkillVersion {
   localFingerprint: string;
   contentHash: string;
   uploadedFromPath: string;
+  portableScope?: SkillPortableScope | null;
+  relativePath?: string;
+  identityVersion?: number;
+  legacy?: boolean;
   version: number;
   createdAt: string;
   updatedAt: string;
 }
 
-// One logical skill (agent + name fingerprint) with its full version history.
+// One logical portable Skill identity with its full version history. Fingerprint aliases
+// keep safely inferred pre-v2 rows attached to the same cross-device record.
 export interface RemoteSkillGroup {
   fingerprint: string;
+  fingerprints?: string[];
   agent: InstalledSkill["agent"];
   name: string;
   description: string;
   source: InstalledSkill["source"];
+  portableScope: SkillPortableScope | null;
+  relativePath: string;
+  legacy: boolean;
   latest: RemoteSkillVersion;
   versions: RemoteSkillVersion[];
 }
@@ -68,16 +86,43 @@ interface SkillFilesSnapshot {
 }
 
 export type SkillSyncStatus =
-  | { kind: "unconfigured"; setupSql: string; message: string }
+  | { kind: "unconfigured"; setupSql: string; message: string; remediation: "settings" }
   | { kind: "ready"; setupSql: string }
-  | { kind: "missing-table"; setupSql: string; message: string }
-  | { kind: "error"; setupSql: string; message: string };
+  | { kind: "missing-table"; setupSql: string; message: string; remediation: "sql" }
+  | { kind: "missing-storage"; setupSql: string; message: string; remediation: "sql" }
+  | { kind: "error"; setupSql: string; message: string; remediation: "settings" | "sql" };
 
 export interface SkillSyncSnapshot {
   status: SkillSyncStatus;
   remoteSkillGroups: RemoteSkillGroup[];
   bindings: SkillSyncBinding[];
+  relations?: SkillSyncRelation[];
   scannedAt: number;
+}
+
+export type SkillSyncState = "local-only" | "synced" | "local-newer" | "remote-newer" | "remote-only" | "conflict" | "legacy";
+
+export interface SkillSyncRelation {
+  identity: string;
+  localSkillPath: string | null;
+  localContentHash: string;
+  remoteFingerprint: string | null;
+  remoteLatestId: string | null;
+  remoteContentHash: string;
+  state: SkillSyncState;
+}
+
+export interface SkillSyncBatchFailure {
+  id: string;
+  message: string;
+}
+
+export interface SkillSyncBatchResult {
+  requested: number;
+  succeeded: string[];
+  skipped: Array<{ id: string; reason: string }>;
+  conflicts: string[];
+  failures: SkillSyncBatchFailure[];
 }
 
 export interface SkillSyncUploadConflict {
@@ -123,6 +168,9 @@ interface SupabaseSkillRow {
   local_fingerprint: string;
   content_hash: string | null;
   uploaded_from_path: string | null;
+  portable_scope?: string | null;
+  relative_path?: string | null;
+  identity_version?: number | null;
   created_at: string;
   updated_at: string;
   version: number | null;
@@ -148,6 +196,9 @@ export function buildSkillSyncSetupSql(tableName = AGENT_SESSION_SEARCH_SKILLS_T
     "  local_fingerprint text not null,",
     "  content_hash text not null default '',",
     "  uploaded_from_path text not null default '',",
+    "  portable_scope text,",
+    "  relative_path text not null default '',",
+    "  identity_version integer not null default 1,",
     "  version integer not null default 1,",
     "  metadata jsonb not null default '{}'::jsonb,",
     "  created_at timestamptz not null default now(),",
@@ -156,6 +207,9 @@ export function buildSkillSyncSetupSql(tableName = AGENT_SESSION_SEARCH_SKILLS_T
     "",
     "-- Upgrade an existing table created before version history was added.",
     `alter table public.${tableName} add column if not exists content_hash text not null default '';`,
+    `alter table public.${tableName} add column if not exists portable_scope text;`,
+    `alter table public.${tableName} add column if not exists relative_path text not null default '';`,
+    `alter table public.${tableName} add column if not exists identity_version integer not null default 1;`,
     "",
     "-- Create the private Storage bucket used for large bundled skill files.",
     "insert into storage.buckets (id, name, public)",
@@ -184,6 +238,7 @@ export function buildSkillSyncSetupSql(tableName = AGENT_SESSION_SEARCH_SKILLS_T
     `  execute function public.${tableName}_touch_updated_at();`,
     "",
     `alter table public.${tableName} enable row level security;`,
+    `grant select, insert, update, delete on table public.${tableName} to anon;`,
     "",
     `drop policy if exists "agent_session_search_skills_personal_sync" on public.${tableName};`,
     `create policy "agent_session_search_skills_personal_sync"`,
@@ -200,11 +255,22 @@ export function buildSkillSyncSetupSql(tableName = AGENT_SESSION_SEARCH_SKILLS_T
     "  to anon",
     `  using (bucket_id = '${AGENT_SESSION_SKILLS_BUCKET}')`,
     `  with check (bucket_id = '${AGENT_SESSION_SKILLS_BUCKET}');`,
+    "",
+    "grant select on table storage.buckets to anon;",
+    "grant select, insert, update, delete on table storage.objects to anon;",
+    `drop policy if exists "${AGENT_SESSION_SKILLS_BUCKET}_bucket_metadata" on storage.buckets;`,
+    `create policy "${AGENT_SESSION_SKILLS_BUCKET}_bucket_metadata"`,
+    "  on storage.buckets",
+    "  for select",
+    "  to anon",
+    `  using (id = '${AGENT_SESSION_SKILLS_BUCKET}');`,
   ].join("\n");
 }
 
-export function skillSyncFingerprint(skill: Pick<InstalledSkill, "agent" | "name">): string {
-  return createHash("sha256").update(`${skill.agent}:${skill.name.trim().toLowerCase()}`).digest("hex");
+export function skillSyncFingerprint(skill: Pick<InstalledSkill, "source" | "rootPath" | "directoryPath">): string {
+  const location = portableSkillLocation(skill);
+  if (!location) throw new Error("Only user and shared Skills can be synced.");
+  return createHash("sha256").update(location.identity).digest("hex");
 }
 
 // Stable content hash over the SKILL.md body plus every bundled file (ordering is fixed by
@@ -216,14 +282,30 @@ export function skillSyncContentHash(markdown: string, files: SkillSyncFile[]): 
     hash.update("\u0000");
     hash.update(file.relativePath);
     hash.update("\u0000");
-    hash.update(file.contentBase64);
+    hash.update(Buffer.from(file.contentBase64, "base64"));
+  }
+  return hash.digest("hex");
+}
+
+export async function skillSyncLocalContentHash(
+  skill: Pick<InstalledSkill, "directoryPath" | "markdown">,
+): Promise<string> {
+  const root = path.resolve(skill.directoryPath);
+  const files = await collectSkillDirectoryFilePaths(root);
+  const hash = createHash("sha256");
+  hash.update(skill.markdown);
+  for (const filePath of files) {
     hash.update("\u0000");
-    hash.update(file.mode === undefined ? "" : String(file.mode));
+    hash.update(path.relative(root, filePath).split(path.sep).join("/"));
+    hash.update("\u0000");
+    hash.update(await fs.promises.readFile(filePath));
   }
   return hash.digest("hex");
 }
 
 export function buildSkillVersionBasePayload(skill: InstalledSkill): { base: SkillVersionBasePayload; contentHash: string } {
+  const location = portableSkillLocation(skill);
+  if (!location) throw new Error("Only user and shared Skills can be synced.");
   const skillFiles = collectSkillDirectoryFiles(skill.directoryPath);
   const contentHash = skillSyncContentHash(skill.markdown, skillFiles);
   return {
@@ -236,11 +318,11 @@ export function buildSkillVersionBasePayload(skill: InstalledSkill): { base: Ski
       markdown: skill.markdown,
       local_fingerprint: skillSyncFingerprint(skill),
       content_hash: contentHash,
-      uploaded_from_path: skill.path,
+      uploaded_from_path: "",
+      portable_scope: location.scope,
+      relative_path: location.relativePath,
+      identity_version: 2,
       metadata: {
-        directoryPath: skill.directoryPath,
-        rootPath: skill.rootPath,
-        mtimeMs: skill.mtimeMs,
         skillFiles,
       },
     },
@@ -250,20 +332,34 @@ export function buildSkillVersionBasePayload(skill: InstalledSkill): { base: Ski
 export function groupRemoteSkillVersions(versions: RemoteSkillVersion[]): RemoteSkillGroup[] {
   const groups = new Map<string, RemoteSkillVersion[]>();
   for (const version of versions) {
-    const list = groups.get(version.localFingerprint) ?? [];
+    const identity = !version.legacy && version.portableScope && version.relativePath
+      ? `${version.portableScope}/${version.relativePath}`
+      : null;
+    const groupKey = identity ? `portable:${identity}` : `legacy:${version.localFingerprint}`;
+    const list = groups.get(groupKey) ?? [];
     list.push(version);
-    groups.set(version.localFingerprint, list);
+    groups.set(groupKey, list);
   }
   const result: RemoteSkillGroup[] = [];
-  for (const [fingerprint, list] of groups) {
-    const sorted = [...list].sort((a, b) => b.version - a.version);
+  for (const list of groups.values()) {
+    const sorted = [...list].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || b.version - a.version);
     const latest = sorted[0];
+    const fingerprints = [...new Set(sorted.map((version) => version.localFingerprint))];
+    const identity = !latest.legacy && latest.portableScope && latest.relativePath
+      ? `${latest.portableScope}/${latest.relativePath}`
+      : null;
+    const canonicalFingerprint = identity ? createHash("sha256").update(identity).digest("hex") : latest.localFingerprint;
+    const fingerprint = canonicalFingerprint;
     result.push({
       fingerprint,
+      fingerprints,
       agent: latest.agent,
       name: latest.name,
       description: latest.description,
       source: latest.source,
+      portableScope: latest.portableScope ?? null,
+      relativePath: latest.relativePath ?? "",
+      legacy: latest.legacy ?? true,
       latest,
       versions: sorted,
     });
@@ -291,17 +387,36 @@ export class SupabaseSkillSyncClient {
 
   async checkStatus(): Promise<SkillSyncStatus> {
     const setupSql = buildSkillSyncSetupSql();
-    const response = await this.request(`/${AGENT_SESSION_SEARCH_SKILLS_TABLE}?select=id&limit=1`, { method: "GET" });
-    if (response.ok) return { kind: "ready", setupSql };
+    const response = await this.request(`/${AGENT_SESSION_SEARCH_SKILLS_TABLE}?select=id,portable_scope,relative_path,identity_version&limit=1`, { method: "GET" });
+    if (response.ok) {
+      const bucketResponse = await this.request(`/storage/v1/bucket/${AGENT_SESSION_SKILLS_BUCKET}`, { method: "GET" });
+      if (bucketResponse.ok) return { kind: "ready", setupSql };
+      const bucketBody = await readResponseBody(bucketResponse);
+      return {
+        kind: "missing-storage",
+        setupSql,
+        remediation: "sql",
+        message: skillSyncStorageErrorMessage(bucketResponse.status, bucketBody),
+      };
+    }
     const body = await readResponseBody(response);
     if (isMissingTableError(response.status, body)) {
       return {
         kind: "missing-table",
         setupSql,
+        remediation: "sql",
         message: `Supabase table ${AGENT_SESSION_SEARCH_SKILLS_TABLE} was not found.`,
       };
     }
-    return { kind: "error", setupSql, message: supabaseErrorMessage(response.status, body) };
+    if (isMissingSchemaColumnError(body)) {
+      return {
+        kind: "error",
+        setupSql,
+        remediation: "sql",
+        message: "Skill sync needs the latest setup SQL before it can compare local and cloud versions.",
+      };
+    }
+    return { kind: "error", setupSql, remediation: "settings", message: supabaseErrorMessage(response.status, body) };
   }
 
   async listRemoteSkillVersions(): Promise<RemoteSkillVersion[]> {
@@ -334,6 +449,55 @@ export class SupabaseSkillSyncClient {
     const [skill] = parseFullRows(body);
     if (!skill) throw new Error("Remote skill was not found.");
     return this.hydrateRemoteSkillFiles(skill);
+  }
+
+  async deleteRemoteSkillGroup(localFingerprint: string): Promise<string[]> {
+    const response = await this.request(
+      `/${AGENT_SESSION_SEARCH_SKILLS_TABLE}?local_fingerprint=eq.${encodeURIComponent(localFingerprint)}&select=id,metadata`,
+      { method: "GET" },
+    );
+    const body = await readResponseBody(response);
+    if (!response.ok) throw new Error(supabaseErrorMessage(response.status, body));
+    const rows = Array.isArray(body) ? body : [];
+    return this.deleteRemoteSkillRows(rows);
+  }
+
+  async deleteRemoteSkillVersions(remoteSkillIds: string[]): Promise<string[]> {
+    const ids = [...new Set(remoteSkillIds)];
+    const safeIds = ids.filter((id) => /^[0-9a-f-]+$/i.test(id));
+    if (safeIds.length !== ids.length) throw new Error("Remote Skill returned an invalid record id.");
+    if (safeIds.length === 0) return [];
+    const response = await this.request(
+      `/${AGENT_SESSION_SEARCH_SKILLS_TABLE}?id=in.(${safeIds.join(",")})&select=id,metadata`,
+      { method: "GET" },
+    );
+    const body = await readResponseBody(response);
+    if (!response.ok) throw new Error(supabaseErrorMessage(response.status, body));
+    return this.deleteRemoteSkillRows(Array.isArray(body) ? body : []);
+  }
+
+  private async deleteRemoteSkillRows(rows: unknown[]): Promise<string[]> {
+    const ids = rows.flatMap((row) => row && typeof row === "object" && typeof (row as { id?: unknown }).id === "string"
+      ? [(row as { id: string }).id]
+      : []);
+    const objectKeys = rows.flatMap((row) => {
+      if (!row || typeof row !== "object") return [];
+      const metadata = (row as { metadata?: unknown }).metadata;
+      if (!metadata || typeof metadata !== "object") return [];
+      const key = (metadata as Record<string, unknown>).skillFilesObjectKey;
+      return typeof key === "string" && key ? [key] : [];
+    });
+    for (const key of [...new Set(objectKeys)]) await this.deleteStorageObject(key);
+    if (ids.length === 0) return [];
+    const safeIds = ids.filter((id) => /^[0-9a-f-]+$/i.test(id));
+    if (safeIds.length !== ids.length) throw new Error("Remote Skill returned an invalid record id.");
+    const deleteResponse = await this.request(
+      `/${AGENT_SESSION_SEARCH_SKILLS_TABLE}?id=in.(${safeIds.join(",")})`,
+      { method: "DELETE" },
+    );
+    const deleteBody = await readResponseBody(deleteResponse);
+    if (!deleteResponse.ok) throw new Error(supabaseErrorMessage(deleteResponse.status, deleteBody));
+    return ids;
   }
 
   async insertSkillVersion(base: SkillVersionBasePayload, version: number): Promise<RemoteSkill> {
@@ -402,7 +566,7 @@ export class SupabaseSkillSyncClient {
     if (Buffer.byteLength(filesJson, "utf8") <= SKILL_FILES_STORAGE_THRESHOLD_BYTES) return base;
 
     const compressed = gzipSync(Buffer.from(filesJson, "utf8"), { level: 9 });
-    const objectKey = `skills/${base.local_fingerprint}/v${version}/files.json.gz`;
+    const objectKey = `skills/${base.local_fingerprint}/v${version}/${randomUUID()}.files.json.gz`;
     await this.uploadStorageObject(objectKey, Uint8Array.from(compressed).buffer);
     return {
       ...base,
@@ -462,6 +626,13 @@ export class SupabaseSkillSyncClient {
     const bytes = Buffer.from(await response.arrayBuffer());
     if (!response.ok) throw new Error(skillSyncStorageErrorMessage(response.status, bytes.toString("utf8")));
     return bytes;
+  }
+
+  private async deleteStorageObject(key: string): Promise<void> {
+    const response = await this.storageRequest(key, { method: "DELETE" });
+    if (!response.ok && response.status !== 404) {
+      throw new Error(skillSyncStorageErrorMessage(response.status, await readResponseBody(response)));
+    }
   }
 
   private async storageRequest(path: string, init: RequestInit): Promise<Response> {
@@ -540,6 +711,9 @@ function isFullRow(value: unknown): value is SupabaseSkillRow {
 }
 
 function versionFromRow(row: SupabaseSkillRow): RemoteSkillVersion {
+  const portableScope = parsePortableScope(row.portable_scope) ?? portableScopeForSkillSource(row.source as RemoteSkillVersion["source"]);
+  const relativePath = normalizeRemoteRelativePath(row.relative_path ?? "") || normalizeRemoteRelativePath(legacyRelativePath(row.uploaded_from_path ?? ""));
+  const identityVersion = row.identity_version ?? 1;
   return {
     id: row.id,
     name: row.name,
@@ -549,10 +723,32 @@ function versionFromRow(row: SupabaseSkillRow): RemoteSkillVersion {
     localFingerprint: row.local_fingerprint,
     contentHash: row.content_hash ?? "",
     uploadedFromPath: row.uploaded_from_path ?? "",
+    portableScope,
+    relativePath,
+    identityVersion,
+    legacy: !portableScope || !relativePath,
     version: row.version ?? 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function parsePortableScope(value: unknown): SkillPortableScope | null {
+  return value === "codex-user" || value === "claude-user" || value === "shared" ? value : null;
+}
+
+function legacyRelativePath(uploadedFromPath: string): string {
+  const segments = uploadedFromPath.replace(/\\/g, "/").split("/").filter(Boolean);
+  if (segments.at(-1)?.toLowerCase() === "skill.md") segments.pop();
+  return segments.at(-1) ?? "";
+}
+
+function normalizeRemoteRelativePath(value: string): string {
+  const normalized = value.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  if (!normalized || normalized.includes("\0")) return "";
+  const segments = normalized.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) return "";
+  return segments.join("/");
 }
 
 function fullSkillFromRow(row: SupabaseSkillRow): RemoteSkill {
@@ -601,6 +797,20 @@ function collectSkillDirectoryFiles(directoryPath: string): SkillSyncFile[] {
     }
   };
   visit(root);
+  return files;
+}
+
+async function collectSkillDirectoryFilePaths(directoryPath: string): Promise<string[]> {
+  const files: string[] = [];
+  const visit = async (dir: string): Promise<void> => {
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const filePath = path.join(dir, entry.name);
+      if (entry.isDirectory()) await visit(filePath);
+      else if (entry.isFile()) files.push(filePath);
+    }
+  };
+  await visit(directoryPath);
   return files;
 }
 
@@ -654,6 +864,17 @@ function isMissingTableError(status: number, body: unknown): boolean {
     code === "42P01" ||
     code === "PGRST205" ||
     (typeof message === "string" && /table|relation/i.test(message) && /not found|does not exist/i.test(message))
+  );
+}
+
+function isMissingSchemaColumnError(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const code = (body as { code?: unknown }).code;
+  const message = (body as { message?: unknown }).message;
+  return (
+    code === "PGRST204" &&
+    typeof message === "string" &&
+    /column|schema cache|could not find/i.test(message)
   );
 }
 

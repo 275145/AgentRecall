@@ -14,11 +14,14 @@ import type {
   RemoteSessionListItem,
   RemoteSessionStatus,
   RemoteSessionUploadResult,
+  SessionSyncItem,
 } from "../core/remote-session-sync";
 import type { ResumeRouteResult } from "../core/resume-router";
+import type { SessionSyncHookStatus } from "../core/session-sync-queue";
 import type { TraceEventQueryOptions } from "../core/session-store";
-import type { RemoteSkill, SkillSyncInstallResult, SkillSyncSnapshot, SkillSyncUploadOutcome } from "../core/skill-sync";
+import type { RemoteSkill, SkillSyncBatchResult, SkillSyncInstallResult, SkillSyncSnapshot, SkillSyncUploadOutcome } from "../core/skill-sync";
 import type { DeleteInstalledSkillResult, InstalledSkillsSnapshot } from "../core/skill-manager";
+import type { SkillDiffSnapshot } from "../core/skill-diff";
 import type { SkillUsageRefreshStatus } from "../core/skill-usage";
 import type { SshConfigHost } from "../core/ssh-config";
 import type {
@@ -110,12 +113,22 @@ const api = {
   getSkillSyncSnapshot: (): Promise<SkillSyncSnapshot> => ipcRenderer.invoke("skills:sync-snapshot"),
   uploadSkillToSync: (skillPath: string, force?: boolean): Promise<SkillSyncUploadOutcome> => ipcRenderer.invoke("skills:sync-upload", skillPath, force),
   installSyncedSkill: (remoteSkillId: string): Promise<SkillSyncInstallResult> => ipcRenderer.invoke("skills:sync-install", remoteSkillId),
+  downloadSyncedSkills: (fingerprints: string[]): Promise<SkillSyncBatchResult> => ipcRenderer.invoke("skills:sync-download-many", fingerprints),
+  deleteSyncedSkills: (fingerprints: string[]): Promise<SkillSyncBatchResult> => ipcRenderer.invoke("skills:sync-delete-many", fingerprints),
   getSyncedSkillVersion: (remoteSkillId: string): Promise<RemoteSkill> => ipcRenderer.invoke("skills:sync-get-version", remoteSkillId),
+  getSyncedSkillDiff: (localSkillPath: string | null, remoteSkillId: string | null): Promise<SkillDiffSnapshot> =>
+    ipcRenderer.invoke("skills:sync-diff", localSkillPath, remoteSkillId),
   copySkillSyncSetupSql: (): Promise<void> => ipcRenderer.invoke("skills:sync-copy-setup-sql"),
+  copyCombinedSyncSetupSql: (): Promise<void> => ipcRenderer.invoke("supabase:copy-combined-setup-sql"),
+  openSupabaseSqlEditor: (target: "sessions" | "skills"): Promise<void> => ipcRenderer.invoke("supabase:open-sql-editor", target),
   getRemoteSessionStatus: (): Promise<RemoteSessionStatus> => ipcRenderer.invoke("remote-session:status"),
   copyRemoteSessionSetupSql: (): Promise<void> => ipcRenderer.invoke("remote-session:copy-setup-sql"),
-  uploadRemoteSession: (sessionKey: string): Promise<RemoteSessionUploadResult> => ipcRenderer.invoke("remote-session:upload", sessionKey),
+  getSessionSyncHookStatus: (): Promise<SessionSyncHookStatus> => ipcRenderer.invoke("remote-session:hook-status"),
+  installSessionSyncHooks: (): Promise<SessionSyncHookStatus> => ipcRenderer.invoke("remote-session:install-hooks"),
+  uninstallSessionSyncHooks: (): Promise<SessionSyncHookStatus> => ipcRenderer.invoke("remote-session:uninstall-hooks"),
+  uploadRemoteSession: (sessionKey: string, force?: boolean): Promise<RemoteSessionUploadResult> => ipcRenderer.invoke("remote-session:upload", sessionKey, force),
   listRemoteSessions: (query?: string): Promise<RemoteSessionListItem[]> => ipcRenderer.invoke("remote-session:list", query),
+  listSessionSyncItems: (): Promise<SessionSyncItem[]> => ipcRenderer.invoke("remote-session:sync-items"),
   getRemoteSessionDetail: (remoteId: string): Promise<RemoteSessionDetailSnapshot> => ipcRenderer.invoke("remote-session:detail", remoteId),
   chooseRemoteRestoreProject: (): Promise<string | null> => ipcRenderer.invoke("remote-session:choose-project"),
   restoreRemoteSession: (remoteId: string, target: MigrationAgent, localProjectPath: string): Promise<SessionMigrationResult> =>

@@ -54,7 +54,9 @@ async function main() {
     if (Number.isInteger(waitPid) && waitPid > 0 && waitPid !== process.pid) await waitForProcessExit(waitPid, 30_000);
     if (process.argv.includes("--stop-app")) await stopRunningApp();
     process.stdout.write(`正在安装 Agent-Session-Search v${manifest.version}...\n`);
-    await installUpdate(manifest);
+    await installUpdate(manifest, {
+      nodePath: process.env.AGENT_SESSION_SEARCH_NODE_PATH,
+    });
     await clearInstallStatus().catch(() => undefined);
     process.stdout.write(`Agent-Session-Search v${manifest.version} 安装完成，正在重新启动。\n`);
     await relaunchInstalledApp();

@@ -28,6 +28,7 @@ const fallbackSyncSnapshot: SkillSyncSnapshot = {
   status: {
     kind: "unconfigured",
     setupSql: "setup sql",
+    remediation: "settings",
     message: "Configure Supabase sync.",
   },
   remoteSkillGroups: [],
@@ -50,6 +51,7 @@ describe("skills panel loading", () => {
       status: {
         kind: "error",
         setupSql: "setup sql",
+        remediation: "settings",
         message: "column agent_session_search_skills.content_hash does not exist",
       },
       remoteSkillGroups: [],

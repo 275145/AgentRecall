@@ -4,6 +4,12 @@
 
 - Before searching local files or text, check whether `rg` is available. Prefer `rg` and `rg --files` over `grep` or slower alternatives.
 
+## Code structure
+
+- Prefer changing the existing function or component directly when logic has only one caller.
+- Create a helper only when it is reused across independent call sites or isolates a meaningful domain, lifecycle, safety, concurrency, or resource-management boundary.
+- Do not add trivial pass-through wrappers, single-use aliases, or functions exported only to make an implementation detail directly testable. Test observable behavior through the owning function or component instead.
+
 ## Development branches and release notes
 
 - Every independent development branch must add exactly one user-facing release note before opening an MR.
@@ -23,3 +29,11 @@
 - Every MR merged into `main` automatically publishes a GitHub Release after all release checks pass.
 - A release containing any `新增功能` entry bumps the minor version; a release containing only `Bug 修复` entries bumps the patch version.
 - Do not manually create an application tag or GitHub Release unless recovering a failed automated release.
+
+## Safe test and packaging workflow
+
+- Tests that exercise installation, update, uninstall, hooks, MCP setup, Skills, or session discovery must use a temporary `HOME`, temporary npm prefix, and synthetic fixtures. Never read, upload, rewrite, or delete the real user's Claude, Codex, Skills, Supabase, Electron, or session data.
+- Do not run global install or uninstall tests against the developer's active Node.js prefix. Use a temporary prefix and remove it after the test.
+- Validate behavior on both macOS and Windows paths. Keep platform-specific assertions behind explicit platform branches, and do not assume `/Users/...` paths or POSIX-only commands.
+- Package smoke tests must build first, install the generated tarball into a temporary prefix, verify the packaged CLI, and clean all temporary files and child processes.
+- If a UI or Electron process is started during testing, stop it before reporting completion. Do not leave update locks, temporary runtimes, test databases, or generated package archives behind.

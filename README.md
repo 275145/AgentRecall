@@ -56,6 +56,14 @@ npm install -g https://github.com/zszz3/agent-session-search/releases/latest/dow
 
 完整的安装、网络镜像、SSH 依赖、更新和卸载说明见 [Install.md](./Install.md)。
 
+安装指定旧版本或回滚时，把版本号写进 Release 链接，例如：
+
+```bash
+npm install -g https://github.com/zszz3/agent-session-search/releases/download/v0.2.0/agent-session-search.tgz
+```
+
+完整卸载请先运行 `agent-session-search uninstall` 清理本应用写入的 statusLine、usage hook、会话同步 Hook、MCP 引用和缓存，再执行 `npm uninstall -g agent-session-search`；会话数据库、Supabase 配置和用户偏好会保留。
+
 ## 功能
 
 ### 核心功能
@@ -69,7 +77,7 @@ npm install -g https://github.com/zszz3/agent-session-search/releases/latest/dow
 - **跨 Agent 迁移会话**：
   支持在 Claude Code、Codex、CodeBuddy、CodeWiz 及已启用的扩展 CLI 间迁移本地会话；远程恢复支持 Claude Code、Codex、CodeBuddy 和 CodeWiz。
 - **远程保存和跨设备恢复会话**：
-  支持使用自己的 Supabase 项目手动上传会话快照，在另一台设备搜索远程会话、查看完整详情，并恢复到 Claude Code / Codex / CodeBuddy 中继续工作。
+  支持使用自己的 Supabase 项目手动或自动上传会话快照，在另一台设备搜索远程会话、查看完整详情，并恢复到 Claude Code / Codex / CodeBuddy 中继续工作。
 - **统一查看 Agent 用量和额度**：
   统计今日、近 7 天、近 30 天和全部时间的各 Agent token 使用量；同时查看 Claude Code / Codex 的当前额度状态。
 - **统一管理 Skills 和 API Provider**：
@@ -104,11 +112,14 @@ CodeBuddy CLI、CodeWiz、TClaude、TCodex、Claude Code Internal、Codex Intern
 
 远程会话同步用于把本机某段会话保存到你自己的 Supabase 项目里。另一台设备配置同一个 Supabase URL 和 anon key 后，可以打开远程会话列表，搜索、按来源筛选、查看详情，并把远程会话恢复到本机任意支持的 Agent 中。比如设备 A 上传了一段 Codex 会话，设备 B 可以在远程会话列表里查看这段会话，并选择恢复到 Claude Code、Codex 或 CodeBuddy。
 
-当前版本按**单人使用、手动同步快照**设计：
+当前版本按**单人使用、由用户控制同步**设计：
 
 - 不做用户隔离，也不需要登录系统；默认使用你自己的 Supabase 项目和 anon key。
-- 不会自动后台同步。本地会话继续对话后，远程仍然是上次上传时的快照；需要再次点击上传才会更新远程版本。
-- 同一段本地会话重复上传会覆盖远程的最新快照；内容没变会自动跳过，不维护多版本历史。
+- 默认使用手动上传。也可以在设置中安装 Claude Code 与 Codex 会话 Hook；每轮回复完成后 Hook 只记录待同步会话，由常驻托盘的 App 按稳定内容 revision 更新云端。App 未运行时会在下次启动后继续处理。
+- 自动同步不会覆盖内容冲突；本地和云端都改变时仍需在同步窗口中人工选择处理方式。关闭远程会话同步或点击“移除 Hook”会清理本应用安装的 Hook，不会删除云端数据。
+- 同步窗口会同时读取全部可同步的本地会话和云端副本，显示“仅本地、待更新云端、已同步、云端较新、仅云端、内容冲突”；判断依据是稳定内容 revision，而不是设备路径、上传时间或修改时间。
+- 本地和云端都改变时会标记冲突，批量上传自动跳过；只有用户明确选择覆盖云端时才会覆盖。
+- 顶部支持全选当前结果、批量上传和批量删除云端副本。删除云端副本不会删除本地会话；恢复永远创建新的本地副本。
 - 远程详情包含会话元数据、消息、tool call / trace event、标签和 AI summary 等当前详情页支持的信息。
 - 恢复时会使用远程保存的 portable session，并要求在当前设备选择一个本地项目目录作为恢复目标路径。
 
@@ -116,11 +127,12 @@ CodeBuddy CLI、CodeWiz、TClaude、TCodex、Claude Code Internal、Codex Intern
 
 1. 在 [Supabase Dashboard](https://supabase.com/dashboard) 创建或选择一个自己的项目。
 2. 在 Project Settings -> API 中复制 Project URL 和 anon key。
-3. 回到应用的 Settings -> Remote sync，填入 Supabase URL 和 anon key，并开启 Enable remote session sync。
-4. 打开顶部工具栏的云图标 Remote Sessions，点击 Copy SQL。
-5. 把复制出来的 SQL 粘贴到 Supabase SQL Editor 执行一次。
+3. 回到应用的 Settings -> Remote sync，开启远程会话同步，再填入 Supabase URL 和 anon key。
+4. 在“首次配置”中点击“复制最新 SQL”，再点击“打开 SQL Editor”；应用会直接打开当前 Supabase 项目的 SQL Editor。
+5. 粘贴并执行 SQL，回到应用即可手动上传和恢复。会话或 Skills 页面以后提示结构或权限需要更新时，按同样步骤执行对应页面提供的最新 SQL，再点击刷新即可。
+6. 如需自动同步，点击“安装 Hook”。Codex 首次使用时会提示审查 Hook，请在 Codex 中执行 `/hooks` 并确认信任；Claude Code 与 Codex 的其他 Hook 配置会保留。
 
-初始化 SQL 会创建：
+首次配置 SQL 会一次初始化会话和 Skills 同步；其中会话同步会创建：
 
 - 表：`public.agent_session_remote_sessions`
 - Storage bucket：`agent-session-remote`
@@ -132,9 +144,7 @@ CodeBuddy CLI、CodeWiz、TClaude、TCodex、Claude Code Internal、Codex Intern
 
 ### 上传会话
 
-1. 在本地搜索结果里打开一段会话详情。
-2. 点击详情页顶部带云上传图标的 Upload / 上传按钮。
-3. 上传成功后，这段会话会出现在 Remote Sessions 列表中。
+打开顶部的 Session sync / 会话同步窗口，直接选择“仅本地”或“待更新云端”的会话并点击“上传到云端”。该窗口读取本机全部可同步会话，不受主界面当前搜索、筛选或选中状态影响。
 
 如果同一段会话已经上传过：
 
@@ -180,12 +190,12 @@ CodeBuddy CLI、CodeWiz、TClaude、TCodex、Claude Code Internal、Codex Intern
 
 1. 在 [Supabase Dashboard](https://supabase.com/dashboard) 创建或选择一个自己的项目。
 2. 在 Project Settings -> API 中复制 Project URL 和 anon key。
-3. 回到应用的 Settings -> Skills，填入 Supabase URL 和 anon key，并启用同步。
-4. 如果远程表还不存在，打开 Skills 管理窗口的 Remote 视图，点击 Copy setup SQL，把 SQL 粘贴到 Supabase SQL Editor 执行一次。
-5. 回到 Local 视图，选择本地 Skill 后点击 Upload；同一个 Agent 下同名 Skill 用稳定指纹识别为同一个 Skill。每次上传只要内容有变化就会累积一个新版本（v1、v2……），内容未变则自动跳过；如果最新远程版本来自另一个同名 Skill，会先弹窗确认再追加版本。
-6. 在另一台机器配置相同的 Supabase URL 和 anon key 后，打开 Remote 视图，在版本下拉里可以切换、预览任意历史版本（最新版标记为 latest），选好后点击 Install locally / Update local 安装该版本。
+3. 回到应用的 Settings -> Skills，填入 Supabase URL 和 anon key；“首次配置”提供与会话同步相同的组合 SQL，并可直接打开当前项目的 SQL Editor。
+4. 执行 SQL 后启用同步。如果表、Storage bucket、字段或权限以后需要更新，Local 页会显示修复提示；点击“复制最新 SQL”和“打开 SQL Editor”，执行后原地刷新。配置健康前不会出现 Remote 标签，也不会把本地 Skill 误标为“未上传”。
+5. Local 页只允许同步 Codex user、Claude user 和 Shared Skills，并显示未上传、已同步、本地较新、云端较新或冲突。System、Project 和 Claude Plugin Skills 分别交给系统、Git 和插件管理器，不参与上传。
+6. Remote 页支持多选、下载全部和删除云端选中。下载全部只安装远程独有或明确云端较新的最新版；已同步、本地较新、冲突和旧版不兼容记录会跳过并汇总原因。
 
-同步会上传整个 Skill 目录中的普通文件，包括 `SKILL.md`、`references/`、`scripts/`、示例文件等；下载时会还原到本机的用户级 Skill 目录中。Codex Skill 默认安装到 `$CODEX_HOME/skills`（未设置时为 `~/.codex/skills`），Claude Code Skill 默认安装到 `~/.claude/skills`。
+同步会上传整个 Skill 目录中的普通文件，包括 `SKILL.md`、`references/`、`scripts/`、示例文件等。云端只保存可移植作用域和相对目录，不保存上传设备的绝对路径；下载时按 `codex-user` → `$CODEX_HOME/skills`、`claude-user` → `~/.claude/skills`、`shared` → `~/.agents/skills` 定位，因此换设备或跨 macOS / Windows 不会沿用旧机器路径。同名 Skill 也会按作用域和相对目录区分。
 
 如果你在更早版本里已经创建过 `agent_session_search_skills` 表，升级后请重新执行一次 Copy setup SQL 的脚本来启用版本历史；脚本是幂等的，会补上 `content_hash` 列，并把唯一约束从 `local_fingerprint` 改为 `(local_fingerprint, version)`。
 
@@ -214,15 +224,14 @@ npm run dev
 | `npm run build` | 生成生产构建到 `out/` |
 | `npm run release-note:check` | 检查当前开发分支的用户更新说明 |
 
-需要用全局命令测试当前源码时，先完成构建，再安装当前目录：
+需要验证正式安装包时，使用仓库提供的隔离冒烟测试：
 
 ```bash
 npm run build
-npm install -g .
-agent-session-search --no-update-check
+npm run package:smoke
 ```
 
-这只适合开发验证。普通用户应始终使用上方的 Release 链接安装。更完整的环境检查和故障排查见 [Install.md](./Install.md)。
+它会把生成的 tarball 安装到临时 HOME 和临时 npm prefix，验证命令后自动清理，不会改动开发者正在使用的全局 Node.js 目录。普通用户应始终使用上方的 Release 链接安装。更完整的环境检查和故障排查见 [Install.md](./Install.md)。
 
 ## 仓库文档
 

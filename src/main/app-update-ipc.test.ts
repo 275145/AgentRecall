@@ -41,4 +41,11 @@ describe("application update IPC", () => {
     expect(mainSource).toContain("复制安装命令");
     expect(mainSource).toContain("shell.openExternal(client.LATEST_RELEASE_URL)");
   });
+
+  it("does not check or install releases from an Electron development build", () => {
+    expect(mainSource).toContain("function developmentAppUpdateStatus(): AppUpdateStatus");
+    expect(mainSource).toContain("if (!app.isPackaged) return developmentAppUpdateStatus();");
+    expect(mainSource).toContain('throw new Error("Application updates are unavailable in development builds.")');
+    expect(mainSource).toContain("if (app.isPackaged && getSettings().autoCheckUpdates)");
+  });
 });

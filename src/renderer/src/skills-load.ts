@@ -36,6 +36,7 @@ export async function loadSkillsPanelData({
       status: {
         kind: "error",
         setupSql: fallbackSyncSnapshot.status.setupSql,
+        remediation: "settings",
         message: syncError.message,
       },
       remoteSkillGroups: [],

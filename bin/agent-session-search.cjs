@@ -27,7 +27,10 @@ async function scheduleUpdate(manifest, { stopApp }) {
   await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   const args = [path.join(__dirname, "apply-update.cjs"), "--manifest", manifestPath];
   if (stopApp) args.push("--stop-app");
-  const child = spawn(process.execPath, args, { stdio: "inherit", env: process.env });
+  const child = spawn(process.execPath, args, {
+    stdio: "inherit",
+    env: { ...process.env, AGENT_SESSION_SEARCH_NODE_PATH: process.execPath },
+  });
   const exitCode = await new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("exit", (code, signal) => {
@@ -46,6 +49,7 @@ function launchApp() {
   const electronPath = require("electron");
   const appEntry = path.join(__dirname, "..", "out", "main", "index.js");
   const environment = { ...process.env };
+  environment.AGENT_SESSION_SEARCH_NODE_PATH = process.execPath;
   delete environment.ELECTRON_RUN_AS_NODE;
   const child = spawn(electronPath, [appEntry], { detached: true, stdio: "ignore", env: environment });
   child.on("error", (error) => {
@@ -60,6 +64,14 @@ async function main() {
   const version = currentVersion();
   if (args.has("--version") || args.has("-v")) {
     process.stdout.write(`${version}\n`);
+    return;
+  }
+  if (args.has("uninstall")) {
+    const { uninstall } = require("./uninstall.cjs");
+    const result = await uninstall();
+    for (const message of result.messages) process.stdout.write(`${message}\n`);
+    for (const error of result.errors) process.stderr.write(`${error}\n`);
+    if (result.errors.length > 0) process.exitCode = 1;
     return;
   }
 
@@ -116,6 +128,7 @@ async function main() {
   });
   await ensureElectronRuntimeForLaunch({
     packagePath: path.resolve(__dirname, ".."),
+    nodePath: process.execPath,
     onWait: () => {
       if (process.stdout.isTTY) process.stdout.write("正在等待 Electron 运行时准备完成...\n");
     },

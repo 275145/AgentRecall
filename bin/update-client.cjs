@@ -2,7 +2,7 @@
 "use strict";
 
 const { execFile, execFileSync, spawn } = require("node:child_process");
-const { createHash } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const os = require("node:os");
@@ -54,7 +54,7 @@ function updateLockPath(homeDir = os.homedir()) {
 }
 
 function electronRuntimeLockPath(homeDir = os.homedir()) {
-  return path.join(stateDirectory(homeDir), "electron-runtime.lock");
+  return updateLockPath(homeDir);
 }
 
 async function waitForUpdateCompletion(options = {}) {
@@ -91,10 +91,11 @@ async function acquireUpdateLock(options = {}) {
   const filePath = options.lockPath || updateLockPath(options.homeDir);
   await fsp.mkdir(path.dirname(filePath), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    const candidatePath = `${filePath}.${process.pid}.${randomUUID()}.candidate`;
     try {
-      const handle = await fsp.open(filePath, "wx");
-      await handle.writeFile(`${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}\n`, "utf8");
-      await handle.close();
+      await fsp.writeFile(candidatePath, `${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}\n`, { encoding: "utf8", flag: "wx" });
+      await fsp.link(candidatePath, filePath);
+      await fsp.rm(candidatePath, { force: true });
       return {
         path: filePath,
         release: async () => {
@@ -103,6 +104,7 @@ async function acquireUpdateLock(options = {}) {
         },
       };
     } catch (error) {
+      await fsp.rm(candidatePath, { force: true }).catch(() => undefined);
       if (error?.code !== "EEXIST") throw error;
       const current = await readJson(filePath);
       const ownerPid = Number(current?.pid);
@@ -393,7 +395,11 @@ async function installUpdate(manifest, options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const tempDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-session-search-update-"));
   const archivePath = path.join(tempDirectory, parsed.package.name);
+  const packagePath = options.packagePath || globalPackageRoot({ npmCommand: options.npmCommand });
+  const packageBackupPath = path.join(tempDirectory, "previous-package");
   const statusPath = options.statusPath || installStatusPath(options.homeDir);
+  let installationStarted = false;
+  let packageBackedUp = false;
   await writeJsonAtomic(statusPath, {
     status: "installing",
     version: parsed.version,
@@ -407,11 +413,16 @@ async function installUpdate(manifest, options = {}) {
     const checksum = createHash("sha256").update(bytes).digest("hex");
     if (checksum !== parsed.package.sha256) throw new Error("Update package checksum mismatch.");
     await fsp.writeFile(archivePath, bytes);
-    const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+    if (fs.existsSync(packagePath)) {
+      await fsp.cp(packagePath, packageBackupPath, { recursive: true, force: true });
+      packageBackedUp = true;
+    }
+    const npmCommand = options.npmCommand || (process.platform === "win32" ? "npm.cmd" : "npm");
     const registry = options.registry || process.env.AGENT_SESSION_SEARCH_NPM_REGISTRY || DEFAULT_NPM_REGISTRY;
     const installEnvironment = { ...process.env };
     delete installEnvironment.ELECTRON_RUN_AS_NODE;
     try {
+      installationStarted = true;
       await (options.execFileImpl || execFileAsync)(npmCommand, [
         "install",
         "-g",
@@ -436,6 +447,8 @@ async function installUpdate(manifest, options = {}) {
     }
     await (options.ensureElectronImpl || ensureInstalledElectron)({
       npmCommand,
+      nodePath: options.nodePath,
+      packagePath,
       env: installEnvironment,
       timeoutMs: options.electronInstallTimeoutMs,
     });
@@ -447,13 +460,22 @@ async function installUpdate(manifest, options = {}) {
     });
     return parsed.version;
   } catch (error) {
+    let failure = error;
+    if (installationStarted) {
+      try {
+        await fsp.rm(packagePath, { recursive: true, force: true });
+        if (packageBackedUp) await fsp.cp(packageBackupPath, packagePath, { recursive: true, force: true });
+      } catch (rollbackError) {
+        failure = new Error(`${error instanceof Error ? error.message : String(error)}; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+      }
+    }
     await writeJsonAtomic(statusPath, {
       status: "error",
       version: parsed.version,
       updatedAt: Date.now(),
-      error: error instanceof Error ? error.message : String(error),
+      error: failure instanceof Error ? failure.message : String(failure),
     }).catch(() => undefined);
-    throw error;
+    throw failure;
   } finally {
     await fsp.rm(tempDirectory, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -491,27 +513,49 @@ async function ensureInstalledElectron(options = {}) {
   const run = options.execFileImpl || execFileAsync;
   const nodePath = nodeSubprocessPath(options);
   const timeout = options.timeoutMs ?? 5 * 60_000;
-  const validationScript = [
-    'const fs = require("node:fs");',
-    `const electronPath = require(${JSON.stringify(electronModulePath)});`,
-    'if (!fs.existsSync(electronPath)) throw new Error(`Electron executable is missing: ${electronPath}`);',
-  ].join(" ");
-  const validate = () => run(nodePath, ["-e", validationScript], {
-    env: environment,
-    timeout,
-    maxBuffer: 4 * 1024 * 1024,
-  });
+  let expectedVersion = "";
+  try {
+    expectedVersion = String(JSON.parse(await fsp.readFile(path.join(electronModulePath, "package.json"), "utf8")).version || "").trim();
+  } catch {
+    throw new Error("Electron package version is missing.");
+  }
+  if (!/^\d+\.\d+\.\d+$/.test(expectedVersion)) throw new Error("Electron package version is invalid.");
+  const validationScript = `process.stdout.write(require(${JSON.stringify(electronModulePath)}));`;
+  const validate = async () => {
+    const resolved = await run(nodePath, ["-e", validationScript], {
+      env: environment,
+      timeout,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    const executable = String(resolved?.stdout || "").trim();
+    if (!executable || !fs.existsSync(executable)) throw new Error(`Electron executable is missing: ${executable || "unknown"}`);
+    const loaded = await run(executable, ["--version"], {
+      env: environment,
+      timeout,
+      maxBuffer: 4 * 1024 * 1024,
+      windowsHide: true,
+    });
+    const loadedVersion = String(loaded?.stdout || loaded?.stderr || "").trim().replace(/^v/, "");
+    if (loadedVersion !== expectedVersion) throw new Error(`Electron executable version mismatch: expected ${expectedVersion}, got ${loadedVersion || "unknown"}.`);
+    const installedVersion = (await fsp.readFile(path.join(electronModulePath, "dist", "version"), "utf8")).trim();
+    if (installedVersion !== expectedVersion) throw new Error(`Electron runtime version mismatch: expected ${expectedVersion}, got ${installedVersion || "unknown"}.`);
+    if (!isElectronRuntimeReady(packagePath)) throw new Error("Electron runtime files are incomplete.");
+  };
 
   try {
     await validate();
-    if (!isElectronRuntimeReady(packagePath)) throw new Error("Electron runtime files are incomplete.");
     return;
   } catch {
-    if (isElectronRuntimeReady(packagePath)) return;
-    await fsp.rm(path.join(electronModulePath, "dist"), { recursive: true, force: true });
-    await fsp.rm(path.join(electronModulePath, "path.txt"), { force: true });
+    // Sentinel files are not sufficient: a damaged executable must be repaired.
   }
 
+  const repairId = `${process.pid}-${randomUUID()}`;
+  const distPath = path.join(electronModulePath, "dist");
+  const pathFile = path.join(electronModulePath, "path.txt");
+  const distBackup = path.join(electronModulePath, `.agent-session-search-dist-${repairId}.backup`);
+  const pathBackup = path.join(electronModulePath, `.agent-session-search-path-${repairId}.backup`);
+  if (fs.existsSync(distPath)) await fsp.rename(distPath, distBackup);
+  if (fs.existsSync(pathFile)) await fsp.rename(pathFile, pathBackup);
   try {
     await run(nodePath, [installScript], {
       cwd: electronModulePath,
@@ -520,8 +564,13 @@ async function ensureInstalledElectron(options = {}) {
       maxBuffer: 16 * 1024 * 1024,
     });
     await validate();
-    if (!isElectronRuntimeReady(packagePath)) throw new Error("Electron runtime files are incomplete after reinstall.");
+    await fsp.rm(distBackup, { recursive: true, force: true });
+    await fsp.rm(pathBackup, { force: true });
   } catch (error) {
+    await fsp.rm(distPath, { recursive: true, force: true }).catch(() => undefined);
+    await fsp.rm(pathFile, { force: true }).catch(() => undefined);
+    if (fs.existsSync(distBackup)) await fsp.rename(distBackup, distPath).catch(() => undefined);
+    if (fs.existsSync(pathBackup)) await fsp.rename(pathBackup, pathFile).catch(() => undefined);
     const detail = String(error?.stderr || error?.stdout || error?.message || error).trim();
     throw new Error(`Electron 运行时安装失败：${detail}`);
   }
@@ -567,12 +616,12 @@ async function ensureElectronRuntimeForLaunch(options = {}) {
   if (!lock) throw new Error("无法获取 Electron 运行时安装锁。");
   try {
     const packagePath = options.packagePath || packageRoot();
-    if (isElectronRuntimeReady(packagePath)) return;
     await (options.ensureElectronImpl || ensureInstalledElectron)({
       packagePath,
       timeoutMs: options.timeoutMs,
       execFileImpl: options.execFileImpl,
       env: options.env,
+      nodePath: options.nodePath,
     });
   } finally {
     await lock.release().catch(() => undefined);

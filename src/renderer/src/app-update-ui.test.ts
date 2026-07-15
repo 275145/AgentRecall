@@ -13,7 +13,7 @@ describe("application update UI", () => {
     expect(appSource).toContain('onSkipAppUpdate(false)');
     expect(appSource).toContain('onSkipAppUpdate(true)');
     expect(appSource).toContain("!appUpdateStatus.updateSkipped && !appUpdateStatus.promptSnoozed");
-    expect(appSource).toContain("{shouldSignalAppUpdate && appUpdateStatus?.manifest ? (");
+    expect(appSource).toContain(") : shouldSignalAppUpdate && appUpdateStatus?.manifest ? (");
     expect(appSource).toContain("Update prompt skipped");
     expect(appSource).toContain("Use Check for updates to show the skipped release again.");
     expect(appSource).toContain('className="update-indicator"');
@@ -32,5 +32,11 @@ describe("application update UI", () => {
     expect(card).toMatch(/overflow-y:\s*auto/);
     expect(appSource).toContain("content.scrollTop = 0");
     expect(appSource).toContain("window.requestAnimationFrame");
+  });
+
+  it("labels development builds without presenting release actions", () => {
+    expect(appSource).toContain("appUpdateStatus?.developmentBuild");
+    expect(appSource).toContain('l("Development build", "开发版本")');
+    expect(appSource).toContain('l("Release updates are disabled while running from source.", "从源码运行时不检查或安装正式版本更新。")');
   });
 });

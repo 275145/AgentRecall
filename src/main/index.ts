@@ -66,7 +66,7 @@ import {
   type ToolExecutionResult,
 } from "../core/ai-assistant";
 import { applyMigrationLengthPolicy, createMigrationCompressor } from "../core/session-migration-compression";
-import { migrateSession } from "../core/session-migration";
+import { migrateSession, migrationAgentForSource } from "../core/session-migration";
 import { runLocalSessionMigration } from "./local-session-migration";
 import { targetFilePath, writeMigratedSession } from "../core/session-migration-writers";
 import { writeDbPointer } from "../core/app-paths";
@@ -78,11 +78,13 @@ import { restoreRemotePortableSession } from "../core/remote-session-restore";
 import {
   buildRemoteSessionSetupSql,
   buildRemoteSessionUploadFromStore,
+  buildSessionSyncItems,
   SupabaseRemoteSessionClient,
   type RemoteSessionDetailSnapshot,
   type RemoteSessionListItem,
   type RemoteSessionStatus,
   type RemoteSessionUploadResult,
+  type SessionSyncItem,
 } from "../core/remote-session-sync";
 import { RemoteEnvironmentLifecycle } from "../core/remote-environment-lifecycle";
 import { RemoteWatchManager } from "../core/remote-watch";
@@ -90,7 +92,9 @@ import { SessionStore, type SkillSyncBinding, type TraceEventQueryOptions } from
 import {
   deleteInstalledSkill,
   installRemoteSkillLocally,
+  isSyncableSkill,
   listInstalledSkills,
+  portableSkillLocation,
   skillProjectDirsFromIndexedProjects,
   type InstalledSkill,
   type InstalledSkillsSnapshot,
@@ -99,13 +103,26 @@ import {
   buildSkillSyncSetupSql,
   buildSkillVersionBasePayload,
   groupRemoteSkillVersions,
+  skillSyncFilesFromMetadata,
+  skillSyncLocalContentHash,
   skillSyncFingerprint,
   SupabaseSkillSyncClient,
   type RemoteSkill,
   type SkillSyncInstallResult,
+  type SkillSyncBatchResult,
+  type SkillSyncRelation,
   type SkillSyncSnapshot,
   type SkillSyncUploadOutcome,
 } from "../core/skill-sync";
+import { buildSkillDiffSnapshot, type SkillContentSnapshot, type SkillDiffSnapshot } from "../core/skill-diff";
+import { buildCombinedSupabaseSetupSql, supabaseSqlEditorUrl } from "../core/supabase-setup";
+import {
+  clearSessionSyncQueue,
+  coalesceSessionSyncQueueEvents,
+  readSessionSyncQueue,
+  removeSessionSyncQueueFiles,
+  type SessionSyncHookStatus,
+} from "../core/session-sync-queue";
 import {
   listSkillUsageSources,
   readSkillUsageSourceEvents,
@@ -115,6 +132,7 @@ import {
 import { buildSshArgs, readUserSshConfig } from "../core/ssh-config";
 import {
   AUTO_INDEX_REFRESH_INTERVAL_MS,
+  AUTO_SESSION_SYNC_QUEUE_INTERVAL_MS,
   AUTO_SKILL_USAGE_REFRESH_INTERVAL_MS,
   INITIAL_INDEX_DELAY_MS,
   INITIAL_SKILL_USAGE_REFRESH_DELAY_MS,
@@ -170,6 +188,16 @@ interface SkillUsageHookSetup {
 }
 function loadSkillUsageHookSetup(): SkillUsageHookSetup {
   return requireCjs(SKILL_USAGE_HOOK_SETUP_PATH) as SkillUsageHookSetup;
+}
+
+const SESSION_SYNC_HOOK_SETUP_PATH = path.join(__dirname, "../../bin/setup-session-sync-hook.cjs");
+interface SessionSyncHookSetup {
+  installSessionSyncHooks(options?: Record<string, unknown>): { status: string; detail?: string };
+  uninstallSessionSyncHooks(options?: Record<string, unknown>): { status: string; detail?: string };
+  sessionSyncHookStatus(options?: Record<string, unknown>): { installed: boolean; claude: boolean; codex: boolean; error?: string };
+}
+function loadSessionSyncHookSetup(): SessionSyncHookSetup {
+  return requireCjs(SESSION_SYNC_HOOK_SETUP_PATH) as SessionSyncHookSetup;
 }
 
 const MCP_SETUP_PATH = path.join(__dirname, "../../bin/setup-mcp.cjs");
@@ -282,10 +310,12 @@ async function buildSkillSyncSnapshot(): Promise<SkillSyncSnapshot> {
       status: {
         kind: "unconfigured",
         setupSql,
+        remediation: "settings",
         message: "Configure Supabase URL and anon key in Settings to sync skills.",
       },
       remoteSkillGroups: [],
       bindings: store.listSkillSyncBindings(),
+      relations: [],
       scannedAt: Date.now(),
     };
   }
@@ -293,53 +323,124 @@ async function buildSkillSyncSnapshot(): Promise<SkillSyncSnapshot> {
   const client = createSkillSyncClient();
   const status = await client.checkStatus();
   const remoteSkillGroups = status.kind === "ready" ? groupRemoteSkillVersions(await client.listRemoteSkillVersions()) : [];
+  const bindings = store.listSkillSyncBindings();
   return {
     status,
     remoteSkillGroups,
-    bindings: store.listSkillSyncBindings(),
+    bindings,
+    relations: status.kind === "ready" ? await buildSkillSyncRelations(buildSkillsSnapshot().skills, remoteSkillGroups, bindings) : [],
     scannedAt: Date.now(),
   };
 }
 
+async function buildSkillSyncRelations(
+  skills: InstalledSkill[],
+  remoteGroups: SkillSyncSnapshot["remoteSkillGroups"],
+  bindings: SkillSyncBinding[],
+): Promise<SkillSyncRelation[]> {
+  const syncable = skills.flatMap((skill) => {
+    const location = portableSkillLocation(skill);
+    if (!location) return [];
+    return [{ skill, location }];
+  });
+  const local = await Promise.all(syncable.map(async (entry) => ({
+    ...entry,
+    contentHash: await skillSyncLocalContentHash(entry.skill),
+  })));
+  const localsByIdentity = new Map(local.map((entry) => [entry.location.identity, entry]));
+  const bindingsByIdentity = new Map(bindings.flatMap((binding) => binding.portableIdentity ? [[binding.portableIdentity, binding] as const] : []));
+  const used = new Set<string>();
+  const relations: SkillSyncRelation[] = [];
+
+  for (const group of remoteGroups) {
+    const identity = group.portableScope && group.relativePath ? `${group.portableScope}/${group.relativePath}` : `legacy:${group.fingerprint}`;
+    const localEntry = group.legacy ? null : localsByIdentity.get(identity) ?? null;
+    const binding = bindingsByIdentity.get(identity);
+    if (localEntry) used.add(identity);
+    let state: SkillSyncRelation["state"];
+    if (group.legacy) state = "legacy";
+    else if (!localEntry) state = "remote-only";
+    else if (localEntry.contentHash === group.latest.contentHash) state = "synced";
+    else if (!binding?.lastContentHash) state = "conflict";
+    else {
+      const localChanged = localEntry.contentHash !== binding.lastContentHash;
+      const remoteChanged = group.latest.contentHash !== binding.lastContentHash;
+      state = localChanged && remoteChanged ? "conflict" : localChanged ? "local-newer" : remoteChanged ? "remote-newer" : "synced";
+    }
+    relations.push({
+      identity,
+      localSkillPath: localEntry?.skill.path ?? null,
+      localContentHash: localEntry?.contentHash ?? "",
+      remoteFingerprint: group.fingerprint,
+      remoteLatestId: group.latest.id,
+      remoteContentHash: group.latest.contentHash,
+      state,
+    });
+  }
+  for (const entry of local) {
+    if (used.has(entry.location.identity)) continue;
+    relations.push({
+      identity: entry.location.identity,
+      localSkillPath: entry.skill.path,
+      localContentHash: entry.contentHash,
+      remoteFingerprint: null,
+      remoteLatestId: null,
+      remoteContentHash: "",
+      state: "local-only",
+    });
+  }
+  return relations;
+}
+
 async function uploadLocalSkillToSupabase(skillPath: string, force = false): Promise<SkillSyncUploadOutcome> {
   const skill = findInstalledSkillByPath(skillPath);
+  if (!isSyncableSkill(skill)) throw new Error("Only user and shared Skills can be uploaded.");
   const client = createSkillSyncClient();
+  const location = portableSkillLocation(skill);
+  if (!location) throw new Error("Only user and shared Skills can be uploaded.");
   const fingerprint = skillSyncFingerprint(skill);
   const { base, contentHash } = buildSkillVersionBasePayload(skill);
-  const latest = await client.getLatestSkillVersion(fingerprint);
+  const remoteGroup = groupRemoteSkillVersions(await client.listRemoteSkillVersions())
+    .find((group) => group.fingerprint === fingerprint) ?? null;
+  const latest = remoteGroup?.latest ?? null;
 
   // Nothing changed since the current latest version: keep the binding, don't create noise.
   if (latest && latest.contentHash === contentHash) {
-    const binding = persistSkillSyncBinding(skill.path, latest.id, latest.updatedAt, latest.version, "upload");
+    const binding = persistSkillSyncBinding(skill.path, location.identity, latest.id, latest.updatedAt, latest.version, contentHash, "upload");
     return { status: "skipped", remoteSkillId: latest.id, binding, version: latest.version };
   }
 
-  // The latest version came from a different local skill (different source/path) with different
-  // content. Because identity is agent+name, uploading would push it onto the same version line;
-  // ask the caller to confirm first.
-  if (latest && !force && (latest.source !== skill.source || latest.uploadedFromPath !== skill.path)) {
+  const existingBinding = store.getSkillSyncBindingForPortableIdentity(location.identity);
+  if (latest && !force && (!existingBinding?.lastContentHash || latest.contentHash !== existingBinding.lastContentHash)) {
     return {
       status: "needs-confirmation",
       conflict: {
-        name: skill.name,
-        agent: skill.agent,
+        name: latest.name,
+        agent: latest.agent,
         latestVersion: latest.version,
         latestSource: latest.source,
-        latestPath: latest.uploadedFromPath,
+        latestPath: latest.relativePath ?? "",
       },
     };
   }
 
-  const remoteSkill = await client.uploadSkillVersion(base, (latest?.version ?? 0) + 1);
-  const binding = persistSkillSyncBinding(skill.path, remoteSkill.id, remoteSkill.updatedAt, remoteSkill.version, "upload");
-  return { status: "uploaded", remoteSkill, binding, version: remoteSkill.version };
+  const existingVersions = remoteGroup?.versions
+    .filter((version) => version.localFingerprint === fingerprint)
+    .map((version) => version.version) ?? [];
+  const remoteSkill = await client.uploadSkillVersion(base, Math.max(0, ...existingVersions) + 1);
+  const newBinding = persistSkillSyncBinding(skill.path, location.identity, remoteSkill.id, remoteSkill.updatedAt, remoteSkill.version, contentHash, "upload");
+  return { status: "uploaded", remoteSkill, binding: newBinding, version: remoteSkill.version };
 }
 
 async function installRemoteSkillFromSupabase(remoteSkillId: string): Promise<SkillSyncInstallResult> {
   const client = createSkillSyncClient();
   const remoteSkill = await client.getRemoteSkill(remoteSkillId);
+  if (remoteSkill.legacy || !remoteSkill.portableScope || !remoteSkill.relativePath) {
+    throw new Error("This legacy Skill can only be previewed or deleted because its install location is uncertain.");
+  }
   const installed = installRemoteSkillLocally(remoteSkill);
-  const binding = persistSkillSyncBinding(installed.installedPath, remoteSkill.id, remoteSkill.updatedAt, remoteSkill.version, "download");
+  const identity = `${remoteSkill.portableScope}/${remoteSkill.relativePath}`;
+  const binding = persistSkillSyncBinding(installed.installedPath, identity, remoteSkill.id, remoteSkill.updatedAt, remoteSkill.version, remoteSkill.contentHash, "download");
   return {
     remoteSkill,
     binding,
@@ -352,14 +453,117 @@ function getRemoteSkillVersionDetail(remoteSkillId: string): Promise<RemoteSkill
   return createSkillSyncClient().getRemoteSkill(remoteSkillId);
 }
 
+async function getSyncedSkillDiff(
+  localSkillPath: string | null,
+  remoteSkillId: string | null,
+): Promise<SkillDiffSnapshot> {
+  let localSnapshot: SkillContentSnapshot | null = null;
+  let remoteSnapshot: SkillContentSnapshot | null = null;
+
+  if (localSkillPath) {
+    const localSkill = findInstalledSkillByPath(localSkillPath);
+    const { base, contentHash } = buildSkillVersionBasePayload(localSkill);
+    localSnapshot = {
+      contentHash,
+      files: skillSyncFilesFromMetadata(base.metadata ?? {}),
+    };
+  }
+
+  if (remoteSkillId) {
+    const remoteSkill = await getRemoteSkillVersionDetail(remoteSkillId);
+    const files = skillSyncFilesFromMetadata(remoteSkill.metadata);
+    remoteSnapshot = {
+      contentHash: remoteSkill.contentHash,
+      files: files.some((file) => file.relativePath === "SKILL.md")
+        ? files
+        : [{ relativePath: "SKILL.md", contentBase64: Buffer.from(remoteSkill.markdown, "utf8").toString("base64") }, ...files],
+    };
+  }
+
+  return buildSkillDiffSnapshot(localSnapshot, remoteSnapshot);
+}
+
+async function downloadRemoteSkillGroups(fingerprints: string[]): Promise<SkillSyncBatchResult> {
+  const requested = [...new Set(fingerprints.map((value) => value.trim()).filter(Boolean))];
+  const snapshot = await buildSkillSyncSnapshot();
+  const groups = new Map(snapshot.remoteSkillGroups.map((group) => [group.fingerprint, group]));
+  const relations = new Map((snapshot.relations ?? []).flatMap((relation) => relation.remoteFingerprint ? [[relation.remoteFingerprint, relation] as const] : []));
+  const result: SkillSyncBatchResult = { requested: requested.length, succeeded: [], skipped: [], conflicts: [], failures: [] };
+  await runBounded(requested, 4, async (fingerprint) => {
+    const group = groups.get(fingerprint);
+    const relation = relations.get(fingerprint);
+    if (!group || !relation) {
+      result.skipped.push({ id: fingerprint, reason: "Remote Skill no longer exists." });
+      return;
+    }
+    if (relation.state === "legacy") {
+      result.skipped.push({ id: fingerprint, reason: "Legacy record has no safe install location." });
+      return;
+    }
+    if (relation.state === "synced" || relation.state === "local-newer") {
+      result.skipped.push({ id: fingerprint, reason: relation.state === "synced" ? "Already synced." : "Local version is newer." });
+      return;
+    }
+    if (relation.state === "conflict") {
+      result.conflicts.push(fingerprint);
+      return;
+    }
+    try {
+      await installRemoteSkillFromSupabase(group.latest.id);
+      result.succeeded.push(fingerprint);
+    } catch (error) {
+      result.failures.push({ id: fingerprint, message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+  return result;
+}
+
+async function deleteRemoteSkillGroups(fingerprints: string[]): Promise<SkillSyncBatchResult> {
+  const requested = [...new Set(fingerprints.map((value) => value.trim()).filter(Boolean))];
+  const client = createSkillSyncClient();
+  const groups = new Map(groupRemoteSkillVersions(await client.listRemoteSkillVersions()).map((group) => [group.fingerprint, group]));
+  const result: SkillSyncBatchResult = { requested: requested.length, succeeded: [], skipped: [], conflicts: [], failures: [] };
+  await runBounded(requested, 4, async (fingerprint) => {
+    try {
+      const group = groups.get(fingerprint);
+      if (!group) {
+        result.skipped.push({ id: fingerprint, reason: "Remote Skill no longer exists." });
+        return;
+      }
+      const deletedIds = await client.deleteRemoteSkillVersions(group.versions.map((version) => version.id));
+      if (deletedIds.length === 0) result.skipped.push({ id: fingerprint, reason: "Remote Skill no longer exists." });
+      else {
+        store.deleteSkillSyncBindingsForRemoteIds(deletedIds);
+        result.succeeded.push(fingerprint);
+      }
+    } catch (error) {
+      result.failures.push({ id: fingerprint, message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+  return result;
+}
+
+async function runBounded<T>(items: T[], concurrency: number, action: (item: T) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      await action(items[index]);
+    }
+  });
+  await Promise.all(workers);
+}
+
 function persistSkillSyncBinding(
   localSkillPath: string,
+  portableIdentity: string,
   remoteSkillId: string,
   remoteUpdatedAt: string,
   remoteVersion: number,
+  lastContentHash: string,
   direction: "upload" | "download",
 ): SkillSyncBinding {
-  const binding: SkillSyncBinding = { localSkillPath, remoteSkillId, remoteUpdatedAt, remoteVersion, lastSyncedAt: Date.now(), direction };
+  const binding: SkillSyncBinding = { localSkillPath, portableIdentity, remoteSkillId, remoteUpdatedAt, remoteVersion, lastContentHash, lastSyncedAt: Date.now(), direction };
   store.upsertSkillSyncBinding(binding);
   return binding;
 }
@@ -382,21 +586,69 @@ async function getRemoteSessionStatus(): Promise<RemoteSessionStatus> {
     return {
       kind: "unconfigured",
       setupSql,
+      remediation: "settings",
       message: "Configure Supabase URL and anon key in Settings to sync remote sessions.",
     };
   }
   return createRemoteSessionClient().checkStatus();
 }
 
-async function uploadSessionToRemote(sessionKey: string): Promise<RemoteSessionUploadResult> {
+async function uploadSessionToRemote(sessionKey: string, force = false): Promise<RemoteSessionUploadResult> {
   const client = createRemoteSessionClient();
   await ensureRemoteSessionDetailsLoaded(sessionKey);
-  const { payload, detailJson, portableJson } = buildRemoteSessionUploadFromStore(store, sessionKey);
-  return client.uploadSession(payload, detailJson, portableJson);
+  const binding = store.getSessionSyncBindingForLocalKey(sessionKey);
+  const { payload, detailJson, portableJson } = buildRemoteSessionUploadFromStore(store, sessionKey, Date.now(), binding?.remoteSessionId);
+  if (binding && !force) {
+    const remote = await client.getRemoteSession(binding.remoteSessionId).catch((error) => {
+      if (error instanceof Error && error.message === "Remote session was not found.") return null;
+      throw error;
+    });
+    if (remote) {
+      const localChanged = payload.content_hash !== binding.lastLocalRevision;
+      const remoteChanged = remote.contentHash !== binding.lastRemoteRevision;
+      if (localChanged && remoteChanged) throw new Error("Both local and cloud copies changed. Choose a conflict action before overwriting the cloud copy.");
+    }
+  }
+  const result = await client.uploadSession(payload, detailJson, portableJson);
+  store.upsertSessionSyncBinding({
+    localSessionKey: sessionKey,
+    remoteSessionId: result.remoteSession.id,
+    lastLocalRevision: payload.content_hash,
+    lastRemoteRevision: result.remoteSession.contentHash,
+    lastSyncedAt: Date.now(),
+    direction: "upload",
+  });
+  return result;
 }
 
 function listRemoteSessions(query = ""): Promise<RemoteSessionListItem[]> {
   return createRemoteSessionClient().listRemoteSessions(query);
+}
+
+async function listSessionSyncItems(): Promise<SessionSyncItem[]> {
+  const client = createRemoteSessionClient();
+  const remotes = (await client.listRemoteSessions())
+    .filter((remote) => store.getSession(remote.sourceSessionKey)?.isSubagent !== true);
+  const locals: Array<{ session: SessionSearchResult; revision: string }> = [];
+  await runBounded(store.searchSessions({ limit: 100_000, excludeSubagents: true }), 4, async (session) => {
+    if (!migrationAgentForSource(session.source) || !session.projectPath.trim()) return;
+    try {
+      await ensureRemoteSessionDetailsLoaded(session.sessionKey);
+      const hydrated = store.getSession(session.sessionKey);
+      if (!hydrated) return;
+      const built = buildRemoteSessionUploadFromStore(store, session.sessionKey, 0, store.getSessionSyncBindingForLocalKey(session.sessionKey)?.remoteSessionId);
+      locals.push({ session: hydrated, revision: built.payload.content_hash });
+    } catch (error) {
+      throw new Error(`Could not load ${session.displayTitle || session.sessionKey} before comparing it with the cloud copy: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+  return buildSessionSyncItems(locals, remotes, store.listSessionSyncBindings());
+}
+
+async function deleteRemoteSessionCopies(remoteIds: string[]): Promise<import("../core/remote-session-sync").RemoteSessionDeleteResult> {
+  const result = await createRemoteSessionClient().deleteRemoteSessions(remoteIds);
+  for (const id of [...result.deletedIds, ...result.missingIds]) store.deleteSessionSyncBindingForRemoteId(id);
+  return result;
 }
 
 function getRemoteSessionDetail(remoteId: string): Promise<RemoteSessionDetailSnapshot> {
@@ -415,7 +667,7 @@ async function restoreRemoteSession(
   const settings = await getHydratedSettings();
   const endpoint = (await resolveSummaryEndpointFromSettings()) ?? buildCodexExecEndpoint(settings);
   const compressor = endpoint ? createMigrationCompressor(endpoint, undefined, settings.compressionConcurrency) : null;
-  return restoreRemotePortableSession({
+  const result = await restoreRemotePortableSession({
     remoteId,
     portable,
     target,
@@ -441,6 +693,8 @@ async function restoreRemoteSession(
       projectPathIsDirectory: pathIsDirectory,
     },
   });
+  await bindRestoredSession(client, remoteId, result.targetSessionId);
+  return result;
 }
 
 async function restoreRemoteSessionToSourceEnvironment(
@@ -463,7 +717,7 @@ async function restoreRemoteSessionToSourceEnvironment(
   const endpoint = (await resolveSummaryEndpointFromSettings()) ?? buildCodexExecEndpoint(settings);
   const compressor = endpoint ? createMigrationCompressor(endpoint, undefined, settings.compressionConcurrency) : null;
 
-  return restoreRemotePortableSession({
+  const result = await restoreRemotePortableSession({
     remoteId,
     portable,
     target,
@@ -489,6 +743,27 @@ async function restoreRemoteSessionToSourceEnvironment(
       projectPathIsDirectory: (projectPath) => remotePathIsDirectory(environment, projectPath),
     },
   });
+  await bindRestoredSession(client, remoteId, result.targetSessionId);
+  return result;
+}
+
+async function bindRestoredSession(client: SupabaseRemoteSessionClient, remoteId: string, targetSessionId: string): Promise<void> {
+  try {
+    const local = store.searchSessions({ limit: 100_000 }).find((session) => session.rawId === targetSessionId);
+    if (!local) return;
+    const built = buildRemoteSessionUploadFromStore(store, local.sessionKey, 0, remoteId);
+    const remote = await client.getRemoteSession(remoteId);
+    store.upsertSessionSyncBinding({
+      localSessionKey: local.sessionKey,
+      remoteSessionId: remoteId,
+      lastLocalRevision: built.payload.content_hash,
+      lastRemoteRevision: remote.contentHash,
+      lastSyncedAt: Date.now(),
+      direction: "restore",
+    });
+  } catch {
+    // The restored conversation is still usable when its sync binding cannot be recorded.
+  }
 }
 
 function findInstalledSkillByPath(skillPath: string): InstalledSkill {
@@ -509,6 +784,10 @@ let activeIndexRun: Promise<IndexStatus> | null = null;
 let autoIndexTimer: ReturnType<typeof setInterval> | null = null;
 let initialSkillUsageTimer: ReturnType<typeof setTimeout> | null = null;
 let autoSkillUsageTimer: ReturnType<typeof setInterval> | null = null;
+let autoSessionSyncQueueTimer: ReturnType<typeof setInterval> | null = null;
+let sessionSyncQueueRunning = false;
+let sessionSyncHookLastProcessedAt: number | null = null;
+let sessionSyncHookLastError: string | null = null;
 let registeredGlobalShortcut: string | null = null;
 let remoteWatchManager: RemoteWatchManager | null = null;
 let remoteEnvironmentLifecycle: RemoteEnvironmentLifecycle | null = null;
@@ -548,6 +827,7 @@ function getSettings(): AppSettings {
 function emptyAppUpdateStatus(): AppUpdateStatus {
   return {
     currentVersion: loadUpdateClient().currentVersion(),
+    developmentBuild: false,
     checkedAt: 0,
     fromCache: false,
     updateAvailable: false,
@@ -560,15 +840,24 @@ function updateAutoCheckDisabledByEnvironment(): boolean {
   return process.env.AGENT_SESSION_SEARCH_NO_UPDATE_CHECK === "1";
 }
 
+function developmentAppUpdateStatus(): AppUpdateStatus {
+  return {
+    ...emptyAppUpdateStatus(),
+    developmentBuild: true,
+  };
+}
+
 async function refreshAppUpdateStatus(force = false): Promise<AppUpdateStatus> {
+  if (!app.isPackaged) return developmentAppUpdateStatus();
   if (activeAppUpdateCheck) return activeAppUpdateCheck;
   activeAppUpdateCheck = loadUpdateClient()
     .checkForUpdate({ currentVersion: loadUpdateClient().currentVersion(), force })
     .then(async (status) => {
       const installStatus = await loadUpdateClient().readInstallStatus().catch(() => null);
+      const releaseStatus = { ...status, developmentBuild: false };
       const nextStatus = installStatus?.status === "error" && installStatus.error
-        ? { ...status, error: `上次更新失败：${installStatus.error}` }
-        : status;
+        ? { ...releaseStatus, error: `上次更新失败：${installStatus.error}` }
+        : releaseStatus;
       appUpdateStatus = nextStatus;
       mainWindow?.webContents.send("app-update:status", nextStatus);
       return nextStatus;
@@ -580,6 +869,7 @@ async function refreshAppUpdateStatus(force = false): Promise<AppUpdateStatus> {
 }
 
 async function getAppUpdateStatus(force = false): Promise<AppUpdateStatus> {
+  if (!app.isPackaged) return developmentAppUpdateStatus();
   if (!force && updateAutoCheckDisabledByEnvironment()) return appUpdateStatus ?? emptyAppUpdateStatus();
   if (!force && !getSettings().autoCheckUpdates) return appUpdateStatus ?? emptyAppUpdateStatus();
   if (!force && appUpdateStatus) return appUpdateStatus;
@@ -587,6 +877,7 @@ async function getAppUpdateStatus(force = false): Promise<AppUpdateStatus> {
 }
 
 async function startAppUpdate(): Promise<AppUpdateInstallResult> {
+  if (!app.isPackaged) throw new Error("Application updates are unavailable in development builds.");
   const manifest = loadUpdateClient().parseUpdateManifest(appUpdateStatus?.manifest);
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "agent-session-search-app-update-"));
   const manifestPath = path.join(directory, "update.json");
@@ -1345,6 +1636,83 @@ async function runIndexSync(): Promise<IndexStatus> {
   return activeIndexRun;
 }
 
+function getSessionSyncHookStatus(): SessionSyncHookStatus {
+  const hook = loadSessionSyncHookSetup().sessionSyncHookStatus();
+  const queue = readSessionSyncQueue();
+  return {
+    installed: hook.installed,
+    claude: hook.claude,
+    codex: hook.codex,
+    pending: queue.events.length,
+    lastProcessedAt: sessionSyncHookLastProcessedAt,
+    lastError: hook.error || sessionSyncHookLastError,
+  };
+}
+
+async function drainSessionSyncQueue(): Promise<void> {
+  if (sessionSyncQueueRunning || !getSettings().remoteSyncEnabled) return;
+  const queued = readSessionSyncQueue();
+  removeSessionSyncQueueFiles(queued.invalidFiles);
+  const coalesced = coalesceSessionSyncQueueEvents(queued.events);
+  removeSessionSyncQueueFiles(coalesced.supersededFiles);
+  if (coalesced.events.length === 0) return;
+
+  sessionSyncQueueRunning = true;
+  sessionSyncHookLastError = null;
+  try {
+    await runIndexSync();
+    const localSessions = store.searchSessions({ limit: 100_000, excludeSubagents: false })
+      .filter((session) => isLocalSessionEnvironment(session));
+
+    for (const event of coalesced.events) {
+      if (!getSettings().remoteSyncEnabled || !loadSessionSyncHookSetup().sessionSyncHookStatus().installed) break;
+      const session = localSessions.find((candidate) =>
+        migrationAgentForSource(candidate.source) === event.agent &&
+        ((event.transcriptPath && path.resolve(candidate.filePath) === path.resolve(event.transcriptPath)) || candidate.rawId === event.sessionId),
+      );
+      if (!session) continue;
+      if (session.isSubagent) {
+        removeSessionSyncQueueFiles([event.filePath]);
+        continue;
+      }
+
+      try {
+        await ensureRemoteSessionDetailsLoaded(session.sessionKey);
+        const binding = store.getSessionSyncBindingForLocalKey(session.sessionKey);
+        const built = buildRemoteSessionUploadFromStore(store, session.sessionKey, 0, binding?.remoteSessionId);
+        if (binding && binding.lastLocalRevision === built.payload.content_hash) {
+          removeSessionSyncQueueFiles([event.filePath]);
+          sessionSyncHookLastProcessedAt = Date.now();
+          continue;
+        }
+        await uploadSessionToRemote(session.sessionKey);
+        removeSessionSyncQueueFiles([event.filePath]);
+        sessionSyncHookLastProcessedAt = Date.now();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        sessionSyncHookLastError = message;
+        if (message.includes("Both local and cloud copies changed")) {
+          removeSessionSyncQueueFiles([event.filePath]);
+        }
+      }
+    }
+  } finally {
+    sessionSyncQueueRunning = false;
+  }
+}
+
+function startAutoSessionSyncQueue(): void {
+  if (autoSessionSyncQueueTimer) return;
+  autoSessionSyncQueueTimer = setInterval(() => void drainSessionSyncQueue(), AUTO_SESSION_SYNC_QUEUE_INTERVAL_MS);
+  void drainSessionSyncQueue();
+}
+
+function stopAutoSessionSyncQueue(): void {
+  if (!autoSessionSyncQueueTimer) return;
+  clearInterval(autoSessionSyncQueueTimer);
+  autoSessionSyncQueueTimer = null;
+}
+
 const loadCachedLiveSessionSnapshot = createCachedLiveSessionSnapshotLoader();
 
 let summaryBackfillRunning = false;
@@ -1889,9 +2257,15 @@ function registerIpc(): void {
         `Shortcut ${globalShortcutLabel(next.globalShortcut)} could not be registered. It may be used by another app.`,
       );
     }
+    if ("remoteSyncEnabled" in settings && !next.remoteSyncEnabled) {
+      const result = loadSessionSyncHookSetup().uninstallSessionSyncHooks();
+      if (result.status === "error") throw new Error(result.detail || "Could not remove the session sync hooks.");
+      clearSessionSyncQueue();
+      sessionSyncHookLastError = null;
+    }
     persistApiProviderKeysFromUpdate(settings, next);
     settingsStore.set(withoutApiProviderKeys(next));
-    if ("autoCheckUpdates" in settings) {
+    if ("autoCheckUpdates" in settings && app.isPackaged) {
       await loadUpdateClient().writeUpdatePreference(next.autoCheckUpdates);
       if (next.autoCheckUpdates) void refreshAppUpdateStatus(false);
     }
@@ -1906,16 +2280,55 @@ function registerIpc(): void {
   ipcMain.handle("skills:sync-snapshot", () => buildSkillSyncSnapshot());
   ipcMain.handle("skills:sync-upload", (_event, skillPath: string, force?: boolean) => uploadLocalSkillToSupabase(skillPath, force ?? false));
   ipcMain.handle("skills:sync-install", (_event, remoteSkillId: string) => installRemoteSkillFromSupabase(remoteSkillId));
+  ipcMain.handle("skills:sync-download-many", (_event, fingerprints: unknown) =>
+    downloadRemoteSkillGroups(Array.isArray(fingerprints) ? fingerprints.filter((value): value is string => typeof value === "string") : []),
+  );
+  ipcMain.handle("skills:sync-delete-many", (_event, fingerprints: unknown) =>
+    deleteRemoteSkillGroups(Array.isArray(fingerprints) ? fingerprints.filter((value): value is string => typeof value === "string") : []),
+  );
   ipcMain.handle("skills:sync-get-version", (_event, remoteSkillId: string) => getRemoteSkillVersionDetail(remoteSkillId));
+  ipcMain.handle("skills:sync-diff", (_event, localSkillPath: unknown, remoteSkillId: unknown) =>
+    getSyncedSkillDiff(
+      typeof localSkillPath === "string" ? localSkillPath : null,
+      typeof remoteSkillId === "string" ? remoteSkillId : null,
+    ),
+  );
   ipcMain.handle("skills:sync-copy-setup-sql", () => {
     clipboard.writeText(buildSkillSyncSetupSql());
+  });
+  ipcMain.handle("supabase:copy-combined-setup-sql", () => {
+    clipboard.writeText(buildCombinedSupabaseSetupSql());
+  });
+  ipcMain.handle("supabase:open-sql-editor", (_event, target: unknown) => {
+    const settings = getSettings();
+    const projectUrl = target === "skills" ? settings.skillSyncSupabaseUrl : settings.remoteSyncSupabaseUrl;
+    return shell.openExternal(supabaseSqlEditorUrl(projectUrl));
   });
   ipcMain.handle("remote-session:status", () => getRemoteSessionStatus());
   ipcMain.handle("remote-session:copy-setup-sql", () => {
     clipboard.writeText(buildRemoteSessionSetupSql());
   });
-  ipcMain.handle("remote-session:upload", (_event, sessionKey: string) => uploadSessionToRemote(sessionKey));
+  ipcMain.handle("remote-session:hook-status", () => getSessionSyncHookStatus());
+  ipcMain.handle("remote-session:install-hooks", () => {
+    const settings = getSettings();
+    if (!settings.remoteSyncEnabled || !settings.remoteSyncSupabaseUrl || !settings.remoteSyncSupabaseAnonKey) {
+      throw new Error("Enable remote session sync and configure Supabase before installing hooks.");
+    }
+    const result = loadSessionSyncHookSetup().installSessionSyncHooks();
+    if (result.status === "error") throw new Error(result.detail || "Could not configure the session sync hooks.");
+    void drainSessionSyncQueue();
+    return getSessionSyncHookStatus();
+  });
+  ipcMain.handle("remote-session:uninstall-hooks", () => {
+    const result = loadSessionSyncHookSetup().uninstallSessionSyncHooks();
+    if (result.status === "error") throw new Error(result.detail || "Could not remove the session sync hooks.");
+    clearSessionSyncQueue();
+    sessionSyncHookLastError = null;
+    return getSessionSyncHookStatus();
+  });
+  ipcMain.handle("remote-session:upload", (_event, sessionKey: string, force?: boolean) => uploadSessionToRemote(sessionKey, force ?? false));
   ipcMain.handle("remote-session:list", (_event, query?: string) => listRemoteSessions(query ?? ""));
+  ipcMain.handle("remote-session:sync-items", () => listSessionSyncItems());
   ipcMain.handle("remote-session:detail", (_event, remoteId: string) => getRemoteSessionDetail(remoteId));
   ipcMain.handle("remote-session:choose-project", () => chooseLocalProjectDirectory());
   ipcMain.handle("remote-session:restore", (event, remoteId: string, target: MigrationAgent, localProjectPath: string) =>
@@ -1924,9 +2337,12 @@ function registerIpc(): void {
   ipcMain.handle("remote-session:restore-to-source-environment", (event, remoteId: string, target: MigrationAgent) =>
     restoreRemoteSessionToSourceEnvironment(event, remoteId, target),
   );
-  ipcMain.handle("remote-session:delete", (_event, remoteId: string) => createRemoteSessionClient().deleteRemoteSession(remoteId));
+  ipcMain.handle("remote-session:delete", async (_event, remoteId: string) => {
+    const result = await deleteRemoteSessionCopies([remoteId]);
+    return result.deletedIds.includes(remoteId);
+  });
   ipcMain.handle("remote-session:delete-many", (_event, remoteIds: unknown) =>
-    createRemoteSessionClient().deleteRemoteSessions(
+    deleteRemoteSessionCopies(
       Array.isArray(remoteIds) ? remoteIds.filter((id): id is string => typeof id === "string") : [],
     ),
   );
@@ -2049,8 +2465,10 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.whenReady().then(() => {
-  void loadUpdateClient().writeAppProcess(process.pid).catch((error) => console.error(`Failed to write app process state: ${String(error)}`));
-  void loadUpdateClient().writeUpdatePreference(getSettings().autoCheckUpdates).catch((error) => console.error(`Failed to write update preference: ${String(error)}`));
+  if (app.isPackaged) {
+    void loadUpdateClient().writeAppProcess(process.pid).catch((error) => console.error(`Failed to write app process state: ${String(error)}`));
+    void loadUpdateClient().writeUpdatePreference(getSettings().autoCheckUpdates).catch((error) => console.error(`Failed to write update preference: ${String(error)}`));
+  }
   const dbPath = path.join(app.getPath("userData"), "session-search.sqlite");
   store = new SessionStore(dbPath);
   // Publish the live database path so the standalone MCP server can find it.
@@ -2070,7 +2488,7 @@ app.whenReady().then(() => {
   createApplicationMenu();
   createWindow();
   createTray();
-  void showPreviousUpdateResult();
+  if (app.isPackaged) void showPreviousUpdateResult();
   const shortcut = getSettings().globalShortcut;
   if (!registerAppGlobalShortcut(shortcut)) {
     console.error(`Global shortcut ${globalShortcutLabel(shortcut)} could not be registered.`);
@@ -2080,7 +2498,8 @@ app.whenReady().then(() => {
   setTimeout(() => void runIndexSync(), INITIAL_INDEX_DELAY_MS);
   startAutoIndexRefresh();
   startAutoSkillUsageRefresh();
-  if (getSettings().autoCheckUpdates) setTimeout(() => void refreshAppUpdateStatus(false), 1_000);
+  startAutoSessionSyncQueue();
+  if (app.isPackaged && getSettings().autoCheckUpdates) setTimeout(() => void refreshAppUpdateStatus(false), 1_000);
 });
 
 app.on("window-all-closed", () => {
@@ -2092,9 +2511,10 @@ app.on("activate", () => {
 });
 
 app.on("before-quit", () => {
-  void loadUpdateClient().clearAppProcess(process.pid).catch(() => undefined);
+  if (app.isPackaged) void loadUpdateClient().clearAppProcess(process.pid).catch(() => undefined);
   stopAutoIndexRefresh();
   stopAutoSkillUsageRefresh();
+  stopAutoSessionSyncQueue();
   remoteEnvironmentLifecycle?.stopAll();
   void stopCodexChatProxy();
   globalShortcut.unregisterAll();

@@ -4,6 +4,7 @@ import {
   buildRemoteSessionSetupSql,
   buildRemoteSessionSnapshot,
   buildRemoteSessionUploadFromStore,
+  buildSessionSyncItems,
   filterRemoteSessions,
   parseDetailSnapshot,
   parsePortableSession,
@@ -77,6 +78,64 @@ describe("remote session sync model", () => {
     expect(sql).toContain("to anon");
     expect(sql).toContain("'cursor'");
     expect(sql).toContain(`${REMOTE_SESSION_TABLE}_source_agent_check`);
+    expect(sql).toContain(`grant select, insert, update, delete on table public.${REMOTE_SESSION_TABLE} to anon`);
+    expect(sql).toContain("grant select on table storage.buckets to anon");
+  });
+
+  it("authenticates the storage bucket health check", async () => {
+    const requests: Array<{ url: string; headers: Headers }> = [];
+    const client = new SupabaseRemoteSessionClient({
+      url: "https://example.supabase.co",
+      anonKey: "anon-key",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), headers: new Headers(init?.headers) });
+        if (String(url).includes("/rest/v1/")) return new Response("[]", { status: 200 });
+        return new Response(JSON.stringify({ id: "agent-session-remote" }), { status: 200 });
+      },
+    });
+
+    await expect(client.checkStatus()).resolves.toMatchObject({ kind: "ready" });
+    const bucketRequest = requests.find((request) => request.url.includes("/storage/v1/bucket/"));
+    expect(bucketRequest?.headers.get("apikey")).toBe("anon-key");
+    expect(bucketRequest?.headers.get("authorization")).toBe("Bearer anon-key");
+  });
+
+  it("marks database setup failures as SQL-remediable", async () => {
+    const missingTableClient = new SupabaseRemoteSessionClient({
+      url: "https://example.supabase.co",
+      anonKey: "anon-key",
+      fetchImpl: async () => new Response(JSON.stringify({ code: "PGRST205", message: "Could not find the table" }), { status: 404 }),
+    });
+    const missingColumnClient = new SupabaseRemoteSessionClient({
+      url: "https://example.supabase.co",
+      anonKey: "anon-key",
+      fetchImpl: async () => new Response(JSON.stringify({ code: "PGRST204", message: "Could not find source_environment_id in the schema cache" }), { status: 400 }),
+    });
+    let requestCount = 0;
+    const missingBucketClient = new SupabaseRemoteSessionClient({
+      url: "https://example.supabase.co",
+      anonKey: "anon-key",
+      fetchImpl: async () => {
+        requestCount += 1;
+        return requestCount === 1
+          ? new Response("[]", { status: 200 })
+          : new Response(JSON.stringify({ message: "Bucket not found" }), { status: 404 });
+      },
+    });
+
+    await expect(missingTableClient.checkStatus()).resolves.toMatchObject({ kind: "missing-table", remediation: "sql" });
+    await expect(missingColumnClient.checkStatus()).resolves.toMatchObject({ kind: "error", remediation: "sql" });
+    await expect(missingBucketClient.checkStatus()).resolves.toMatchObject({ kind: "missing-storage", remediation: "sql" });
+  });
+
+  it("marks authentication failures as settings-remediable", async () => {
+    const client = new SupabaseRemoteSessionClient({
+      url: "https://example.supabase.co",
+      anonKey: "invalid-key",
+      fetchImpl: async () => new Response(JSON.stringify({ message: "Invalid API key" }), { status: 401 }),
+    });
+
+    await expect(client.checkStatus()).resolves.toMatchObject({ kind: "error", remediation: "settings" });
   });
 
   it("builds a stable remote upload payload with detail and portable object keys", () => {
@@ -85,8 +144,9 @@ describe("remote session sync model", () => {
     const second = buildRemoteSessionPayload({ session: SESSION, detail, portable: PORTABLE, now: 11_000 });
 
     expect(first.payload.id).toBe(remoteSessionId("codex:abc"));
-    expect(first.payload.detail_object_key).toBe(`sessions/${first.payload.id}/detail.json`);
-    expect(first.payload.portable_object_key).toBe(`sessions/${first.payload.id}/portable.json`);
+    expect(first.payload.detail_object_key).toMatch(new RegExp(`^sessions/${first.payload.id}/[0-9a-f-]+\\.detail\\.json$`));
+    expect(first.payload.portable_object_key).toMatch(new RegExp(`^sessions/${first.payload.id}/[0-9a-f-]+\\.portable\\.json$`));
+    expect(first.payload.detail_object_key).not.toBe(second.payload.detail_object_key);
     expect(first.payload.content_hash).toBe(second.payload.content_hash);
     expect(first.payload.search_text).toContain("Login is broken");
     expect(first.payload.search_text).toContain("Fixed the login bug");
@@ -140,6 +200,59 @@ describe("remote session sync model", () => {
     expect(remoteSessionContentHash(detail, PORTABLE)).toBe(remoteSessionContentHash(detail, { ...PORTABLE, messages: [...PORTABLE.messages] }));
   });
 
+  it("keeps the revision stable when only export time, device labels, or paths change", () => {
+    const first = buildRemoteSessionSnapshot(SESSION, MESSAGES, [], 10_000);
+    const second = buildRemoteSessionSnapshot({
+      ...SESSION,
+      filePath: "/another/device/session.jsonl",
+      projectPath: "D:\\repo",
+      environmentId: "device-b",
+      environmentLabel: "Windows laptop",
+    }, MESSAGES, [], 99_000);
+    expect(remoteSessionContentHash(second, { ...PORTABLE, projectPath: "D:\\repo" })).toBe(remoteSessionContentHash(first, PORTABLE));
+  });
+
+  it("classifies all six session sync states without using modified timestamps", () => {
+    const local = (key: string, revision: string) => ({ session: { ...SESSION, sessionKey: key, rawId: key, lastActivityAt: 999_999 }, revision });
+    const remote = (id: string, key: string, revision: string) => ({
+      id, sourceSessionKey: key, sourceAgent: "codex" as const, sourceSource: "codex-cli", sourceEnvironmentId: "local",
+      sourceEnvironmentKind: "local", sourceEnvironmentLabel: "Local", title: key, projectPath: "/repo", startedAt: "x",
+      updatedAt: 1, contentHash: revision, revisionVersion: 2, messageCount: 1, traceEventCount: 0, aiSummary: null, tags: [],
+      searchText: "", detailObjectKey: `${id}/detail`, portableObjectKey: `${id}/portable`, detailSha256: "d", portableSha256: "p",
+      createdAt: 1, syncedAt: 1,
+    });
+    const locals = [local("local-only", "l"), local("synced", "same"), local("local-newer", "l2"), local("remote-newer", "base"), local("conflict", "l2")];
+    const remotes = [remote("r-synced", "synced", "same"), remote("r-local", "local-newer", "base"), remote("r-remote", "remote-newer", "r2"), remote("r-conflict", "conflict", "r2"), remote("r-only", "remote-only", "r")];
+    const bindings = [
+      { localSessionKey: "local-newer", remoteSessionId: "r-local", lastLocalRevision: "base", lastRemoteRevision: "base", lastSyncedAt: 1, direction: "upload" as const },
+      { localSessionKey: "remote-newer", remoteSessionId: "r-remote", lastLocalRevision: "base", lastRemoteRevision: "base", lastSyncedAt: 1, direction: "upload" as const },
+      { localSessionKey: "conflict", remoteSessionId: "r-conflict", lastLocalRevision: "base", lastRemoteRevision: "base", lastSyncedAt: 1, direction: "upload" as const },
+    ];
+    expect(Object.fromEntries(buildSessionSyncItems(locals, remotes, bindings).map((item) => [item.local?.sessionKey ?? item.remote?.sourceSessionKey, item.state]))).toEqual({
+      "local-only": "local-only", synced: "synced", "local-newer": "local-newer", "remote-newer": "remote-newer", conflict: "conflict", "remote-only": "remote-only",
+    });
+  });
+
+  it("uses an explicit restore binding without duplicating the same remote session", () => {
+    const local = { session: { ...SESSION, sessionKey: "restored:local", rawId: "restored" }, revision: "same" };
+    const remote = {
+      id: "remote-original", sourceSessionKey: "codex:abc", sourceAgent: "codex" as const, sourceSource: "codex-cli",
+      sourceEnvironmentId: "local", sourceEnvironmentKind: "local" as const, sourceEnvironmentLabel: "Local",
+      title: "Fix login bug", projectPath: "/repo", startedAt: "x", updatedAt: 1, contentHash: "same", revisionVersion: 2,
+      messageCount: 2, traceEventCount: 0, aiSummary: null, tags: [], searchText: "", detailObjectKey: "d",
+      portableObjectKey: "p", detailSha256: "dh", portableSha256: "ph", createdAt: 1, syncedAt: 1,
+    };
+    const binding = {
+      localSessionKey: "restored:local", remoteSessionId: "remote-original", lastLocalRevision: "same",
+      lastRemoteRevision: "same", lastSyncedAt: 1, direction: "restore" as const,
+    };
+
+    const items = buildSessionSyncItems([local], [remote], [binding]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ state: "synced", local: { sessionKey: "restored:local" }, remote: { id: "remote-original" } });
+  });
+
   it("parses detail and portable snapshots defensively", () => {
     const detail = buildRemoteSessionSnapshot(SESSION, MESSAGES, [], 10_000);
     expect(parseDetailSnapshot(detail).messages).toHaveLength(2);
@@ -188,7 +301,7 @@ describe("remote session sync model", () => {
     expect(filterRemoteSessions(sessions, "missing")).toHaveLength(0);
   });
 
-  it("deletes selected remote rows before cleaning their storage objects", async () => {
+  it("deletes storage objects before removing the remote database row", async () => {
     const detail = buildRemoteSessionSnapshot(SESSION, MESSAGES, [], 10_000);
     const { payload } = buildRemoteSessionPayload({ session: SESSION, detail, portable: PORTABLE, now: 11_000 });
     const calls: string[] = [];
@@ -217,8 +330,8 @@ describe("remote session sync model", () => {
       failures: [],
     });
     expect(calls[0]).toBe("row-GET");
-    expect(calls[1]).toBe("row-DELETE");
-    expect(calls.slice(2).sort()).toEqual(["storage-DELETE", "storage-DELETE"]);
+    expect(calls.slice(1, 3).sort()).toEqual(["storage-DELETE", "storage-DELETE"]);
+    expect(calls[3]).toBe("row-DELETE");
   });
 
   it("keeps a selected session as failed when its delete preflight cannot reach Supabase", async () => {
@@ -234,6 +347,23 @@ describe("remote session sync model", () => {
       missingIds: [],
       failures: [{ id: "remote-1", message: "network unavailable" }],
     });
+  });
+
+  it("does not treat a failed remote lookup as a missing row during upload", async () => {
+    const detail = buildRemoteSessionSnapshot(SESSION, MESSAGES, [], 10_000);
+    const { payload, detailJson, portableJson } = buildRemoteSessionPayload({ session: SESSION, detail, portable: PORTABLE, now: 11_000 });
+    let storageWrites = 0;
+    const client = new SupabaseRemoteSessionClient({
+      url: "https://example.supabase.co",
+      anonKey: "anon",
+      fetchImpl: async (url) => {
+        if (String(url).includes("/storage/v1/object/")) storageWrites += 1;
+        return new Response(JSON.stringify({ message: "temporary gateway failure" }), { status: 503 });
+      },
+    });
+
+    await expect(client.uploadSession(payload, detailJson, portableJson)).rejects.toThrow("temporary gateway failure");
+    expect(storageWrites).toBe(0);
   });
 
   it("falls back to legacy remote session rows when source environment columns are missing", async () => {

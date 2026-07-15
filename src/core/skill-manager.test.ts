@@ -75,6 +75,19 @@ describe("skill manager", () => {
     fs.rmSync(homeDir, { recursive: true, force: true });
   });
 
+  it("discovers nested portable user Skills without flattening their identity", () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-skills-nested-user-"));
+    const codexHome = path.join(homeDir, ".codex");
+    writeSkill(path.join(homeDir, ".agents", "skills", "team"), "review-code", "---\nname: review-code\ndescription: Nested\n---\n");
+
+    const snapshot = listInstalledSkills({ homeDir, codexHome, projectDirs: [] });
+
+    expect(snapshot.skills).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "review-code", source: "codex-shared", directoryPath: path.join(homeDir, ".agents", "skills", "team", "review-code") }),
+    ]));
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
   it("includes Claude Code plugin skills from installed_plugins.json", () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-skills-plugins-"));
     const pluginsDir = path.join(homeDir, ".claude", "plugins");
@@ -298,6 +311,10 @@ describe("skill manager", () => {
       localFingerprint: "fp",
       contentHash: "hash",
       uploadedFromPath: "/old/SKILL.md",
+      portableScope: "codex-user",
+      relativePath: "review-code",
+      identityVersion: 2,
+      legacy: false,
       createdAt: "2026-06-29T10:00:00.000Z",
       updatedAt: "2026-06-29T10:01:00.000Z",
       version: 1,
@@ -329,6 +346,10 @@ describe("skill manager", () => {
       localFingerprint: "fp",
       contentHash: "hash",
       uploadedFromPath: "/old/SKILL.md",
+      portableScope: "codex-user",
+      relativePath: "review-code",
+      identityVersion: 2,
+      legacy: false,
       createdAt: "2026-06-29T10:00:00.000Z",
       updatedAt: "2026-06-29T10:01:00.000Z",
       version: 1,
@@ -360,6 +381,10 @@ describe("skill manager", () => {
       localFingerprint: "fp",
       contentHash: "hash",
       uploadedFromPath: "/old/SKILL.md",
+      portableScope: "claude-user",
+      relativePath: "deploy-helper",
+      identityVersion: 2,
+      legacy: false,
       createdAt: "2026-06-29T10:00:00.000Z",
       updatedAt: "2026-06-29T10:01:00.000Z",
       version: 2,
@@ -376,5 +401,55 @@ describe("skill manager", () => {
     expect(fs.readFileSync(target, "utf8")).toBe("# Deploy v2");
 
     fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it("installs by portable scope and relative path on a different device and removes stale files", () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-skills-portable-"));
+    const targetDir = path.join(homeDir, ".agents", "skills", "team", "review-code");
+    fs.mkdirSync(targetDir, { recursive: true });
+    fs.writeFileSync(path.join(targetDir, "obsolete.md"), "old", "utf8");
+    const remoteSkill: RemoteSkill = {
+      id: "remote-portable", name: "review-code", description: "Review", agent: "codex", source: "codex-shared",
+      markdown: "# Review\n", localFingerprint: "fp", contentHash: "hash", uploadedFromPath: "/Users/other/.agents/skills/team/review-code/SKILL.md",
+      portableScope: "shared", relativePath: "team/review-code", identityVersion: 2, legacy: false,
+      createdAt: "2026-07-14T00:00:00Z", updatedAt: "2026-07-14T00:00:00Z", version: 2,
+      metadata: { skillFiles: [{ relativePath: "SKILL.md", contentBase64: Buffer.from("# Review\n").toString("base64") }] },
+    };
+
+    const result = installRemoteSkillLocally(remoteSkill, { homeDir });
+
+    expect(result.directoryPath).toBe(targetDir);
+    expect(fs.readFileSync(result.installedPath, "utf8")).toBe("# Review\n");
+    expect(fs.existsSync(path.join(targetDir, "obsolete.md"))).toBe(false);
+    expect(fs.existsSync(path.join(homeDir, "Users", "other"))).toBe(false);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a portable install through a symlink that escapes the managed root", () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-skills-symlink-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-skills-outside-"));
+    const root = path.join(homeDir, ".agents", "skills");
+    fs.mkdirSync(root, { recursive: true });
+    fs.symlinkSync(outside, path.join(root, "team"), "dir");
+    const remoteSkill: RemoteSkill = {
+      id: "remote-symlink", name: "review-code", description: "Review", agent: "codex", source: "codex-shared",
+      markdown: "# Review\n", localFingerprint: "fp", contentHash: "hash", uploadedFromPath: "",
+      portableScope: "shared", relativePath: "team/review-code", identityVersion: 2, legacy: false,
+      createdAt: "x", updatedAt: "x", version: 1, metadata: {},
+    };
+
+    expect(() => installRemoteSkillLocally(remoteSkill, { homeDir })).toThrow(/symlink/i);
+    expect(fs.existsSync(path.join(outside, "review-code"))).toBe(false);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  });
+
+  it("refuses legacy project and plugin records instead of guessing an install directory", () => {
+    const base: RemoteSkill = {
+      id: "legacy", name: "access", description: "Access", agent: "claude", source: "claude-plugin",
+      markdown: "# Access", localFingerprint: "fp", contentHash: "hash", uploadedFromPath: "/old/plugin/access/SKILL.md",
+      createdAt: "x", updatedAt: "x", version: 1, legacy: true, metadata: {},
+    };
+    expect(() => installRemoteSkillLocally(base, { homeDir: os.tmpdir() })).toThrow(/project|plugin/i);
   });
 });

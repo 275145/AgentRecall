@@ -1,9 +1,11 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import { skillSyncFilesFromMetadata, type RemoteSkill, type SkillSyncFile } from "./skill-sync";
 
 export type SkillAgent = "codex" | "claude";
+export type SkillPortableScope = "codex-user" | "claude-user" | "shared";
 export type SkillSource =
   | "codex-user"
   | "codex-system"
@@ -80,6 +82,12 @@ export interface InstallRemoteSkillResult {
   overwritten: boolean;
 }
 
+export interface PortableSkillLocation {
+  scope: SkillPortableScope;
+  relativePath: string;
+  identity: string;
+}
+
 interface SkillRootConfig {
   agent: SkillAgent;
   source: SkillSource;
@@ -143,6 +151,25 @@ export function listInstalledSkills(options: SkillManagerOptions = {}): Installe
   };
 }
 
+export function portableScopeForSkillSource(source: SkillSource): SkillPortableScope | null {
+  if (source === "codex-user") return "codex-user";
+  if (source === "claude-user") return "claude-user";
+  if (source === "codex-shared") return "shared";
+  return null;
+}
+
+export function isSyncableSkill(skill: Pick<InstalledSkill, "source">): boolean {
+  return portableScopeForSkillSource(skill.source) !== null;
+}
+
+export function portableSkillLocation(skill: Pick<InstalledSkill, "source" | "rootPath" | "directoryPath">): PortableSkillLocation | null {
+  const scope = portableScopeForSkillSource(skill.source);
+  if (!scope) return null;
+  const relativePath = normalizePortableRelativePath(path.relative(skill.rootPath, skill.directoryPath));
+  if (!relativePath) return null;
+  return { scope, relativePath, identity: `${scope}/${relativePath}` };
+}
+
 export function skillProjectDirsFromIndexedProjects(projects: SkillProjectSource[], fallbackDirs: string[] = [process.cwd()], homeDir = os.homedir()): string[] {
   const localProjectDirs = projects
     .filter((project) => project.environmentId === "local")
@@ -183,21 +210,68 @@ export function deleteInstalledSkill(skillPath: string, options: SkillManagerOpt
 export function installRemoteSkillLocally(remoteSkill: RemoteSkill, options: InstallRemoteSkillOptions = {}): InstallRemoteSkillResult {
   const homeDir = options.homeDir || os.homedir();
   const codexHome = options.codexHome || process.env.CODEX_HOME || path.join(homeDir, ".codex");
-  const rootPath = remoteSkill.agent === "codex" ? path.join(codexHome, "skills") : path.join(homeDir, ".claude", "skills");
-  const directoryName = safeSkillDirectoryName(remoteSkill.name);
-  const directoryPath = path.join(rootPath, directoryName);
+  const scope = remoteSkill.portableScope ?? portableScopeForSkillSource(remoteSkill.source);
+  if (!scope) throw new Error("This remote Skill is managed by a project or plugin and cannot be installed automatically.");
+  const rootPath = skillRootForPortableScope(scope, { homeDir, codexHome });
+  const relativePath = normalizePortableRelativePath(remoteSkill.relativePath || legacyRemoteSkillRelativePath(remoteSkill));
+  if (!relativePath) throw new Error("This legacy remote Skill has no safe portable install location.");
+  const directoryPath = path.resolve(rootPath, ...relativePath.split("/"));
   const installedPath = path.join(directoryPath, "SKILL.md");
   const rootKey = normalizePathKey(rootPath);
   const directoryKey = normalizePathKey(directoryPath);
   if (!directoryKey.startsWith(`${rootKey}${path.sep}`)) throw new Error("Refusing to install skill outside the managed root.");
 
+  ensurePortableInstallTarget(rootPath, directoryPath);
   const overwritten = fs.existsSync(installedPath);
-  fs.mkdirSync(directoryPath, { recursive: true });
-  for (const file of skillSyncFilesFromMetadata(remoteSkill.metadata)) {
-    writeBundledSkillFile(directoryPath, file);
+  const parentPath = path.dirname(directoryPath);
+  const token = `${process.pid}-${randomUUID()}`;
+  const stagingPath = path.join(parentPath, `.${path.basename(directoryPath)}.agent-session-search-staging-${token}`);
+  const backupPath = path.join(parentPath, `.${path.basename(directoryPath)}.agent-session-search-backup-${token}`);
+  fs.mkdirSync(parentPath, { recursive: true });
+  fs.rmSync(stagingPath, { recursive: true, force: true });
+  fs.mkdirSync(stagingPath, { recursive: true });
+  let movedExisting = false;
+  try {
+    for (const file of skillSyncFilesFromMetadata(remoteSkill.metadata)) {
+      writeBundledSkillFile(stagingPath, file);
+    }
+    fs.writeFileSync(path.join(stagingPath, "SKILL.md"), remoteSkill.markdown, "utf8");
+    if (fs.existsSync(directoryPath)) {
+      fs.renameSync(directoryPath, backupPath);
+      movedExisting = true;
+    }
+    fs.renameSync(stagingPath, directoryPath);
+    if (movedExisting) fs.rmSync(backupPath, { recursive: true, force: true });
+  } catch (error) {
+    fs.rmSync(stagingPath, { recursive: true, force: true });
+    if (movedExisting && !fs.existsSync(directoryPath) && fs.existsSync(backupPath)) fs.renameSync(backupPath, directoryPath);
+    throw error;
   }
-  fs.writeFileSync(installedPath, remoteSkill.markdown, "utf8");
   return { installedPath, directoryPath, overwritten };
+}
+
+function skillRootForPortableScope(
+  scope: SkillPortableScope,
+  options: { homeDir: string; codexHome: string },
+): string {
+  if (scope === "codex-user") return path.join(options.codexHome, "skills");
+  if (scope === "claude-user") return path.join(options.homeDir, ".claude", "skills");
+  return path.join(options.homeDir, ".agents", "skills");
+}
+
+function legacyRemoteSkillRelativePath(remoteSkill: RemoteSkill): string {
+  const normalizedPath = remoteSkill.uploadedFromPath.replace(/\\/g, "/");
+  const segments = normalizedPath.split("/").filter(Boolean);
+  if (segments.at(-1)?.toLowerCase() === "skill.md") segments.pop();
+  return segments.at(-1) || safeSkillDirectoryName(remoteSkill.name);
+}
+
+function normalizePortableRelativePath(value: string): string {
+  const normalized = value.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  if (!normalized || normalized.includes("\0")) return "";
+  const segments = normalized.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) return "";
+  return segments.join("/");
 }
 
 function writeBundledSkillFile(directoryPath: string, file: SkillSyncFile): void {
@@ -292,21 +366,41 @@ function collectClaudePluginCollectionRoots(collectionDir: string): SkillRootCon
 }
 
 function readSkillsFromRoot(root: SkillRootConfig): InstalledSkill[] {
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(root.path, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-
   const skills: InstalledSkill[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name === ".system") continue;
-    const skillPath = path.join(root.path, entry.name, "SKILL.md");
-    const skill = readSkillFile(skillPath, entry.name, root);
-    if (skill) skills.push(skill);
-  }
+  const visit = (directoryPath: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(directoryPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory()) continue;
+      if (directoryPath === root.path && entry.name === ".system") continue;
+      const childPath = path.join(directoryPath, entry.name);
+      const skill = readSkillFile(path.join(childPath, "SKILL.md"), entry.name, root);
+      if (skill) skills.push(skill);
+      else visit(childPath);
+    }
+  };
+  visit(root.path);
   return skills;
+}
+
+function ensurePortableInstallTarget(rootPath: string, directoryPath: string): void {
+  fs.mkdirSync(rootPath, { recursive: true });
+  const realRoot = fs.realpathSync(rootPath);
+  let existingAncestor = directoryPath;
+  while (!fs.existsSync(existingAncestor)) {
+    const parent = path.dirname(existingAncestor);
+    if (parent === existingAncestor) throw new Error("Refusing to install skill outside the managed root.");
+    existingAncestor = parent;
+  }
+  const realAncestor = fs.realpathSync(existingAncestor);
+  const relative = path.relative(realRoot, realAncestor);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("Refusing to install skill through a symlink outside the managed root.");
+  }
 }
 
 function readSkillFile(skillPath: string, fallbackName: string, root: SkillRootConfig): InstalledSkill | null {

@@ -44,6 +44,9 @@ function versionRow(overrides: Partial<Record<string, unknown>> = {}): Record<st
     local_fingerprint: "fp",
     content_hash: "hash-1",
     uploaded_from_path: "/tmp/SKILL.md",
+    portable_scope: "codex-user",
+    relative_path: "review-code",
+    identity_version: 2,
     version: 1,
     created_at: "2026-06-29T10:00:00.000Z",
     updated_at: "2026-06-29T10:00:00.000Z",
@@ -61,6 +64,10 @@ function version(overrides: Partial<RemoteSkillVersion> = {}): RemoteSkillVersio
     localFingerprint: "fp",
     contentHash: "hash-1",
     uploadedFromPath: "/tmp/SKILL.md",
+    portableScope: "codex-user",
+    relativePath: "review-code",
+    identityVersion: 2,
+    legacy: false,
     version: 1,
     createdAt: "2026-06-29T10:00:00.000Z",
     updatedAt: "2026-06-29T10:00:00.000Z",
@@ -81,15 +88,18 @@ describe("skill sync", () => {
     expect(sql).toContain("storage.buckets");
     expect(sql).toContain("agent-session-skills");
     expect(sql).toContain("enable row level security");
+    expect(sql).toContain(`grant select, insert, update, delete on table public.${AGENT_SESSION_SEARCH_SKILLS_TABLE} to anon`);
+    expect(sql).toContain("grant select on table storage.buckets to anon");
     expect(sql).not.toContain("service_role");
   });
 
-  it("uses an agent and skill name fingerprint for repeat uploads across local paths", () => {
-    const expected = createHash("sha256").update("codex:review-code").digest("hex");
+  it("uses portable scope and relative path so same-name Skills do not collide", () => {
+    const expected = createHash("sha256").update("codex-user/review-code").digest("hex");
 
     expect(skillSyncFingerprint(localSkill({ path: "/a/SKILL.md" }))).toBe(expected);
-    expect(skillSyncFingerprint(localSkill({ path: "/b/SKILL.md" }))).toBe(expected);
-    expect(skillSyncFingerprint(localSkill({ agent: "claude" }))).not.toBe(expected);
+    expect(skillSyncFingerprint(localSkill({ rootPath: "/other/.codex/skills", directoryPath: "/other/.codex/skills/review-code", path: "/other/.codex/skills/review-code/SKILL.md" }))).toBe(expected);
+    expect(skillSyncFingerprint(localSkill({ source: "codex-shared", rootPath: "/tmp/.agents/skills", directoryPath: "/tmp/.agents/skills/review-code" }))).not.toBe(expected);
+    expect(skillSyncFingerprint(localSkill({ directoryPath: "/tmp/.codex/skills/team/review-code" }))).not.toBe(expected);
   });
 
   it("computes a content hash that is stable for identical content and changes with content", () => {
@@ -99,6 +109,19 @@ describe("skill sync", () => {
     expect(skillSyncContentHash("# Body", files)).toBe(base);
     expect(skillSyncContentHash("# Body changed", files)).not.toBe(base);
     expect(skillSyncContentHash("# Body", [{ ...files[0], contentBase64: Buffer.from("b").toString("base64") }])).not.toBe(base);
+    expect(skillSyncContentHash("# Body", [{ ...files[0], mode: 0o755 }])).toBe(base);
+  });
+
+  it("treats safely inferred user records as portable even before identity version 2", async () => {
+    const client = new SupabaseSkillSyncClient({
+      url: "https://example.supabase.co",
+      anonKey: "anon",
+      fetchImpl: async () => new Response(JSON.stringify([versionRow({ identity_version: 1, portable_scope: null, relative_path: "" })]), { status: 200 }),
+    });
+
+    await expect(client.listRemoteSkillVersions()).resolves.toEqual([
+      expect.objectContaining({ portableScope: "codex-user", relativePath: "tmp", legacy: false }),
+    ]);
   });
 
   it("groups remote versions by fingerprint and exposes the latest version", () => {
@@ -106,13 +129,29 @@ describe("skill sync", () => {
       version({ id: "a-v1", localFingerprint: "fp-a", version: 1, updatedAt: "2026-06-01T00:00:00.000Z" }),
       version({ id: "a-v3", localFingerprint: "fp-a", version: 3, updatedAt: "2026-06-03T00:00:00.000Z" }),
       version({ id: "a-v2", localFingerprint: "fp-a", version: 2, updatedAt: "2026-06-02T00:00:00.000Z" }),
-      version({ id: "b-v1", localFingerprint: "fp-b", name: "other", version: 1, updatedAt: "2026-06-10T00:00:00.000Z" }),
+      version({ id: "b-v1", localFingerprint: "fp-b", name: "other", relativePath: "other", version: 1, updatedAt: "2026-06-10T00:00:00.000Z" }),
     ]);
 
-    expect(groups.map((group) => group.fingerprint)).toEqual(["fp-b", "fp-a"]);
-    const groupA = groups.find((group) => group.fingerprint === "fp-a");
+    const fingerprintA = createHash("sha256").update("codex-user/review-code").digest("hex");
+    const fingerprintB = createHash("sha256").update("codex-user/other").digest("hex");
+    expect(groups.map((group) => group.fingerprint)).toEqual([fingerprintB, fingerprintA]);
+    const groupA = groups.find((group) => group.fingerprint === fingerprintA);
     expect(groupA?.latest.id).toBe("a-v3");
     expect(groupA?.versions.map((item) => item.version)).toEqual([3, 2, 1]);
+  });
+
+  it("coalesces inferred legacy and portable fingerprints for the same validated identity", () => {
+    const canonical = skillSyncFingerprint(localSkill());
+    const groups = groupRemoteSkillVersions([
+      version({ id: "old-v10", localFingerprint: "legacy-name-fingerprint", identityVersion: 1, version: 10, updatedAt: "2026-06-01T00:00:00.000Z" }),
+      version({ id: "new-v1", localFingerprint: canonical, identityVersion: 2, version: 1, updatedAt: "2026-06-10T00:00:00.000Z" }),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].fingerprint).toBe(canonical);
+    expect(groups[0].fingerprints).toEqual(expect.arrayContaining(["legacy-name-fingerprint", canonical]));
+    expect(groups[0].latest.id).toBe("new-v1");
+    expect(groups[0].versions.filter((item) => item.localFingerprint === canonical).map((item) => item.version)).toEqual([1]);
   });
 
   it("reports missing-table status when Supabase has not been initialized", async () => {
@@ -125,7 +164,44 @@ describe("skill sync", () => {
     const status = await client.checkStatus();
 
     expect(status.kind).toBe("missing-table");
+    expect(status).toMatchObject({ remediation: "sql" });
     expect(status.setupSql).toContain(AGENT_SESSION_SEARCH_SKILLS_TABLE);
+  });
+
+  it("marks outdated Skill sync columns as SQL-remediable", async () => {
+    const client = new SupabaseSkillSyncClient({
+      url: "https://example.supabase.co",
+      anonKey: "anon",
+      fetchImpl: async () => new Response(JSON.stringify({ code: "PGRST204", message: "Could not find the 'portable_scope' column in the schema cache" }), { status: 400 }),
+    });
+
+    await expect(client.checkStatus()).resolves.toMatchObject({ kind: "error", remediation: "sql" });
+  });
+
+  it("marks missing Skill storage as SQL-remediable", async () => {
+    let requestCount = 0;
+    const client = new SupabaseSkillSyncClient({
+      url: "https://example.supabase.co",
+      anonKey: "anon",
+      fetchImpl: async () => {
+        requestCount += 1;
+        return requestCount === 1
+          ? new Response("[]", { status: 200 })
+          : new Response(JSON.stringify({ message: "Bucket not found" }), { status: 404 });
+      },
+    });
+
+    await expect(client.checkStatus()).resolves.toMatchObject({ kind: "missing-storage", remediation: "sql" });
+  });
+
+  it("marks Skill sync authentication failures as settings-remediable", async () => {
+    const client = new SupabaseSkillSyncClient({
+      url: "https://example.supabase.co",
+      anonKey: "invalid",
+      fetchImpl: async () => new Response(JSON.stringify({ message: "Invalid API key" }), { status: 401 }),
+    });
+
+    await expect(client.checkStatus()).resolves.toMatchObject({ kind: "error", remediation: "settings" });
   });
 
   it("lists remote skill versions with lightweight columns", async () => {
@@ -209,7 +285,7 @@ describe("skill sync", () => {
         calls.push({ url: String(url), method: init?.method ?? "GET" });
         const body = JSON.parse(String(init?.body));
         expect(body.metadata.skillFiles).toEqual([]);
-        expect(body.metadata.skillFilesObjectKey).toMatch(/^skills\/[0-9a-f]{64}\/v2\/files\.json\.gz$/);
+        expect(body.metadata.skillFilesObjectKey).toMatch(/^skills\/[0-9a-f]{64}\/v2\/[0-9a-f-]{36}\.files\.json\.gz$/);
         expect(body.metadata.skillFilesSha256).toMatch(/^[0-9a-f]{64}$/);
         expect(body.metadata.skillFilesEncoding).toBe("gzip-json-v1");
         expect(body.metadata.skillFilesCompressedBytes).toBeLessThan(body.metadata.skillFilesBytes);
@@ -245,6 +321,52 @@ describe("skill sync", () => {
     });
 
     await expect(client.getRemoteSkill("remote-1")).resolves.toMatchObject({ metadata: { skillFiles: files } });
+  });
+
+  it("deletes every version object before deleting a remote Skill group", async () => {
+    const calls: string[] = [];
+    const client = new SupabaseSkillSyncClient({
+      url: "https://example.supabase.co",
+      anonKey: "anon",
+      fetchImpl: async (url, init) => {
+        const value = String(url);
+        if (value.includes("/storage/v1/object/")) {
+          calls.push(`storage:${value.split("/").at(-1)}`);
+          return new Response("{}", { status: 200 });
+        }
+        if (init?.method === "DELETE") {
+          calls.push("rows:delete");
+          return new Response("[]", { status: 200 });
+        }
+        return new Response(JSON.stringify([
+          { id: "00000000-0000-4000-8000-000000000001", metadata: { skillFilesObjectKey: "skills/fp/v1/a.files.json.gz" } },
+          { id: "00000000-0000-4000-8000-000000000002", metadata: { skillFilesObjectKey: "skills/fp/v2/b.files.json.gz" } },
+        ]), { status: 200 });
+      },
+    });
+    await expect(client.deleteRemoteSkillGroup("fp")).resolves.toEqual([
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000002",
+    ]);
+    expect(calls).toEqual(["storage:a.files.json.gz", "storage:b.files.json.gz", "rows:delete"]);
+  });
+
+  it("deletes only the requested version ids when legacy fingerprints are shared", async () => {
+    const requestedId = "00000000-0000-4000-8000-000000000001";
+    const calls: string[] = [];
+    const client = new SupabaseSkillSyncClient({
+      url: "https://example.supabase.co",
+      anonKey: "anon",
+      fetchImpl: async (url, init) => {
+        calls.push(`${init?.method}:${String(url)}`);
+        if (init?.method === "DELETE") return new Response("[]", { status: 200 });
+        return new Response(JSON.stringify([{ id: requestedId, metadata: {} }]), { status: 200 });
+      },
+    });
+
+    await expect(client.deleteRemoteSkillVersions([requestedId])).resolves.toEqual([requestedId]);
+    expect(calls.every((call) => !call.includes("local_fingerprint"))).toBe(true);
+    expect(calls).toEqual(expect.arrayContaining([expect.stringContaining(`id=in.(${requestedId})`)]));
   });
 
   it("retries a version insert with a fresh number after a unique conflict", async () => {

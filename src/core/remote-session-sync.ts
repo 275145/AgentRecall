@@ -1,12 +1,12 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { migrationAgentForSource } from "./session-migration";
-import type { SessionStore } from "./session-store";
+import type { SessionStore, SessionSyncBinding } from "./session-store";
 import type { MigrationAgent, PortableSession, SessionMessage, SessionSearchResult, SessionTraceEvent } from "./types";
 
 export const REMOTE_SESSION_TABLE = "agent_session_remote_sessions";
 export const REMOTE_SESSION_BUCKET = "agent-session-remote";
 const REMOTE_SESSION_COLUMNS =
-  "id,source_session_key,source_agent,source_source,source_environment_id,source_environment_kind,source_environment_label,title,project_path,started_at,updated_at,content_hash,message_count,trace_event_count,ai_summary,tags,search_text,detail_object_key,portable_object_key,detail_sha256,portable_sha256,created_at,synced_at";
+  "id,source_session_key,source_agent,source_source,source_environment_id,source_environment_kind,source_environment_label,title,project_path,started_at,updated_at,content_hash,revision_version,message_count,trace_event_count,ai_summary,tags,search_text,detail_object_key,portable_object_key,detail_sha256,portable_sha256,created_at,synced_at";
 const REMOTE_SESSION_LEGACY_COLUMNS =
   "id,source_session_key,source_agent,source_source,title,project_path,started_at,updated_at,content_hash,message_count,trace_event_count,ai_summary,tags,search_text,detail_object_key,portable_object_key,detail_sha256,portable_sha256,created_at,synced_at";
 
@@ -31,6 +31,7 @@ export interface RemoteSessionListItem {
   startedAt: string;
   updatedAt: number;
   contentHash: string;
+  revisionVersion?: number;
   messageCount: number;
   traceEventCount: number;
   aiSummary: string | null;
@@ -45,10 +46,28 @@ export interface RemoteSessionListItem {
 }
 
 export type RemoteSessionStatus =
-  | { kind: "unconfigured"; setupSql: string; message: string }
+  | { kind: "unconfigured"; setupSql: string; message: string; remediation: "settings" }
   | { kind: "ready"; setupSql: string }
-  | { kind: "missing-table"; setupSql: string; message: string }
-  | { kind: "error"; setupSql: string; message: string };
+  | { kind: "missing-table"; setupSql: string; message: string; remediation: "sql" }
+  | { kind: "missing-storage"; setupSql: string; message: string; remediation: "sql" }
+  | { kind: "error"; setupSql: string; message: string; remediation: "settings" | "sql" };
+
+export type SessionSyncState = "local-only" | "local-newer" | "synced" | "remote-newer" | "remote-only" | "conflict";
+
+export interface LocalSessionSyncCandidate {
+  session: SessionSearchResult;
+  revision: string;
+}
+
+export interface SessionSyncItem {
+  id: string;
+  state: SessionSyncState;
+  local: SessionSearchResult | null;
+  remote: RemoteSessionListItem | null;
+  localRevision: string;
+  remoteRevision: string;
+  lastSyncedAt: number | null;
+}
 
 export type RemoteSessionUploadResult =
   | { status: "uploaded"; remoteSession: RemoteSessionListItem }
@@ -87,6 +106,7 @@ interface RemoteSessionRow {
   started_at: string;
   updated_at: number;
   content_hash: string;
+  revision_version?: number | null;
   message_count: number;
   trace_event_count: number | null;
   ai_summary: string | null;
@@ -113,6 +133,7 @@ interface RemoteSessionUploadPayload {
   started_at: string;
   updated_at: number;
   content_hash: string;
+  revision_version: number;
   message_count: number;
   trace_event_count: number;
   ai_summary: string | null;
@@ -143,6 +164,7 @@ export function buildRemoteSessionSetupSql(tableName = REMOTE_SESSION_TABLE, buc
     "  started_at text not null,",
     "  updated_at bigint not null,",
     "  content_hash text not null,",
+    "  revision_version integer not null default 1,",
     "  message_count integer not null,",
     "  trace_event_count integer not null default 0,",
     "  ai_summary text,",
@@ -159,13 +181,15 @@ export function buildRemoteSessionSetupSql(tableName = REMOTE_SESSION_TABLE, buc
     `alter table public.${tableName} add column if not exists source_environment_id text not null default 'local';`,
     `alter table public.${tableName} add column if not exists source_environment_kind text not null default 'local';`,
     `alter table public.${tableName} add column if not exists source_environment_label text not null default 'Local';`,
+    `alter table public.${tableName} add column if not exists revision_version integer not null default 1;`,
     "",
     `-- Expand source_agent check for Cursor Agent uploads on existing tables.`,
     `alter table public.${tableName} drop constraint if exists ${tableName}_source_agent_check;`,
     `alter table public.${tableName} add constraint ${tableName}_source_agent_check`,
     "  check (source_agent in ('claude', 'codex', 'codebuddy', 'cursor'));",
     "",
-    `create unique index if not exists ${tableName}_content_hash_idx`,
+    `drop index if exists ${tableName}_content_hash_idx;`,
+    `create index if not exists ${tableName}_content_hash_idx`,
     `  on public.${tableName} (content_hash);`,
     `create index if not exists ${tableName}_updated_at_idx`,
     `  on public.${tableName} (updated_at desc);`,
@@ -173,6 +197,7 @@ export function buildRemoteSessionSetupSql(tableName = REMOTE_SESSION_TABLE, buc
     `  on public.${tableName} (title);`,
     "",
     `alter table public.${tableName} enable row level security;`,
+    `grant select, insert, update, delete on table public.${tableName} to anon;`,
     "",
     `drop policy if exists "${tableName}_personal_sync" on public.${tableName};`,
     `create policy "${tableName}_personal_sync"`,
@@ -194,6 +219,15 @@ export function buildRemoteSessionSetupSql(tableName = REMOTE_SESSION_TABLE, buc
     "  to anon",
     `  using (bucket_id = '${bucketName}')`,
     `  with check (bucket_id = '${bucketName}');`,
+    "",
+    "grant select on table storage.buckets to anon;",
+    "grant select, insert, update, delete on table storage.objects to anon;",
+    `drop policy if exists "${bucketName}_bucket_metadata" on storage.buckets;`,
+    `create policy "${bucketName}_bucket_metadata"`,
+    "  on storage.buckets",
+    "  for select",
+    "  to anon",
+    `  using (id = '${bucketName}');`,
   ].join("\n");
 }
 
@@ -231,7 +265,33 @@ export function remoteSessionSearchText(
 }
 
 export function remoteSessionContentHash(detail: RemoteSessionDetailSnapshot, portable: PortableSession): string {
-  return sha256(stableJson({ detail, portable }));
+  const session = detail.session;
+  return sha256(stableJson({
+    schemaVersion: detail.schemaVersion,
+    session: {
+      source: session.source,
+      originalTitle: session.originalTitle,
+      firstQuestion: session.firstQuestion,
+      timestamp: session.timestamp,
+      gitBranch: session.gitBranch ?? null,
+      customTitle: session.customTitle,
+      displayTitle: session.displayTitle,
+      tags: session.tags,
+      aiSummary: session.aiSummary,
+      isSubagent: session.isSubagent === true,
+      parentSessionId: session.parentSessionId ?? null,
+    },
+    messages: detail.messages,
+    traceEvents: detail.traceEvents,
+    portable: {
+      sourceAgent: portable.sourceAgent,
+      title: portable.title,
+      startedAt: portable.startedAt,
+      messages: portable.messages,
+      isSubagent: portable.isSubagent === true,
+      parentSessionId: portable.parentSessionId ?? null,
+    },
+  }));
 }
 
 export function remoteSessionId(sourceSessionKey: string): string {
@@ -243,13 +303,15 @@ export function buildRemoteSessionPayload(options: {
   detail: RemoteSessionDetailSnapshot;
   portable: PortableSession;
   now?: number;
+  remoteId?: string;
 }): { payload: RemoteSessionUploadPayload; detailJson: string; portableJson: string } {
   const now = integerTimestamp(options.now ?? Date.now());
   const detailJson = stableJson(options.detail);
   const portableJson = stableJson(options.portable);
-  const id = remoteSessionId(options.session.sessionKey);
-  const detailObjectKey = `sessions/${id}/detail.json`;
-  const portableObjectKey = `sessions/${id}/portable.json`;
+  const id = options.remoteId || remoteSessionId(options.session.sessionKey);
+  const uploadId = randomUUID();
+  const detailObjectKey = `sessions/${id}/${uploadId}.detail.json`;
+  const portableObjectKey = `sessions/${id}/${uploadId}.portable.json`;
   const contentHash = remoteSessionContentHash(options.detail, options.portable);
   return {
     detailJson,
@@ -267,6 +329,7 @@ export function buildRemoteSessionPayload(options: {
       started_at: options.portable.startedAt,
       updated_at: integerTimestamp(options.session.lastActivityAt || options.session.fileMtimeMs || options.session.timestamp),
       content_hash: contentHash,
+      revision_version: 2,
       message_count: options.detail.messages.length,
       trace_event_count: options.detail.traceEvents.length,
       ai_summary: options.session.aiSummary,
@@ -286,6 +349,7 @@ export function buildRemoteSessionUploadFromStore(
   store: Pick<SessionStore, "getSession" | "getAllMessages" | "getTraceEvents">,
   sessionKey: string,
   now = Date.now(),
+  remoteId?: string,
 ): { session: SessionSearchResult; detail: RemoteSessionDetailSnapshot; portable: PortableSession; payload: RemoteSessionUploadPayload; detailJson: string; portableJson: string } {
   const session = store.getSession(sessionKey);
   if (!session) throw new Error("Session not found.");
@@ -293,8 +357,113 @@ export function buildRemoteSessionUploadFromStore(
   const traceEvents = store.getTraceEvents(sessionKey);
   const portable = remotePortableSessionFrom(session, messages);
   const detail = buildRemoteSessionSnapshot(session, messages, traceEvents, now);
-  const { payload, detailJson, portableJson } = buildRemoteSessionPayload({ session, detail, portable, now });
+  const { payload, detailJson, portableJson } = buildRemoteSessionPayload({ session, detail, portable, now, remoteId });
   return { session, detail, portable, payload, detailJson, portableJson };
+}
+
+export function buildSessionSyncItems(
+  locals: LocalSessionSyncCandidate[],
+  remotes: RemoteSessionListItem[],
+  bindings: SessionSyncBinding[],
+): SessionSyncItem[] {
+  const localByKey = new Map(locals.map((candidate) => [candidate.session.sessionKey, candidate]));
+  const remoteById = new Map(remotes.map((remote) => [remote.id, remote]));
+  const bindingByLocal = new Map(bindings.map((binding) => [binding.localSessionKey, binding]));
+  const bindingByRemote = new Map(bindings.map((binding) => [binding.remoteSessionId, binding]));
+  const usedLocalKeys = new Set<string>();
+  const usedRemoteIds = new Set<string>();
+  const items: SessionSyncItem[] = [];
+
+  for (const local of locals) {
+    const binding = bindingByLocal.get(local.session.sessionKey);
+    if (!binding) continue;
+    const remote = remoteById.get(binding.remoteSessionId) ?? null;
+    if (!remote) continue;
+    usedLocalKeys.add(local.session.sessionKey);
+    usedRemoteIds.add(remote.id);
+    items.push(sessionSyncPair(local, remote, binding));
+  }
+
+  for (const local of locals) {
+    if (usedLocalKeys.has(local.session.sessionKey)) continue;
+    const remote = remotes.find((item) => !usedRemoteIds.has(item.id) && item.sourceSessionKey === local.session.sessionKey) ?? null;
+    if (!remote) continue;
+    usedLocalKeys.add(local.session.sessionKey);
+    usedRemoteIds.add(remote.id);
+    items.push(sessionSyncPair(local, remote, bindingByRemote.get(remote.id) ?? null));
+  }
+
+  for (const local of locals) {
+    if (usedLocalKeys.has(local.session.sessionKey)) continue;
+    items.push({
+      id: `local:${local.session.sessionKey}`,
+      state: "local-only",
+      local: local.session,
+      remote: null,
+      localRevision: local.revision,
+      remoteRevision: "",
+      lastSyncedAt: null,
+    });
+  }
+
+  for (const remote of remotes) {
+    if (usedRemoteIds.has(remote.id)) continue;
+    const binding = bindingByRemote.get(remote.id);
+    const local = binding ? localByKey.get(binding.localSessionKey) ?? null : null;
+    if (local) {
+      items.push(sessionSyncPair(local, remote, binding ?? null));
+      usedLocalKeys.add(local.session.sessionKey);
+      continue;
+    }
+    items.push({
+      id: remote.id,
+      state: "remote-only",
+      local: null,
+      remote,
+      localRevision: "",
+      remoteRevision: remote.contentHash,
+      lastSyncedAt: binding?.lastSyncedAt ?? null,
+    });
+  }
+
+  return items.sort((a, b) => sessionSyncSortTime(b) - sessionSyncSortTime(a) || sessionSyncTitle(a).localeCompare(sessionSyncTitle(b)));
+}
+
+function sessionSyncPair(
+  local: LocalSessionSyncCandidate,
+  remote: RemoteSessionListItem,
+  binding: SessionSyncBinding | null,
+): SessionSyncItem {
+  let state: SessionSyncState;
+  if ((remote.revisionVersion ?? 1) >= 2 && local.revision === remote.contentHash) {
+    state = "synced";
+  } else if (!binding) {
+    state = (remote.revisionVersion ?? 1) < 2 ? "local-newer" : "conflict";
+  } else {
+    const localChanged = local.revision !== binding.lastLocalRevision;
+    const remoteChanged = remote.contentHash !== binding.lastRemoteRevision;
+    if (localChanged && remoteChanged) state = "conflict";
+    else if (localChanged) state = "local-newer";
+    else if (remoteChanged) state = "remote-newer";
+    else state = "synced";
+  }
+  return {
+    id: remote.id,
+    state,
+    local: local.session,
+    remote,
+    localRevision: local.revision,
+    remoteRevision: remote.contentHash,
+    lastSyncedAt: binding?.lastSyncedAt ?? null,
+  };
+}
+
+function sessionSyncSortTime(item: SessionSyncItem): number {
+  return Math.max(item.local?.lastActivityAt ?? 0, item.remote?.updatedAt ?? 0);
+}
+
+function sessionSyncTitle(item: SessionSyncItem): string {
+  return item.local?.displayTitle || item.remote?.title || "";
 }
 
 export function remotePortableSessionFrom(session: SessionSearchResult, messages: SessionMessage[]): PortableSession {
@@ -329,12 +498,13 @@ export function remotePortableSessionFrom(session: SessionSearchResult, messages
 
 function legacyRemoteSessionPayload(payload: RemoteSessionUploadPayload): Omit<
   RemoteSessionUploadPayload,
-  "source_environment_id" | "source_environment_kind" | "source_environment_label"
+  "source_environment_id" | "source_environment_kind" | "source_environment_label" | "revision_version"
 > {
   const {
     source_environment_id: _sourceEnvironmentId,
     source_environment_kind: _sourceEnvironmentKind,
     source_environment_label: _sourceEnvironmentLabel,
+    revision_version: _revisionVersion,
     ...legacy
   } = payload;
   return legacy;
@@ -373,22 +543,30 @@ export class SupabaseRemoteSessionClient {
   async checkStatus(): Promise<RemoteSessionStatus> {
     const setupSql = buildRemoteSessionSetupSql();
     const response = await this.restRequest(`/${REMOTE_SESSION_TABLE}?select=${REMOTE_SESSION_COLUMNS}&limit=1`, { method: "GET" });
-    if (response.ok) return { kind: "ready", setupSql };
+    if (response.ok) {
+      const bucketResponse = await this.authenticatedRequest(`${this.baseUrl}/storage/v1/bucket/${REMOTE_SESSION_BUCKET}`, { method: "GET" });
+      if (bucketResponse.ok) return { kind: "ready", setupSql };
+      const bucketBody = await readResponseBody(bucketResponse);
+      return {
+        kind: "missing-storage",
+        setupSql,
+        remediation: "sql",
+        message: `${supabaseErrorMessage(bucketResponse.status, bucketBody)} Run the latest setup SQL, then try again.`,
+      };
+    }
     const body = await readResponseBody(response);
     if (isMissingTableError(response.status, body)) {
       return {
         kind: "missing-table",
         setupSql,
+        remediation: "sql",
         message: `Supabase table ${REMOTE_SESSION_TABLE} was not found.`,
       };
     }
     if (isMissingSchemaColumnError(body)) {
-      const legacyResponse = await this.restRequest(`/${REMOTE_SESSION_TABLE}?select=id&limit=1`, { method: "GET" });
-      if (legacyResponse.ok) return { kind: "ready", setupSql };
-      const legacyBody = await readResponseBody(legacyResponse);
-      return { kind: "error", setupSql, message: supabaseErrorMessage(legacyResponse.status, legacyBody) };
+      return { kind: "error", setupSql, remediation: "sql", message: "Remote session sync needs the latest setup SQL before it can compare local and cloud versions." };
     }
-    return { kind: "error", setupSql, message: supabaseErrorMessage(response.status, body) };
+    return { kind: "error", setupSql, remediation: "settings", message: supabaseErrorMessage(response.status, body) };
   }
 
   async listRemoteSessions(query = ""): Promise<RemoteSessionListItem[]> {
@@ -407,24 +585,43 @@ export class SupabaseRemoteSessionClient {
     const existing = await this.getRemoteSessionOrNull(payload.id);
     if (existing?.contentHash === payload.content_hash) return { status: "skipped", remoteSession: existing };
 
-    await this.uploadStorageObject(payload.detail_object_key, detailJson);
-    await this.uploadStorageObject(payload.portable_object_key, portableJson);
+    try {
+      await this.uploadStorageObject(payload.detail_object_key, detailJson);
+      await this.uploadStorageObject(payload.portable_object_key, portableJson);
 
-    const response = await this.restRequest(`/${REMOTE_SESSION_TABLE}?on_conflict=id`, {
-      method: "POST",
-      headers: { Prefer: "resolution=merge-duplicates,return=representation" },
-      body: JSON.stringify(payload),
-    });
-    const body = await readResponseBody(response);
-    if (!response.ok) {
-      if (isMissingSchemaColumnError(body)) {
-        return this.uploadLegacySession(payload, existing);
+      const response = await this.restRequest(`/${REMOTE_SESSION_TABLE}?on_conflict=id`, {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+        body: JSON.stringify(payload),
+      });
+      const body = await readResponseBody(response);
+      let result: RemoteSessionUploadResult;
+      if (!response.ok) {
+        if (!isMissingSchemaColumnError(body)) throw new Error(supabaseErrorMessage(response.status, body));
+        result = await this.uploadLegacySession(payload, existing);
+      } else {
+        const [remoteSession] = parseRows(body);
+        if (!remoteSession) throw new Error("Supabase did not return the uploaded remote session.");
+        result = { status: existing ? "updated" : "uploaded", remoteSession };
       }
-      throw new Error(supabaseErrorMessage(response.status, body));
+      if (existing) {
+        await Promise.all([
+          existing.detailObjectKey === payload.detail_object_key
+            ? undefined
+            : this.deleteStorageObject(existing.detailObjectKey).catch(() => undefined),
+          existing.portableObjectKey === payload.portable_object_key
+            ? undefined
+            : this.deleteStorageObject(existing.portableObjectKey).catch(() => undefined),
+        ]);
+      }
+      return result;
+    } catch (error) {
+      await Promise.all([
+        this.deleteStorageObject(payload.detail_object_key).catch(() => undefined),
+        this.deleteStorageObject(payload.portable_object_key).catch(() => undefined),
+      ]);
+      throw error;
     }
-    const [remoteSession] = parseRows(body);
-    if (!remoteSession) throw new Error("Supabase did not return the uploaded remote session.");
-    return { status: existing ? "updated" : "uploaded", remoteSession };
   }
 
   async getDetailSnapshot(remoteIdOrSession: string | RemoteSessionListItem): Promise<RemoteSessionDetailSnapshot> {
@@ -449,32 +646,41 @@ export class SupabaseRemoteSessionClient {
       if (error instanceof Error && error.message === "Remote session was not found.") return false;
       throw error;
     }
-    const response = await this.restRequest(`/${REMOTE_SESSION_TABLE}?id=eq.${encodeURIComponent(remoteId)}`, { method: "DELETE" });
-    const body = await readResponseBody(response);
-    if (!response.ok) throw new Error(supabaseErrorMessage(response.status, body));
-    await Promise.allSettled([
+    await Promise.all([
       this.deleteStorageObject(remote.detailObjectKey),
       this.deleteStorageObject(remote.portableObjectKey),
     ]);
+    const response = await this.restRequest(`/${REMOTE_SESSION_TABLE}?id=eq.${encodeURIComponent(remoteId)}`, { method: "DELETE" });
+    const body = await readResponseBody(response);
+    if (!response.ok) throw new Error(supabaseErrorMessage(response.status, body));
     return true;
   }
 
   async deleteRemoteSessions(remoteIds: string[]): Promise<RemoteSessionDeleteResult> {
     const ids = [...new Set(remoteIds.map((id) => id.trim()).filter(Boolean))];
-    const outcomes = await Promise.all(
-      ids.map(async (id) => {
+    const outcomes: Array<
+      | { kind: "deleted"; id: string }
+      | { kind: "missing"; id: string }
+      | { kind: "failed"; id: string; message: string }
+    > = new Array(ids.length);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(4, ids.length) }, async () => {
+      while (cursor < ids.length) {
+        const index = cursor++;
+        const id = ids[index];
         try {
           const deleted = await this.deleteRemoteSession(id);
-          return deleted ? ({ kind: "deleted", id } as const) : ({ kind: "missing", id } as const);
+          outcomes[index] = deleted ? { kind: "deleted", id } : { kind: "missing", id };
         } catch (error) {
-          return {
+          outcomes[index] = {
             kind: "failed",
             id,
             message: error instanceof Error ? error.message : String(error),
-          } as const;
+          };
         }
-      }),
-    );
+      }
+    });
+    await Promise.all(workers);
     return {
       requested: ids.length,
       deletedIds: outcomes.flatMap((outcome) => (outcome.kind === "deleted" ? [outcome.id] : [])),
@@ -486,8 +692,9 @@ export class SupabaseRemoteSessionClient {
   private async getRemoteSessionOrNull(remoteId: string): Promise<RemoteSessionListItem | null> {
     try {
       return await this.getRemoteSession(remoteId);
-    } catch {
-      return null;
+    } catch (error) {
+      if (error instanceof Error && error.message === "Remote session was not found.") return null;
+      throw error;
     }
   }
 
@@ -526,11 +733,9 @@ export class SupabaseRemoteSessionClient {
   }
 
   private async restRequest(path: string, init: RequestInit): Promise<Response> {
-    return this.request(`${this.baseUrl}/rest/v1${path}`, {
+    return this.authenticatedRequest(`${this.baseUrl}/rest/v1${path}`, {
       ...init,
       headers: {
-        apikey: this.anonKey,
-        Authorization: `Bearer ${this.anonKey}`,
         "Content-Type": "application/json",
         ...(init.headers ?? {}),
       },
@@ -538,7 +743,13 @@ export class SupabaseRemoteSessionClient {
   }
 
   private async storageRequest(path: string, init: RequestInit): Promise<Response> {
-    return this.request(`${this.baseUrl}/storage/v1/object/${REMOTE_SESSION_BUCKET}/${path}`, {
+    return this.authenticatedRequest(`${this.baseUrl}/storage/v1/object/${REMOTE_SESSION_BUCKET}/${path}`, {
+      ...init,
+    });
+  }
+
+  private async authenticatedRequest(url: string, init: RequestInit): Promise<Response> {
+    return this.request(url, {
       ...init,
       headers: {
         apikey: this.anonKey,
@@ -634,6 +845,7 @@ function fromRow(row: RemoteSessionRow): RemoteSessionListItem {
     startedAt: row.started_at,
     updatedAt: row.updated_at,
     contentHash: row.content_hash,
+    revisionVersion: row.revision_version ?? 1,
     messageCount: row.message_count,
     traceEventCount: row.trace_event_count ?? 0,
     aiSummary: row.ai_summary,

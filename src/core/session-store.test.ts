@@ -729,9 +729,11 @@ describe("SessionStore", () => {
 
     expect(store.getSkillSyncBindingForLocalPath("/tmp/.codex/skills/review-code/SKILL.md")).toEqual({
       localSkillPath: "/tmp/.codex/skills/review-code/SKILL.md",
+      portableIdentity: "",
       remoteSkillId: "remote-review",
       remoteUpdatedAt: "2026-06-29T10:00:00.000Z",
       remoteVersion: 3,
+      lastContentHash: "",
       lastSyncedAt: 100,
       direction: "upload",
     });
@@ -749,9 +751,11 @@ describe("SessionStore", () => {
     expect(store.listSkillSyncBindings()).toEqual([
       {
         localSkillPath: "/tmp/.codex/skills/review-code/SKILL.md",
+        portableIdentity: "",
         remoteSkillId: "remote-review",
         remoteUpdatedAt: "2026-06-29T11:00:00.000Z",
         remoteVersion: 5,
+        lastContentHash: "",
         lastSyncedAt: 200,
         direction: "download",
       },
@@ -788,9 +792,11 @@ describe("SessionStore", () => {
       expect(store.listSkillSyncBindings()).toEqual([
         {
           localSkillPath: "/work/project/.claude/skills/foo/SKILL.md",
+          portableIdentity: "",
           remoteSkillId: "remote-foo",
           remoteUpdatedAt: "2026-06-29T11:00:00.000Z",
           remoteVersion: 2,
+          lastContentHash: "",
           lastSyncedAt: 200,
           direction: "upload",
         },
@@ -800,6 +806,33 @@ describe("SessionStore", () => {
     } finally {
       store.close();
     }
+  });
+
+  it("rebinds portable Skill identities across device-specific absolute paths", () => {
+    const store = createInMemoryStore();
+    try {
+      store.upsertSkillSyncBinding({
+        localSkillPath: "/Users/a/.agents/skills/bytedcli/SKILL.md", portableIdentity: "shared/bytedcli", remoteSkillId: "remote-v1",
+        remoteUpdatedAt: "2026-07-14T00:00:00Z", remoteVersion: 1, lastContentHash: "hash-v1", lastSyncedAt: 1, direction: "upload",
+      });
+      store.upsertSkillSyncBinding({
+        localSkillPath: "C:\\Users\\b\\.agents\\skills\\bytedcli\\SKILL.md", portableIdentity: "shared/bytedcli", remoteSkillId: "remote-v2",
+        remoteUpdatedAt: "2026-07-14T01:00:00Z", remoteVersion: 2, lastContentHash: "hash-v2", lastSyncedAt: 2, direction: "download",
+      });
+      expect(store.listSkillSyncBindings()).toEqual([expect.objectContaining({
+        localSkillPath: "C:\\Users\\b\\.agents\\skills\\bytedcli\\SKILL.md", portableIdentity: "shared/bytedcli", remoteSkillId: "remote-v2", lastContentHash: "hash-v2",
+      })]);
+    } finally { store.close(); }
+  });
+
+  it("persists session sync bindings for restored copies and removes only the binding on cloud deletion", () => {
+    const store = createInMemoryStore();
+    try {
+      store.upsertSessionSyncBinding({ localSessionKey: "codex:restored", remoteSessionId: "remote-1", lastLocalRevision: "local", lastRemoteRevision: "remote", lastSyncedAt: 10, direction: "restore" });
+      expect(store.getSessionSyncBindingForRemoteId("remote-1")).toEqual({ localSessionKey: "codex:restored", remoteSessionId: "remote-1", lastLocalRevision: "local", lastRemoteRevision: "remote", lastSyncedAt: 10, direction: "restore" });
+      store.deleteSessionSyncBindingForRemoteId("remote-1");
+      expect(store.getSessionSyncBindingForRemoteId("remote-1")).toBeNull();
+    } finally { store.close(); }
   });
 
   it("records duplicate session migrations and lists them in descending creation order", () => {

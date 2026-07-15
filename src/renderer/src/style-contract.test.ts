@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 const stylesheet = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 const appSource = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+const remoteSessionsSource = readFileSync(new URL("./components/remote-sessions-dialog.tsx", import.meta.url), "utf8");
 
 describe("stylesheet theme contract", () => {
   it("keeps structured search hits compact and highlighted with theme tokens", () => {
@@ -239,5 +240,39 @@ describe("stylesheet theme contract", () => {
     expect(dark).toMatch(/--codewiz-badge-text:\s*#ff8d9d/);
     expect(badge).toMatch(/background:\s*var\(--codewiz-badge-bg\)/);
     expect(badge).toMatch(/color:\s*var\(--codewiz-badge-text\)/);
+  });
+
+  it("uses one desktop toolbar and the available viewport height for session sync", () => {
+    const dialog = stylesheet.match(/\.remote-sessions-dialog\s*\{[^}]*\}/)?.[0] ?? "";
+    const toolbar = stylesheet.match(/\.remote-sessions-toolbar\s*\{[^}]*\}/)?.[0] ?? "";
+    const list = stylesheet.match(/\.remote-session-list\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(remoteSessionsSource).not.toContain('className="remote-selection-bar"');
+    expect(dialog).toMatch(/height:\s*min\(88vh,\s*860px\)/);
+    expect(dialog).toMatch(/display:\s*flex/);
+    expect(toolbar).toMatch(/flex-wrap:\s*nowrap/);
+    expect(list).toMatch(/flex:\s*1/);
+    expect(list).toMatch(/overflow-y:\s*auto/);
+  });
+
+  it("keeps the Skills refresh action in the desktop toolbar row", () => {
+    const toolbar = stylesheet.match(/\.skills-toolbar\s*\{[^}]*\}/)?.[0] ?? "";
+    const refresh = stylesheet.match(/\.skills-toolbar \.stats-refresh\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(toolbar).toMatch(/flex-wrap:\s*nowrap/);
+    expect(refresh).toMatch(/flex:\s*0\s+0\s+auto/);
+  });
+
+  it("uses a defined, theme-aware border for Supabase setup warnings", () => {
+    const warning = stylesheet.match(/\.supabase-setup-guide\.warning\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(warning).toMatch(/border-color:\s*color-mix\([^;]*var\(--running-text\)/);
+    expect(warning).not.toContain("--running-border");
+  });
+
+  it("keeps the nested remote-session setup guide aligned with the other settings cards", () => {
+    const nestedGuide = stylesheet.match(/\.remote-sync-settings-body\s*>\s*\.supabase-setup-guide\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(nestedGuide).toMatch(/margin:\s*0/);
   });
 });

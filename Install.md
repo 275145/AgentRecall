@@ -104,6 +104,14 @@ npm install -g https://github.com/zszz3/agent-session-search/releases/latest/dow
 
 注意：更新器随应用版本一起发布。已经安装的旧版本无法提前获得新版本中的兜底逻辑；如果某个旧版本自身的自动更新失败，请直接执行上面的命令覆盖安装。
 
+安装指定旧版本或回滚时使用对应 Release tag 的固定链接，例如：
+
+```bash
+npm install -g https://github.com/zszz3/agent-session-search/releases/download/v0.2.0/agent-session-search.tgz
+```
+
+安装会覆盖当前全局版本，不会删除会话数据库、Supabase 配置或用户偏好。回滚后可用 `agent-session-search --version` 核对版本。
+
 如果正在使用源码开发目录且希望手动同步 `main`，仍可执行：
 
 ```bash
@@ -112,14 +120,19 @@ nvm install 22
 nvm use 22
 npm ci
 npm run build
-npm install -g .
+npm run package:smoke
 ```
+
+源码开发版请使用 `npm run dev` 启动；`package:smoke` 会在临时 HOME 和临时 npm prefix 中验证安装包，不会覆盖正在使用的正式版。
 
 ### 卸载
 
 ```bash
+agent-session-search uninstall
 npm uninstall -g agent-session-search
 ```
+
+第一条命令只清理本应用写入的 Claude statusLine、Skill usage hook、Claude / Codex / CodeBuddy MCP 引用和集成缓存；它会保留本地会话数据库、Supabase 配置、自动更新偏好及其他用户偏好。第二条命令再删除全局安装的程序包。
 
 ### 备选：从源码克隆安装
 
@@ -231,10 +244,10 @@ The project uses Electron's built-in `node:sqlite`, so it does not need native S
    npm run build
    ```
 
-6. Register the global launch command when installing for daily use:
+6. Smoke-test the generated package in an isolated temporary HOME and npm prefix:
 
    ```bash
-   npm install -g .
+   npm run package:smoke
    ```
 
 7. Start the app only when the user asks to run it:

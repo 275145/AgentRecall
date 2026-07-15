@@ -138,11 +138,24 @@ export type SkillSyncDirection = "upload" | "download";
 
 export interface SkillSyncBinding {
   localSkillPath: string;
+  portableIdentity?: string;
   remoteSkillId: string;
   remoteUpdatedAt: string;
   remoteVersion: number;
+  lastContentHash?: string;
   lastSyncedAt: number;
   direction: SkillSyncDirection;
+}
+
+export type SessionSyncDirection = "upload" | "restore";
+
+export interface SessionSyncBinding {
+  localSessionKey: string;
+  remoteSessionId: string;
+  lastLocalRevision: string;
+  lastRemoteRevision: string;
+  lastSyncedAt: number;
+  direction: SessionSyncDirection;
 }
 
 export interface TraceEventQueryOptions {
@@ -153,11 +166,22 @@ export interface TraceEventQueryOptions {
 
 interface SkillSyncBindingRow {
   local_skill_path: string;
+  portable_identity: string;
   remote_skill_id: string;
   remote_updated_at: string;
   remote_version: number;
+  last_content_hash: string;
   last_synced_at: number;
   direction: SkillSyncDirection;
+}
+
+interface SessionSyncBindingRow {
+  local_session_key: string;
+  remote_session_id: string;
+  last_local_revision: string;
+  last_remote_revision: string;
+  last_synced_at: number;
+  direction: SessionSyncDirection;
 }
 
 interface SessionMigrationRow {
@@ -1191,6 +1215,7 @@ export class SessionStore {
 
   upsertSkillSyncBinding(binding: SkillSyncBinding): void {
     const localSkillPath = binding.localSkillPath.trim();
+    const portableIdentity = binding.portableIdentity?.trim() ?? "";
     const remoteSkillId = binding.remoteSkillId.trim();
     if (!localSkillPath || !remoteSkillId) return;
     // A remote skill maps to exactly one local path. Two local skills that share an agent+name
@@ -1200,24 +1225,33 @@ export class SessionStore {
       this.db
         .prepare(`DELETE FROM skill_sync_bindings WHERE remote_skill_id = ? AND local_skill_path <> ?`)
         .run(remoteSkillId, localSkillPath);
+      if (portableIdentity) {
+        this.db
+          .prepare(`DELETE FROM skill_sync_bindings WHERE portable_identity = ? AND local_skill_path <> ?`)
+          .run(portableIdentity, localSkillPath);
+      }
       this.db
         .prepare(
           `
-        INSERT INTO skill_sync_bindings (local_skill_path, remote_skill_id, remote_updated_at, remote_version, last_synced_at, direction)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO skill_sync_bindings (local_skill_path, portable_identity, remote_skill_id, remote_updated_at, remote_version, last_content_hash, last_synced_at, direction)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(local_skill_path) DO UPDATE SET
+          portable_identity = excluded.portable_identity,
           remote_skill_id = excluded.remote_skill_id,
           remote_updated_at = excluded.remote_updated_at,
           remote_version = excluded.remote_version,
+          last_content_hash = excluded.last_content_hash,
           last_synced_at = excluded.last_synced_at,
           direction = excluded.direction
       `,
         )
         .run(
           localSkillPath,
+          portableIdentity,
           remoteSkillId,
           binding.remoteUpdatedAt,
           nonNegativeNumber(binding.remoteVersion) || 1,
+          binding.lastContentHash?.trim() ?? "",
           binding.lastSyncedAt,
           binding.direction,
         );
@@ -1228,7 +1262,7 @@ export class SessionStore {
     const row = this.db
       .prepare(
         `
-        SELECT local_skill_path, remote_skill_id, remote_updated_at, remote_version, last_synced_at, direction
+        SELECT local_skill_path, portable_identity, remote_skill_id, remote_updated_at, remote_version, last_content_hash, last_synced_at, direction
         FROM skill_sync_bindings
         WHERE local_skill_path = ?
       `,
@@ -1237,11 +1271,22 @@ export class SessionStore {
     return row ? skillSyncBindingFromRow(row) : null;
   }
 
+  getSkillSyncBindingForPortableIdentity(portableIdentity: string): SkillSyncBinding | null {
+    const row = this.db
+      .prepare(
+        `SELECT local_skill_path, portable_identity, remote_skill_id, remote_updated_at, remote_version, last_content_hash, last_synced_at, direction
+         FROM skill_sync_bindings
+         WHERE portable_identity = ?`,
+      )
+      .get(portableIdentity.trim()) as SkillSyncBindingRow | undefined;
+    return row ? skillSyncBindingFromRow(row) : null;
+  }
+
   getSkillSyncBindingForRemoteId(remoteSkillId: string): SkillSyncBinding | null {
     const row = this.db
       .prepare(
         `
-        SELECT local_skill_path, remote_skill_id, remote_updated_at, remote_version, last_synced_at, direction
+        SELECT local_skill_path, portable_identity, remote_skill_id, remote_updated_at, remote_version, last_content_hash, last_synced_at, direction
         FROM skill_sync_bindings
         WHERE remote_skill_id = ?
       `,
@@ -1254,13 +1299,83 @@ export class SessionStore {
     const rows = this.db
       .prepare(
         `
-        SELECT local_skill_path, remote_skill_id, remote_updated_at, remote_version, last_synced_at, direction
+        SELECT local_skill_path, portable_identity, remote_skill_id, remote_updated_at, remote_version, last_content_hash, last_synced_at, direction
         FROM skill_sync_bindings
         ORDER BY last_synced_at DESC, local_skill_path
       `,
       )
       .all() as unknown as SkillSyncBindingRow[];
     return rows.map(skillSyncBindingFromRow);
+  }
+
+  deleteSkillSyncBindingsForRemoteIds(remoteSkillIds: string[]): void {
+    const ids = [...new Set(remoteSkillIds.map((id) => id.trim()).filter(Boolean))];
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => "?").join(", ");
+    this.db.prepare(`DELETE FROM skill_sync_bindings WHERE remote_skill_id IN (${placeholders})`).run(...ids);
+  }
+
+  upsertSessionSyncBinding(binding: SessionSyncBinding): void {
+    const localSessionKey = binding.localSessionKey.trim();
+    const remoteSessionId = binding.remoteSessionId.trim();
+    if (!localSessionKey || !remoteSessionId) return;
+    this.transaction(() => {
+      this.db.prepare("DELETE FROM session_sync_bindings WHERE remote_session_id = ? AND local_session_key <> ?").run(remoteSessionId, localSessionKey);
+      this.db
+        .prepare(
+          `INSERT INTO session_sync_bindings (
+             local_session_key, remote_session_id, last_local_revision, last_remote_revision, last_synced_at, direction
+           ) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(local_session_key) DO UPDATE SET
+             remote_session_id = excluded.remote_session_id,
+             last_local_revision = excluded.last_local_revision,
+             last_remote_revision = excluded.last_remote_revision,
+             last_synced_at = excluded.last_synced_at,
+             direction = excluded.direction`,
+        )
+        .run(
+          localSessionKey,
+          remoteSessionId,
+          binding.lastLocalRevision,
+          binding.lastRemoteRevision,
+          binding.lastSyncedAt,
+          binding.direction,
+        );
+    });
+  }
+
+  getSessionSyncBindingForLocalKey(localSessionKey: string): SessionSyncBinding | null {
+    const row = this.db
+      .prepare(
+        `SELECT local_session_key, remote_session_id, last_local_revision, last_remote_revision, last_synced_at, direction
+         FROM session_sync_bindings WHERE local_session_key = ?`,
+      )
+      .get(localSessionKey) as SessionSyncBindingRow | undefined;
+    return row ? sessionSyncBindingFromRow(row) : null;
+  }
+
+  getSessionSyncBindingForRemoteId(remoteSessionId: string): SessionSyncBinding | null {
+    const row = this.db
+      .prepare(
+        `SELECT local_session_key, remote_session_id, last_local_revision, last_remote_revision, last_synced_at, direction
+         FROM session_sync_bindings WHERE remote_session_id = ?`,
+      )
+      .get(remoteSessionId) as SessionSyncBindingRow | undefined;
+    return row ? sessionSyncBindingFromRow(row) : null;
+  }
+
+  listSessionSyncBindings(): SessionSyncBinding[] {
+    const rows = this.db
+      .prepare(
+        `SELECT local_session_key, remote_session_id, last_local_revision, last_remote_revision, last_synced_at, direction
+         FROM session_sync_bindings ORDER BY last_synced_at DESC`,
+      )
+      .all() as unknown as SessionSyncBindingRow[];
+    return rows.map(sessionSyncBindingFromRow);
+  }
+
+  deleteSessionSyncBindingForRemoteId(remoteSessionId: string): void {
+    this.db.prepare("DELETE FROM session_sync_bindings WHERE remote_session_id = ?").run(remoteSessionId);
   }
 
   getApiProviderKey(target: ApiProviderKeyTarget, providerId: string): string {
@@ -1612,9 +1727,20 @@ export class SessionStore {
 
       CREATE TABLE IF NOT EXISTS skill_sync_bindings (
         local_skill_path TEXT PRIMARY KEY,
+        portable_identity TEXT NOT NULL DEFAULT '',
         remote_skill_id TEXT NOT NULL UNIQUE,
         remote_updated_at TEXT NOT NULL,
         remote_version INTEGER NOT NULL DEFAULT 1,
+        last_content_hash TEXT NOT NULL DEFAULT '',
+        last_synced_at INTEGER NOT NULL,
+        direction TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS session_sync_bindings (
+        local_session_key TEXT PRIMARY KEY,
+        remote_session_id TEXT NOT NULL UNIQUE,
+        last_local_revision TEXT NOT NULL,
+        last_remote_revision TEXT NOT NULL,
         last_synced_at INTEGER NOT NULL,
         direction TEXT NOT NULL
       );
@@ -1669,6 +1795,8 @@ export class SessionStore {
         ON skill_usage_events(timestamp);
       CREATE INDEX IF NOT EXISTS idx_skill_sync_bindings_remote_id
         ON skill_sync_bindings(remote_skill_id);
+      CREATE INDEX IF NOT EXISTS idx_session_sync_bindings_remote_id
+        ON session_sync_bindings(remote_session_id);
       CREATE INDEX IF NOT EXISTS idx_session_migrations_source_session_key_created_at_id
         ON session_migrations(source_session_key, created_at DESC, id DESC);
     `);
@@ -1694,6 +1822,13 @@ export class SessionStore {
         .run();
     }
     this.addColumnIfMissing("skill_sync_bindings", "remote_version", "INTEGER NOT NULL DEFAULT 1");
+    this.addColumnIfMissing("skill_sync_bindings", "portable_identity", "TEXT NOT NULL DEFAULT ''");
+    this.addColumnIfMissing("skill_sync_bindings", "last_content_hash", "TEXT NOT NULL DEFAULT ''");
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_sync_bindings_portable_identity
+      ON skill_sync_bindings(portable_identity)
+      WHERE portable_identity <> '';
+    `);
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sessions_environment
         ON sessions(environment_id);
@@ -2484,9 +2619,22 @@ function normalizeTokenEvent(event: TokenUsageEvent): TokenUsageEvent {
 function skillSyncBindingFromRow(row: SkillSyncBindingRow): SkillSyncBinding {
   return {
     localSkillPath: row.local_skill_path,
+    portableIdentity: row.portable_identity || "",
     remoteSkillId: row.remote_skill_id,
     remoteUpdatedAt: row.remote_updated_at,
     remoteVersion: typeof row.remote_version === "number" && Number.isFinite(row.remote_version) ? row.remote_version : 1,
+    lastContentHash: row.last_content_hash || "",
+    lastSyncedAt: row.last_synced_at,
+    direction: row.direction,
+  };
+}
+
+function sessionSyncBindingFromRow(row: SessionSyncBindingRow): SessionSyncBinding {
+  return {
+    localSessionKey: row.local_session_key,
+    remoteSessionId: row.remote_session_id,
+    lastLocalRevision: row.last_local_revision,
+    lastRemoteRevision: row.last_remote_revision,
     lastSyncedAt: row.last_synced_at,
     direction: row.direction,
   };

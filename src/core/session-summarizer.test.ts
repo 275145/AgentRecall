@@ -1,7 +1,7 @@
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import {
   buildSummaryMessages,
   needsBackfill,
@@ -26,9 +26,15 @@ function customConfig(overrides: Partial<SummaryProviderConfig>): SummaryProvide
 }
 
 const DAY = 24 * 60 * 60 * 1000;
+const temporaryExecutableDirectories = new Set<string>();
+
+afterAll(async () => {
+  await Promise.all([...temporaryExecutableDirectories].map((directory) => rm(directory, { recursive: true, force: true })));
+});
 
 async function writeCodexExecFake(): Promise<{ executable: string; callsPath: string }> {
   const dir = await mkdtemp(path.join(os.tmpdir(), "session-summary-codex-"));
+  temporaryExecutableDirectories.add(dir);
   const executable = path.join(dir, "codex-fake");
   const callsPath = path.join(dir, "calls.jsonl");
   const script = `#!/usr/bin/env node
@@ -57,6 +63,7 @@ write({ type: "turn.completed" });
 
 async function writeClaudeExecFake(): Promise<{ executable: string; callsPath: string }> {
   const dir = await mkdtemp(path.join(os.tmpdir(), "session-summary-claude-"));
+  temporaryExecutableDirectories.add(dir);
   const executable = path.join(dir, "claude-fake");
   const callsPath = path.join(dir, "calls.jsonl");
   const script = `#!/usr/bin/env node

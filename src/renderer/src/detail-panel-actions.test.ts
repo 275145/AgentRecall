@@ -267,17 +267,19 @@ describe("detail panel actions", () => {
     expect(remoteCommand).not.toContain("fallbackMigrationResumeDisplayCommand(target");
   });
 
-  it("exposes visible session bulk remote upload and remote-environment restore actions", () => {
-    expect(appSource).toContain("uploadVisibleRemoteSessions");
+  it("loads the independent session sync list and exposes bulk cloud actions", () => {
+    expect(appSource).not.toContain("uploadVisibleRemoteSessions");
     expect(appSource).not.toContain("CloudUpload");
-    expect(remoteSessionsDialogSource).toContain("onUploadVisible");
-    expect(remoteSessionsDialogSource).toContain("Save local results");
+    expect(remoteSessionsDialogSource).not.toContain("onUploadVisible");
+    expect(remoteSessionsDialogSource).toContain("listSessionSyncItems");
+    expect(remoteSessionsDialogSource).toContain("Upload to cloud");
     expect(remoteSessionsDialogSource).toContain("selectedIds");
     expect(remoteSessionsDialogSource).toContain("Select visible");
-    expect(remoteSessionsDialogSource).toContain("Delete selected");
+    expect(remoteSessionsDialogSource).toContain("Delete cloud copies");
     expect(remoteSessionsDialogSource).toContain("deleteRemoteSessions");
     expect(remoteSessionsDialogSource).not.toContain("Database");
-    expect(remoteSessionsDialogSource).toContain("setup-copy-button");
+    expect(remoteSessionsDialogSource).toContain("SupabaseSetupGuide");
+    expect(remoteSessionsDialogSource).toContain('openSupabaseSqlEditor("sessions")');
     expect(preloadSource).toContain("restoreRemoteSessionToSourceEnvironment");
     expect(preloadSource).toContain("remote-session:restore-to-source-environment");
     expect(preloadSource).toContain("remote-session:delete-many");

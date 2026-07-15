@@ -1,0 +1,44 @@
+name: Quality Check
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate release note
+        run: node scripts/release-notes.mjs check-range "origin/${{ github.base_ref }}" HEAD
+
+      - name: Test, typecheck, and build
+        run: |
+          npm test
+          npm run typecheck
+          npm run build
+
+      - name: Smoke-test packaged install
+        run: npm run package:smoke

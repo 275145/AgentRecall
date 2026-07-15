@@ -143,19 +143,21 @@ function writeFileAtomic(filePath, contents) {
   fs.renameSync(tmp, filePath);
 }
 
-function run(remove) {
-  const home = homeDir();
+function run(remove, options = {}) {
+  const home = options.homeDir || homeDir();
   const scriptPath = serverScriptPath();
   const command = remove ? "node" : nodeCommand();
   const messages = [];
 
   const claudePath = path.join(home, ".claude.json");
-  const claudeConfig = applyClaudeConfig(readJson(claudePath), scriptPath, remove, command);
-  writeFileAtomic(claudePath, `${JSON.stringify(claudeConfig, null, 2)}\n`);
-  messages.push(`${remove ? "Removed" : "Configured"} MCP server in ${claudePath}`);
+  if (!remove || fs.existsSync(claudePath)) {
+    const claudeConfig = applyClaudeConfig(readJson(claudePath), scriptPath, remove, command);
+    writeFileAtomic(claudePath, `${JSON.stringify(claudeConfig, null, 2)}\n`);
+    messages.push(`${remove ? "Removed" : "Configured"} MCP server in ${claudePath}`);
+  }
 
   const codexDir = path.join(home, ".codex");
-  if (fs.existsSync(codexDir)) {
+  if (fs.existsSync(codexDir) && (!remove || fs.existsSync(path.join(codexDir, "config.toml")))) {
     const codexPath = path.join(codexDir, "config.toml");
     const current = fs.existsSync(codexPath) ? fs.readFileSync(codexPath, "utf8") : "";
     const nextToml = applyCodexConfig(current, scriptPath, remove, command);
@@ -167,7 +169,7 @@ function run(remove) {
 
   // CodeBuddy uses ~/.codebuddy/mcp.json with the same { mcpServers } shape as Claude.
   const codeBuddyDir = path.join(home, ".codebuddy");
-  if (fs.existsSync(codeBuddyDir)) {
+  if (fs.existsSync(codeBuddyDir) && (!remove || fs.existsSync(path.join(codeBuddyDir, "mcp.json")))) {
     const codeBuddyPath = path.join(codeBuddyDir, "mcp.json");
     const codeBuddyConfig = applyClaudeConfig(readJson(codeBuddyPath), scriptPath, remove, command);
     writeFileAtomic(codeBuddyPath, `${JSON.stringify(codeBuddyConfig, null, 2)}\n`);

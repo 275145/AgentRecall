@@ -87,6 +87,29 @@ function installClaudeStatuslineBridge(options) {
   return { status: "installed", settingsPath, command };
 }
 
+function uninstallClaudeStatuslineBridge(options) {
+  const opts = options || {};
+  const homeDir = opts.homeDir || os.homedir();
+  const settingsPath = opts.settingsPath || settingsPathFor(homeDir);
+  if (!fs.existsSync(settingsPath)) return { status: "absent", settingsPath };
+  let settings;
+  try {
+    const raw = fs.readFileSync(settingsPath, "utf8");
+    settings = raw.trim() ? JSON.parse(raw) : {};
+  } catch (error) {
+    return { status: "error", settingsPath, detail: error instanceof Error ? error.message : String(error) };
+  }
+  const command = settings?.statusLine?.command;
+  if (!isOurBridgeCommand(command)) return { status: "absent", settingsPath };
+  delete settings.statusLine;
+  try {
+    writeJsonAtomic(settingsPath, settings);
+  } catch (error) {
+    return { status: "error", settingsPath, detail: error instanceof Error ? error.message : String(error) };
+  }
+  return { status: "removed", settingsPath };
+}
+
 function runCli() {
   // Never fail the install: postinstall must always exit 0.
   if (process.env.AGENT_SESSION_SEARCH_SKIP_STATUSLINE_INSTALL) return;
@@ -122,6 +145,7 @@ function runCli() {
 
 module.exports = {
   installClaudeStatuslineBridge,
+  uninstallClaudeStatuslineBridge,
   buildBridgeCommand,
   isOurBridgeCommand,
   settingsPathFor,

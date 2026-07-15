@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 
 import {
   fetchStarCount,
@@ -11,6 +11,12 @@ import {
   renderStarHistorySvg,
   updateDailySnapshots
 } from './generate-star-history.mjs'
+
+const temporaryDirectories = new Set()
+
+after(async () => {
+  await Promise.all([...temporaryDirectories].map((directory) => rm(directory, { recursive: true, force: true })))
+})
 
 test('committed Star History data matches the renamed repository', async () => {
   const data = JSON.parse(await readFile('assets/star-history-data.json', 'utf8'))
@@ -86,6 +92,7 @@ test('updateDailySnapshots replaces today and fills missing UTC days', () => {
 
 test('generateStarHistory updates the snapshot and SVG together', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'star-history-'))
+  temporaryDirectories.add(directory)
   const dataPath = join(directory, 'star-history-data.json')
   const outputPath = join(directory, 'star-history.svg')
   await writeFile(dataPath, JSON.stringify({
@@ -109,6 +116,7 @@ test('generateStarHistory updates the snapshot and SVG together', async () => {
 
 test('generateStarHistory is idempotent when today is unchanged', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'star-history-idempotent-'))
+  temporaryDirectories.add(directory)
   const dataPath = join(directory, 'star-history-data.json')
   const outputPath = join(directory, 'star-history.svg')
   const data = {
