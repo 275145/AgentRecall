@@ -80,4 +80,11 @@ describe("skills dialog actions", () => {
     expect(skillsDialogSource).toContain("changedFiles.map");
     expect(diffFiles).toMatch(/overflow-y:\s*auto/);
   });
+
+  it("renders local and cloud Skill documentation as Markdown", () => {
+    expect(skillsDialogSource).toContain('import { Markdown } from "../lightweight-markdown"');
+    expect(skillsDialogSource).toContain("<Markdown text={skillPreviewMarkdown(selectedSkill.markdown, language)} />");
+    expect(skillsDialogSource).toContain("<Markdown text={remoteVersionPreview(selectedVersion.id, versionContent, versionLoadingId, versionError, language)} />");
+    expect(skillsDialogSource).not.toContain('<pre className="skill-markdown-preview">');
+  });
 });

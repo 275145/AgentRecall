@@ -3886,15 +3886,17 @@ select:focus-visible {
 .skill-markdown-preview {
   flex: 1;
   min-height: 0;
-  margin: 0;
   padding: 16px 18px 22px;
   overflow: auto;
   background: var(--message-bg);
   color: var(--text-dim);
-  font-family: var(--mono);
   font-size: 12px;
-  line-height: 1.55;
-  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
+.skill-markdown-preview .md {
+  max-width: 920px;
+  margin: 0 auto;
 }
 
 .skills-empty {
