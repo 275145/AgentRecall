@@ -93,11 +93,34 @@ test("validates the complete release asset set before publication", async () => 
     outputDirectory,
   });
   assert.equal(typeof releaseAssetModule.validateReleaseAssets, "function");
-  await releaseAssetModule.validateReleaseAssets({ outputDirectory, version: "0.2.0" });
+  await releaseAssetModule.validateReleaseAssets({
+    outputDirectory,
+    version: "0.2.0",
+    repository: "zszz3/agent-session-search",
+  });
+
+  const manifestPath = path.join(outputDirectory, "update.json");
+  const originalManifest = await readFile(manifestPath, "utf8");
+  const tamperedManifest = JSON.parse(originalManifest);
+  tamperedManifest.package.url = "https://example.com/agent-session-search-0.2.0.tgz";
+  await writeFile(manifestPath, `${JSON.stringify(tamperedManifest)}\n`, "utf8");
+  await assert.rejects(
+    releaseAssetModule.validateReleaseAssets({
+      outputDirectory,
+      version: "0.2.0",
+      repository: "zszz3/agent-session-search",
+    }),
+    /update\.json package URL does not match the release asset/,
+  );
+  await writeFile(manifestPath, originalManifest, "utf8");
 
   await unlink(path.join(outputDirectory, "agent-session-search-0.2.0.tgz"));
   await assert.rejects(
-    releaseAssetModule.validateReleaseAssets({ outputDirectory, version: "0.2.0" }),
+    releaseAssetModule.validateReleaseAssets({
+      outputDirectory,
+      version: "0.2.0",
+      repository: "zszz3/agent-session-search",
+    }),
     /Missing release asset: agent-session-search-0\.2\.0\.tgz/,
   );
 });

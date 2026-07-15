@@ -60,6 +60,9 @@ test("workflows require branch notes and publish only main commits associated wi
   assert.match(releaseWorkflow, /cancel-in-progress:\s*false/);
   assert.match(releaseWorkflow, /npm test[\s\S]*npm run typecheck[\s\S]*npm run build/);
   assert.match(releaseWorkflow, /gh release upload/);
+  assert.match(releaseWorkflow, /gh release view "\$TAG" --json isDraft --jq '\.isDraft'/);
+  assert.match(releaseWorkflow, /already exists and is published; refusing to overwrite it/);
+  assert.match(releaseWorkflow, /gh release edit "\$TAG" --draft=false/);
   const tagIdentityName = releaseWorkflow.indexOf('git config user.name "github-actions[bot]"');
   const tagIdentityEmail = releaseWorkflow.indexOf('git config user.email "41898282+github-actions[bot]@users.noreply.github.com"');
   const annotatedTag = releaseWorkflow.indexOf('git tag -a "$TAG"');

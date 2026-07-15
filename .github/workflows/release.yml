@@ -105,6 +105,7 @@ jobs:
           node scripts/create-release-assets.mjs \
             --validate \
             --version "$VERSION" \
+            --repository "$GITHUB_REPOSITORY" \
             --output release
           echo "package_file=$package_file" >> "$GITHUB_OUTPUT"
 
@@ -122,12 +123,14 @@ jobs:
             git tag -a "$TAG" "$MERGED_SHA" -m "Agent-Session-Search $TAG"
             git push origin "$TAG"
           fi
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          if release_is_draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [ "$release_is_draft" != "true" ]; then
+              echo "Release $TAG already exists and is published; refusing to overwrite it."
+              exit 1
+            fi
             gh release edit "$TAG" --title "Agent-Session-Search $TAG" --notes-file release/release-notes.md
-            publish_draft=false
           else
             gh release create "$TAG" --draft --verify-tag --title "Agent-Session-Search $TAG" --notes-file release/release-notes.md
-            publish_draft=true
           fi
           gh release upload "$TAG" release/*.tgz release/*.sha256 release/update.json --clobber
           verify_directory="$(mktemp -d)"
@@ -141,7 +144,6 @@ jobs:
           node scripts/create-release-assets.mjs \
             --validate \
             --version "$VERSION" \
+            --repository "$GITHUB_REPOSITORY" \
             --output "$verify_directory"
-          if [ "$publish_draft" = true ]; then
-            gh release edit "$TAG" --draft=false
-          fi
+          gh release edit "$TAG" --draft=false

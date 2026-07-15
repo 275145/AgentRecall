@@ -12,6 +12,11 @@ function releasePackageName(version) {
   return `agent-session-search-${version}.tgz`;
 }
 
+function manifestRepositoryFor(repository) {
+  if (!/^[^/]+\/[^/]+$/.test(repository)) throw new Error(`Invalid GitHub repository: ${repository}`);
+  return repository.toLowerCase() === "zszz3/agentrecall" ? UPDATE_MANIFEST_REPOSITORY : repository;
+}
+
 export async function createReleaseAssets({
   notePath,
   version,
@@ -21,7 +26,6 @@ export async function createReleaseAssets({
   publishedAt = new Date().toISOString(),
 }) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`Invalid release version: ${version}`);
-  if (!/^[^/]+\/[^/]+$/.test(repository)) throw new Error(`Invalid GitHub repository: ${repository}`);
 
   const note = readReleaseNote(notePath);
   const packageName = path.basename(packagePath);
@@ -32,7 +36,7 @@ export async function createReleaseAssets({
   const packageBytes = await readFile(packagePath);
   const sha256 = createHash("sha256").update(packageBytes).digest("hex");
   const tag = `v${version}`;
-  const manifestRepository = repository.toLowerCase() === "zszz3/agentrecall" ? UPDATE_MANIFEST_REPOSITORY : repository;
+  const manifestRepository = manifestRepositoryFor(repository);
   const releaseBaseUrl = `https://github.com/${manifestRepository}/releases`;
   const assetBaseUrl = `${releaseBaseUrl}/download/${tag}`;
   const checksumName = `${packageName}.sha256`;
@@ -86,11 +90,15 @@ function checksumFromAsset(bytes, name) {
   return match[1].toLowerCase();
 }
 
-export async function validateReleaseAssets({ outputDirectory, version }) {
+export async function validateReleaseAssets({ outputDirectory, version, repository }) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`Invalid release version: ${version}`);
+  const manifestRepository = manifestRepositoryFor(repository);
   const packageName = releasePackageName(version);
   const checksumName = `${packageName}.sha256`;
   const latestChecksumName = `${LATEST_PACKAGE_NAME}.sha256`;
+  const tag = `v${version}`;
+  const releaseBaseUrl = `https://github.com/${manifestRepository}/releases`;
+  const assetBaseUrl = `${releaseBaseUrl}/download/${tag}`;
   const assets = new Map();
   for (const name of [packageName, checksumName, LATEST_PACKAGE_NAME, latestChecksumName, "update.json"]) {
     assets.set(name, await readReleaseAsset(outputDirectory, name));
@@ -102,22 +110,35 @@ export async function validateReleaseAssets({ outputDirectory, version }) {
   } catch {
     throw new Error("Invalid update.json release asset.");
   }
-  if (manifest?.version !== version || manifest?.tag !== `v${version}`) {
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error("Invalid update.json release asset.");
+  }
+  if (manifest.schemaVersion !== 1 || manifest.version !== version || manifest.tag !== tag) {
     throw new Error("update.json version does not match the release version.");
   }
-  if (manifest.package?.name !== packageName) {
+  if (manifest.releaseUrl !== `${releaseBaseUrl}/tag/${tag}`) {
+    throw new Error("update.json release URL does not match the release.");
+  }
+  if (typeof manifest.title !== "string" || manifest.title.trim().length === 0) {
+    throw new Error("update.json title is invalid.");
+  }
+  if (!Array.isArray(manifest.notes?.features) || !Array.isArray(manifest.notes?.fixes)) {
+    throw new Error("update.json release notes are invalid.");
+  }
+  const packageManifest = manifest.package;
+  if (!packageManifest || typeof packageManifest !== "object" || Array.isArray(packageManifest) || packageManifest.name !== packageName) {
     throw new Error(`update.json package name does not match ${packageName}.`);
   }
-  if (typeof manifest.package.url !== "string" || !manifest.package.url.endsWith(`/releases/download/v${version}/${packageName}`)) {
+  if (packageManifest.url !== `${assetBaseUrl}/${packageName}`) {
     throw new Error("update.json package URL does not match the release asset.");
   }
-  if (typeof manifest.package.checksumUrl !== "string" || !manifest.package.checksumUrl.endsWith(`/releases/download/v${version}/${checksumName}`)) {
+  if (packageManifest.checksumUrl !== `${assetBaseUrl}/${checksumName}`) {
     throw new Error("update.json checksum URL does not match the release asset.");
   }
 
   const packageBytes = assets.get(packageName);
   const sha256 = createHash("sha256").update(packageBytes).digest("hex");
-  if (manifest.package.sha256 !== sha256) throw new Error(`update.json checksum does not match ${packageName}.`);
+  if (packageManifest.sha256 !== sha256) throw new Error(`update.json checksum does not match ${packageName}.`);
   if (checksumFromAsset(assets.get(checksumName), packageName) !== sha256) {
     throw new Error(`Checksum asset does not match ${packageName}.`);
   }
@@ -138,11 +159,12 @@ function argumentValue(args, name) {
 export async function runCli(args) {
   if (args.includes("--validate")) {
     const version = argumentValue(args, "--version");
+    const repository = argumentValue(args, "--repository");
     const outputDirectory = argumentValue(args, "--output");
-    if (!version || !outputDirectory) {
-      throw new Error("Usage: node scripts/create-release-assets.mjs --validate --version <x.y.z> --output <dir>");
+    if (!version || !repository || !outputDirectory) {
+      throw new Error("Usage: node scripts/create-release-assets.mjs --validate --version <x.y.z> --repository <owner/repo> --output <dir>");
     }
-    const manifest = await validateReleaseAssets({ outputDirectory, version });
+    const manifest = await validateReleaseAssets({ outputDirectory, version, repository });
     process.stdout.write(`${JSON.stringify(manifest)}\n`);
     return manifest;
   }
