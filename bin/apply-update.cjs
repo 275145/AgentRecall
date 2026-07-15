@@ -14,6 +14,30 @@ const {
   waitForProcessExit,
 } = require("./update-client.cjs");
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function relaunchInstalledApp(options = {}) {
+  const launch = options.launchInstalledAppImpl || launchInstalledApp;
+  const writeError = options.writeError || ((message) => process.stderr.write(message));
+  try {
+    launch();
+    return;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    writeError(`Agent-Session-Search 已安装完成，但立即重启失败：${message}\n正在重试启动。\n`);
+  }
+
+  await delay(options.delayMs ?? 1_000);
+  try {
+    launch();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    writeError(`Agent-Session-Search 已安装完成，但自动重启失败：${message}\n请手动运行 agent-session-search 启动已安装的新版本。\n`);
+  }
+}
+
 function argumentValue(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
@@ -31,15 +55,16 @@ async function main() {
     if (process.argv.includes("--stop-app")) await stopRunningApp();
     process.stdout.write(`正在安装 Agent-Session-Search v${manifest.version}...\n`);
     await installUpdate(manifest);
+    await clearInstallStatus().catch(() => undefined);
     process.stdout.write(`Agent-Session-Search v${manifest.version} 安装完成，正在重新启动。\n`);
-    launchInstalledApp();
+    await relaunchInstalledApp();
   } finally {
     await lock?.release().catch(() => undefined);
     await fs.rm(path.dirname(manifestPath), { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
-main().catch(async (error) => {
+if (require.main === module) main().catch(async (error) => {
   const message = error instanceof Error ? error.message : String(error);
   const updateInProgress = error?.code === "UPDATE_IN_PROGRESS";
   process.stderr.write(
@@ -52,3 +77,5 @@ main().catch(async (error) => {
   }
   process.exitCode = 1;
 });
+
+module.exports = { relaunchInstalledApp };
