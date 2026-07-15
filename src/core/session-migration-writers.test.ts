@@ -249,7 +249,7 @@ describe("writeMigratedSession", () => {
   it.each([
     ["codex", "openai"],
     ["tcodex", "tencent"],
-    ["codex-internal", "codebuddy"],
+    ["codex-internal", "openai"],
   ] as const)("writes the resumable $target model provider", async (target, modelProvider) => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), `migration-writer-provider-${target}-`));
     try {
@@ -263,6 +263,110 @@ describe("writeMigratedSession", () => {
 
       const rows = readRows(result.filePath);
       expect(rows[0]?.payload?.model_provider).toBe(modelProvider);
+    } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["codex", ".codex", "custom-codex"],
+    ["tcodex", ".tcodex", "custom-tcodex"],
+    ["codex-internal", ".codex-internal", "custom-codex-internal"],
+  ] as const)("uses the active provider from the $target config", async (target, root, modelProvider) => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), `migration-writer-configured-provider-${target}-`));
+    try {
+      const targetHome = path.join(homeDir, root);
+      fs.mkdirSync(targetHome, { recursive: true });
+      fs.writeFileSync(
+        path.join(targetHome, "config.toml"),
+        `model_provider = "${modelProvider}"\n\n[profiles.unused]\nmodel_provider = "profile-only"\n`,
+      );
+
+      const result = await writeMigratedSession({
+        target,
+        session: portable(),
+        homeDir,
+        now: NOW,
+        idFactory: idFactory([SESSION_ID]),
+      });
+
+      expect(readRows(result.filePath)[0]?.payload?.model_provider).toBe(modelProvider);
+    } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores profile-scoped Codex providers when no active provider is configured", async () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "migration-writer-profile-provider-"));
+    try {
+      const targetHome = path.join(homeDir, ".codex-internal");
+      fs.mkdirSync(targetHome, { recursive: true });
+      fs.writeFileSync(
+        path.join(targetHome, "config.toml"),
+        '[profiles.internal]\nmodel_provider = "profile-only"\n',
+      );
+
+      const result = await writeMigratedSession({
+        target: "codex-internal",
+        session: portable(),
+        homeDir,
+        now: NOW,
+        idFactory: idFactory([SESSION_ID]),
+      });
+
+      expect(readRows(result.filePath)[0]?.payload?.model_provider).toBe("openai");
+    } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the provider from the selected Codex profile", async () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "migration-writer-active-profile-provider-"));
+    try {
+      const targetHome = path.join(homeDir, ".codex");
+      fs.mkdirSync(targetHome, { recursive: true });
+      fs.writeFileSync(
+        path.join(targetHome, "config.toml"),
+        [
+          'profile = "work"',
+          'model_provider = "root-provider"',
+          "",
+          "[profiles.work]",
+          'model_provider = "profile-provider"',
+          "",
+        ].join("\n"),
+      );
+
+      const result = await writeMigratedSession({
+        target: "codex",
+        session: portable(),
+        homeDir,
+        now: NOW,
+        idFactory: idFactory([SESSION_ID]),
+      });
+
+      expect(readRows(result.filePath)[0]?.payload?.model_provider).toBe("profile-provider");
+    } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back when the active Codex provider is malformed", async () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "migration-writer-malformed-provider-"));
+    try {
+      const targetHome = path.join(homeDir, ".tcodex");
+      fs.mkdirSync(targetHome, { recursive: true });
+      fs.writeFileSync(path.join(targetHome, "config.toml"), "model_provider = [\n");
+
+      const result = await writeMigratedSession({
+        target: "tcodex",
+        session: portable(),
+        homeDir,
+        now: NOW,
+        idFactory: idFactory([SESSION_ID]),
+      });
+
+      expect(readRows(result.filePath)[0]?.payload?.model_provider).toBe("tencent");
     } finally {
       fs.rmSync(homeDir, { recursive: true, force: true });
     }
@@ -294,6 +398,7 @@ describe("writeMigratedSession", () => {
       ["assistant", "assistant"],
       ["user", "user"],
     ]);
+    expect(messages[1]?.message?.model).toBe("session-migration");
     for (const [index, row] of messages.entries()) {
       expect(row).toMatchObject({
         cwd: portable().projectPath,
@@ -306,6 +411,79 @@ describe("writeMigratedSession", () => {
     expectRoundTrip("claude", "claude-cli", result.sessionId, result.filePath, rows);
 
     fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it.each([
+    ["claude", ".claude", "configured-claude-model"],
+    ["tclaude", ".tclaude", "configured-tclaude-model"],
+    ["claude-internal", ".claude-internal", "configured-claude-internal-model"],
+  ] as const)("uses the routed model from the $target settings", async (target, root, model) => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), `migration-writer-configured-model-${target}-`));
+    try {
+      const targetHome = path.join(homeDir, root);
+      fs.mkdirSync(targetHome, { recursive: true });
+      fs.writeFileSync(
+        path.join(targetHome, "settings.json"),
+        `${JSON.stringify({ model: "top-level-model", env: { ANTHROPIC_MODEL: `  ${model}  ` } }, null, 2)}\n`,
+      );
+
+      const result = await writeMigratedSession({
+        target,
+        session: portable(),
+        homeDir,
+        now: NOW,
+        idFactory: idFactory([SESSION_ID, ...MESSAGE_IDS]),
+      });
+
+      const assistantRows = readRows(result.filePath).filter((row) => row.type === "assistant");
+      expect(assistantRows.map((row) => row.message.model)).toEqual([model]);
+    } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the top-level Claude model when no routed model is configured", async () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "migration-writer-top-level-model-"));
+    try {
+      const targetHome = path.join(homeDir, ".claude");
+      fs.mkdirSync(targetHome, { recursive: true });
+      fs.writeFileSync(path.join(targetHome, "settings.json"), '{"model":"  opus  ","env":{}}\n');
+
+      const result = await writeMigratedSession({
+        target: "claude",
+        session: portable(),
+        homeDir,
+        now: NOW,
+        idFactory: idFactory([SESSION_ID, ...MESSAGE_IDS]),
+      });
+
+      const assistantRows = readRows(result.filePath).filter((row) => row.type === "assistant");
+      expect(assistantRows.map((row) => row.message.model)).toEqual(["opus"]);
+    } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back when the Claude settings are malformed", async () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "migration-writer-malformed-claude-settings-"));
+    try {
+      const targetHome = path.join(homeDir, ".claude-internal");
+      fs.mkdirSync(targetHome, { recursive: true });
+      fs.writeFileSync(path.join(targetHome, "settings.json"), "{\n");
+
+      const result = await writeMigratedSession({
+        target: "claude-internal",
+        session: portable(),
+        homeDir,
+        now: NOW,
+        idFactory: idFactory([SESSION_ID, ...MESSAGE_IDS]),
+      });
+
+      const assistantRows = readRows(result.filePath).filter((row) => row.type === "assistant");
+      expect(assistantRows.map((row) => row.message.model)).toEqual(["session-migration"]);
+    } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
   });
 
   it("writes native CodeBuddy title and message rows with millisecond timestamps and a parent chain", async () => {
@@ -475,6 +653,18 @@ describe("writeMigratedSession", () => {
       });
     },
   );
+
+  it("rejects a tampered Codex model provider before rename", async () => {
+    await expectTamperedSessionRejected("codex", (rows) => {
+      rows[0].payload.model_provider = "tampered-provider";
+    });
+  });
+
+  it("rejects a tampered Claude model before rename", async () => {
+    await expectTamperedSessionRejected("claude", (rows) => {
+      rows[2].message.model = "tampered-model";
+    });
+  });
 });
 
 async function expectTamperedSessionRejected(

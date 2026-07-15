@@ -12,6 +12,7 @@ import {
   parseCursorTranscriptPath,
   parseJsonlText,
 } from "./session-loader";
+import { loadMigrationTargetRuntimeMetadata, type MigrationTargetRuntimeMetadata } from "./migration-target-runtime";
 import { migrationTargetDescriptor } from "./migration-targets";
 import type { LoadedSession, MigrationTarget, PortableSession } from "./types";
 
@@ -41,7 +42,9 @@ export async function writeMigratedSession(options: WriteMigratedSessionOptions)
   const createId = options.idFactory ?? (() => crypto.randomUUID());
   const sessionId = nextUniqueUuid(createId, new Set());
   const filePath = targetFilePath(options.target, options.session.projectPath, sessionId, homeDir, now);
-  const rows = serializeSession(options.target, options.session, sessionId, createId);
+  const targetHome = path.join(homeDir, TARGET_ROOTS[options.target]);
+  const runtimeMetadata = await loadMigrationTargetRuntimeMetadata(options.target, targetHome);
+  const rows = serializeSession(options.target, options.session, sessionId, createId, runtimeMetadata);
   const tempPath = `${filePath}.tmp-${crypto.randomUUID()}`;
 
   await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
@@ -49,7 +52,7 @@ export async function writeMigratedSession(options: WriteMigratedSessionOptions)
     await writeJsonlAndSync(tempPath, rows);
     if (options.beforeValidate) await options.beforeValidate(tempPath);
     const writtenRows = readJsonlStrict(tempPath, options.target);
-    validateNativeStructure(options.target, writtenRows, sessionId, options.session);
+    validateNativeStructure(options.target, writtenRows, sessionId, options.session, runtimeMetadata);
     const loaded = loadWrittenSession(options.target, tempPath, sessionId, options.session);
     validateRoundTrip(loaded, options.target, sessionId, options.session);
     if (options.validate) {
@@ -71,11 +74,16 @@ function serializeSession(
   session: PortableSession,
   sessionId: string,
   createId: () => string,
+  runtimeMetadata: MigrationTargetRuntimeMetadata,
 ): unknown[] {
   if (target === "cursor") return serializeCursor(session);
   const family = migrationTargetDescriptor(target).family;
-  if (family === "codex") return serializeCodex(session, sessionId, codexModelProvider(target));
-  if (family === "claude") return serializeClaude(session, sessionId, createId);
+  if (family === "codex") {
+    return serializeCodex(session, sessionId, requiredRuntimeValue(runtimeMetadata.codexModelProvider, "Codex model provider"));
+  }
+  if (family === "claude") {
+    return serializeClaude(session, sessionId, createId, requiredRuntimeValue(runtimeMetadata.claudeModel, "Claude model"));
+  }
   return serializeCodeBuddy(session, sessionId, createId);
 }
 
@@ -109,16 +117,11 @@ function serializeCodex(session: PortableSession, sessionId: string, modelProvid
   ];
 }
 
-function codexModelProvider(target: MigrationTarget): string {
-  if (target === "tcodex") return "tencent";
-  if (target === "codex-internal") return "codebuddy";
-  return "openai";
-}
-
 function serializeClaude(
   session: PortableSession,
   sessionId: string,
   createId: () => string,
+  model: string,
 ): unknown[] {
   const usedIds = new Set<string>([sessionId]);
   let parentUuid: string | null = null;
@@ -133,7 +136,7 @@ function serializeClaude(
     const message = portableMessage.role === "user"
       ? { role: "user", content: portableMessage.content }
       : {
-          model: "session-migration",
+          model,
           id: `msg_${uuid}`,
           type: "message",
           role: "assistant",
@@ -324,12 +327,18 @@ function validateNativeStructure(
   rows: unknown[],
   sessionId: string,
   session: PortableSession,
+  runtimeMetadata: MigrationTargetRuntimeMetadata,
 ): void {
   const family = migrationTargetDescriptor(target).family;
   if (family === "codex") {
-    validateCodexStructure(rows, sessionId, session);
+    validateCodexStructure(
+      rows,
+      sessionId,
+      session,
+      requiredRuntimeValue(runtimeMetadata.codexModelProvider, "Codex model provider"),
+    );
   } else if (family === "claude") {
-    validateClaudeStructure(rows, sessionId, session);
+    validateClaudeStructure(rows, sessionId, session, requiredRuntimeValue(runtimeMetadata.claudeModel, "Claude model"));
   } else if (target === "cursor") {
     validateCursorStructure(rows, session);
   } else {
@@ -337,7 +346,12 @@ function validateNativeStructure(
   }
 }
 
-function validateCodexStructure(rows: unknown[], sessionId: string, session: PortableSession): void {
+function validateCodexStructure(
+  rows: unknown[],
+  sessionId: string,
+  session: PortableSession,
+  modelProvider: string,
+): void {
   if (rows.length !== session.messages.length + 1) failValidation("codex", "has an unexpected row count");
   const meta = record(rows[0]);
   const payload = record(meta?.payload);
@@ -347,6 +361,7 @@ function validateCodexStructure(rows: unknown[], sessionId: string, session: Por
     || payload?.id !== sessionId
     || payload.title !== session.title
     || payload.cwd !== session.projectPath
+    || payload.model_provider !== modelProvider
   ) {
     failValidation("codex", "has invalid session metadata");
   }
@@ -371,7 +386,7 @@ function validateCodexStructure(rows: unknown[], sessionId: string, session: Por
   });
 }
 
-function validateClaudeStructure(rows: unknown[], sessionId: string, session: PortableSession): void {
+function validateClaudeStructure(rows: unknown[], sessionId: string, session: PortableSession, model: string): void {
   if (rows.length !== session.messages.length + 1) failValidation("claude", "has an unexpected row count");
   const title = record(rows[0]);
   if (title?.type !== "ai-title" || title.aiTitle !== session.title || title.sessionId !== sessionId) {
@@ -397,12 +412,18 @@ function validateClaudeStructure(rows: unknown[], sessionId: string, session: Po
       || row.cwd !== session.projectPath
       || row.sessionId !== sessionId
       || message?.role !== portableMessage.role
+      || (portableMessage.role === "assistant" && message.model !== model)
       || !contentMatches
     ) {
       failValidation("claude", `has invalid message structure at index ${index}`);
     }
     parentUuid = uuid;
   });
+}
+
+function requiredRuntimeValue(value: string | undefined, label: string): string {
+  if (!value) throw new Error(`${label} was not resolved for session migration.`);
+  return value;
 }
 
 function validateCodeBuddyStructure(rows: unknown[], sessionId: string, session: PortableSession): void {
