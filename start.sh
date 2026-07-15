@@ -5,7 +5,7 @@ set -euo pipefail
 # Agent-Session-Search — smart launcher for macOS
 #
 # Usage:  bash start.sh          # normal launch, may offer release updates
-#         bash start.sh local    # launch this checkout, no release update prompt
+#         bash start.sh local    # launch this checkout, no automatic release update check
 #
 # • Checks environment & installs missing pieces (first run only)
 # • Skips rebuild when source hasn't changed since last build
@@ -25,7 +25,7 @@ case "$LAUNCH_MODE" in
     cat <<'EOF'
 Usage:
   sh start.sh          Launch normally through the global command.
-  sh start.sh local    Launch this checkout's build and disable release updates.
+  sh start.sh local    Launch this checkout's build and disable automatic release update checks.
 EOF
     exit 0
     ;;
@@ -51,7 +51,7 @@ fail()  { printf "${C_RED}✗ %s${C_RESET}\n" "$*" >&2; exit 1; }
 
 printf "%b\n" "${C_BOLD}Agent-Session-Search launcher${C_RESET}"
 if [ "$LOCAL_MODE" = true ]; then
-  echo "Mode: local checkout (release update prompt disabled)"
+  echo "Mode: local checkout (automatic release update check disabled)"
 else
   echo "Mode: normal global launch"
 fi
@@ -286,7 +286,7 @@ APP_PID=$(app_is_running || true)
 APP_RUNNING=false
 [ -n "$APP_PID" ] && APP_RUNNING=true
 
-if [ "$APP_RUNNING" = true ] && [ "$build_needed" = false ] && [ "$LOCAL_MODE" = false ]; then
+if [ "$APP_RUNNING" = true ] && [ "$build_needed" = false ]; then
   # App is running and code is unchanged — just focus it.
   ok "App is already running — focusing existing window"
   echo ""
@@ -295,11 +295,7 @@ if [ "$APP_RUNNING" = true ] && [ "$build_needed" = false ] && [ "$LOCAL_MODE" =
 fi
 
 if [ "$APP_RUNNING" = true ]; then
-  if [ "$LOCAL_MODE" = true ]; then
-    info "Existing instance found — closing it to launch the local checkout …"
-  else
-    info "Existing instance found — closing it to apply updates …"
-  fi
+  info "Existing instance found — closing it to apply updates …"
   for pid in $APP_PID; do
     kill "$pid" 2>/dev/null || true
   done

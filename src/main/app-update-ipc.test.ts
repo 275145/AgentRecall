@@ -18,6 +18,12 @@ describe("application update IPC", () => {
     expect(mainSource).toContain("refreshAppUpdateStatus(false)");
   });
 
+  it("lets local launches disable only automatic update checks", () => {
+    expect(mainSource).toContain("function updateAutoCheckDisabledByEnvironment");
+    expect(mainSource).toContain('process.env.AGENT_SESSION_SEARCH_NO_UPDATE_CHECK === "1"');
+    expect(mainSource).toContain("if (!force && updateAutoCheckDisabledByEnvironment()) return appUpdateStatus ?? emptyAppUpdateStatus()");
+  });
+
   it("runs the installer outside Electron before quitting the current app", () => {
     expect(mainSource).toContain("ELECTRON_RUN_AS_NODE: \"1\"");
     expect(mainSource).toContain("APPLY_UPDATE_PATH");

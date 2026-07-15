@@ -7,7 +7,7 @@ const source = readFileSync(new URL("../start.sh", import.meta.url), "utf8");
 test("launcher documents and parses local mode", () => {
   assert.match(source, /bash start\.sh local/);
   assert.match(source, /local\|--local\) LOCAL_MODE=true/);
-  assert.match(source, /Mode: local checkout \(release update prompt disabled\)/);
+  assert.match(source, /Mode: local checkout \(automatic release update check disabled\)/);
 });
 
 test("normal launch still uses the global command", () => {
@@ -15,7 +15,7 @@ test("normal launch still uses the global command", () => {
   assert.match(source, /LAUNCH_NO_UPDATE=false/);
 });
 
-test("local launch starts this checkout without update checks", () => {
+test("local launch starts this checkout without automatic update checks", () => {
   assert.match(source, /LOCAL_BIN="\$ROOT_DIR\/bin\/agent-session-search\.cjs"/);
   assert.match(source, /LAUNCH_BIN="\$LOCAL_BIN"/);
   assert.match(source, /LAUNCH_NO_UPDATE=true/);
@@ -35,7 +35,7 @@ test("launcher exits with the final app launch status", () => {
   assert.match(source, /launch_agent_session_search\nexit \$\?/);
 });
 
-test("local mode restarts an existing app instead of focusing a stale install", () => {
-  assert.match(source, /\[ "\$APP_RUNNING" = true \] && \[ "\$build_needed" = false \] && \[ "\$LOCAL_MODE" = false \]/);
-  assert.match(source, /closing it to launch the local checkout/);
+test("local mode keeps normal focus and restart behavior", () => {
+  assert.match(source, /\[ "\$APP_RUNNING" = true \] && \[ "\$build_needed" = false \]/);
+  assert.doesNotMatch(source, /closing it to launch the local checkout/);
 });

@@ -554,6 +554,10 @@ function emptyAppUpdateStatus(): AppUpdateStatus {
   };
 }
 
+function updateAutoCheckDisabledByEnvironment(): boolean {
+  return process.env.AGENT_SESSION_SEARCH_NO_UPDATE_CHECK === "1";
+}
+
 async function refreshAppUpdateStatus(force = false): Promise<AppUpdateStatus> {
   if (activeAppUpdateCheck) return activeAppUpdateCheck;
   activeAppUpdateCheck = loadUpdateClient()
@@ -574,6 +578,7 @@ async function refreshAppUpdateStatus(force = false): Promise<AppUpdateStatus> {
 }
 
 async function getAppUpdateStatus(force = false): Promise<AppUpdateStatus> {
+  if (!force && updateAutoCheckDisabledByEnvironment()) return appUpdateStatus ?? emptyAppUpdateStatus();
   if (!force && !getSettings().autoCheckUpdates) return appUpdateStatus ?? emptyAppUpdateStatus();
   if (!force && appUpdateStatus) return appUpdateStatus;
   return refreshAppUpdateStatus(force);
