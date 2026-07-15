@@ -64,6 +64,23 @@ function createSpawnedChild() {
 }
 
 describe("RemoteWatchManager", () => {
+  it("builds a watcher command that filters all candidate session paths by existence", () => {
+    const maybeBuild = remoteWatch["buildRemoteWatchCommand" as keyof typeof remoteWatch];
+    expect(maybeBuild).toBeTypeOf("function");
+    if (typeof maybeBuild !== "function") return;
+
+    const command = (maybeBuild as () => string)();
+
+    expect(command).toContain("$HOME/.tclaude/projects");
+    expect(command).toContain("$HOME/.tcodex/sessions");
+    expect(command).toContain("$HOME/.tcodex/session_index.jsonl");
+    expect(command).toContain("$HOME/.codebuddy/projects");
+    expect(command).toContain('[ -e "$path" ]');
+    expect(command).toContain('inotifywait -m -r -e create,modify,move,delete "$@"');
+    expect(command).toContain('fswatch -0 "$@"');
+    expect(command).toContain("exit 86");
+  });
+
   it("debounces watcher events into a sync call", async () => {
     await withFakeTimers(async () => {
       const sync = vi.fn(async (_environment: SessionEnvironment) => undefined);
