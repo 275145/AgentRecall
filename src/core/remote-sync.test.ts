@@ -20,6 +20,10 @@ function decodeCollectorScript(command: string): string {
   return Buffer.from(command.match(/b64decode\("([^"]+)"\)/)?.[1] ?? "", "base64").toString("utf-8");
 }
 
+async function executeDecodedPython(_environment: unknown, remoteCommand: string): Promise<string> {
+  return execFileSync("python3", ["-c", decodeCollectorScript(remoteCommand)], { encoding: "utf8" });
+}
+
 function upsertSshEnvironment(store: ReturnType<typeof createInMemoryStore>) {
   return store.upsertEnvironment({
     id: "ssh-devbox",
@@ -1111,6 +1115,89 @@ describe("remote sync", () => {
     expect(capturedCommand).not.toContain("/home/me/private sessions");
     expect(payload.kind).toBe("codex-session");
     expect(payload.content).toContain("on-demand-codex");
+  });
+
+  it.each([
+    ["tclaude-cli", "claude-project"],
+    ["tcodex-cli", "codex-session"],
+    ["codebuddy-cli", "codebuddy-project"],
+  ] as const)("fetches %s files with an explicit source", async (source, kind) => {
+    const store = createInMemoryStore();
+    const environment = upsertSshEnvironment(store);
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-remote-file-"));
+    const filePath = path.join(tempDir, `private ${source}.jsonl`);
+    fs.writeFileSync(filePath, `${JSON.stringify({ type: "message" })}\n`, "utf8");
+    let capturedCommand = "";
+
+    try {
+      const result = await fetchRemoteSessionFilePayload(
+        environment,
+        { source, filePath } as SessionSearchResult,
+        {
+          runSsh: async (remoteEnvironment, remoteCommand) => {
+            capturedCommand = remoteCommand;
+            return executeDecodedPython(remoteEnvironment, remoteCommand);
+          },
+        },
+      );
+
+      expect(result).toMatchObject({ source, kind, path: filePath });
+      expect(capturedCommand).not.toContain(filePath);
+    } finally {
+      store.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    [
+      "tclaude-cli",
+      [
+        { type: "assistant", timestamp: "2026-07-15T09:59:00Z", message: { content: "older answer" } },
+        { type: "user", timestamp: "2026-07-15T10:00:00Z", message: { content: "remote question" } },
+        { type: "assistant", timestamp: "2026-07-15T10:01:00Z", message: { content: "remote answer" } },
+      ],
+    ],
+    [
+      "tcodex-cli",
+      [
+        { type: "response_item", timestamp: "2026-07-15T09:59:00Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "older answer" }] } },
+        { type: "response_item", timestamp: "2026-07-15T10:00:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "remote question" }] } },
+        { type: "response_item", timestamp: "2026-07-15T10:01:00Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "remote answer" }] } },
+      ],
+    ],
+    [
+      "codebuddy-cli",
+      [
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "older answer" }], timestamp: 1_752_573_599_000 },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "remote question" }], timestamp: 1_752_573_600_000 },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "remote answer" }], timestamp: 1_752_573_601_000 },
+      ],
+    ],
+  ] as const)("fetches the tail message page for %s", async (source, rows) => {
+    const store = createInMemoryStore();
+    const environment = upsertSshEnvironment(store);
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "session-search-remote-page-"));
+    const filePath = path.join(tempDir, `${source}.jsonl`);
+    fs.writeFileSync(filePath, rows.map((row) => JSON.stringify(row)).join("\n"), "utf8");
+
+    try {
+      const messages = await fetchRemoteSessionMessagePage(
+        environment,
+        { source, filePath } as SessionSearchResult,
+        1,
+        2,
+        { runSsh: executeDecodedPython },
+      );
+
+      expect(messages.map((message) => [message.role, message.content])).toEqual([
+        ["user", "remote question"],
+        ["assistant", "remote answer"],
+      ]);
+    } finally {
+      store.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("summarizes failed remote protocol stdout instead of leaking session JSON", () => {

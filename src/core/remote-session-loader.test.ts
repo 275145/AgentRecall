@@ -187,6 +187,36 @@ describe("remote session loader", () => {
     expect(loaded?.messages.map((message) => message.content)).toEqual(["detail question", "detail answer"]);
   });
 
+  it.each([
+    ["tclaude-cli", "claude-project", "/home/me/.tclaude/projects/repo/tclaude-detail.jsonl", claudeRows, "tclaude-detail"],
+    ["tcodex-cli", "codex-session", "/home/me/.tcodex/sessions/2026/07/15/rollout.jsonl", codexRows, "tcodex-remote"],
+    ["codebuddy-cli", "codebuddy-project", "/home/me/.codebuddy/projects/repo/codebuddy.jsonl", codeBuddyRows, "codebuddy-remote"],
+  ] as const)("keeps %s source and scoped key while loading remote detail", (source, kind, filePath, rows, rawId) => {
+    const summary = {
+      source,
+      rawId,
+      sessionKey: `ssh:ssh-devbox:${source}:${rawId}`,
+      filePath,
+      projectPath: "/repo",
+      originalTitle: "Remote summary title",
+      timestamp: new Date("2026-07-15T10:00:00Z").getTime(),
+      isSubagent: false,
+      parentSessionId: null,
+    } as SessionSearchResult;
+
+    const loaded = loadRemoteSessionDetailPayload(env, {
+      source,
+      kind,
+      path: filePath,
+      mtimeMs: 100,
+      size: 200,
+      content: rows.map((row) => JSON.stringify(row)).join("\n"),
+    }, summary);
+
+    expect(loaded?.session.source).toBe(source);
+    expect(loaded?.session.sessionKey).toBe(`ssh:ssh-devbox:${source}:${rawId}`);
+  });
+
   it("keeps remote Codex Desktop-originated sessions classified as Codex CLI", () => {
     const loaded = loadRemoteSessionPayloads(env, [
       payload(

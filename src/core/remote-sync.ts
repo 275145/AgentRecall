@@ -1,5 +1,9 @@
 import { execFile, type ExecFileOptions } from "node:child_process";
-import { loadRemoteSessionPayloads, type RemoteSessionFilePayload } from "./remote-session-loader";
+import {
+  loadRemoteSessionPayloads,
+  type RemoteSessionFileKind,
+  type RemoteSessionFilePayload,
+} from "./remote-session-loader";
 import type { SessionStore } from "./session-store";
 import { buildSshArgs } from "./ssh-config";
 import type {
@@ -439,10 +443,10 @@ export async function fetchRemoteSessionFilePayload(
   options: RemoteSessionFileFetchOptions = {},
 ): Promise<RemoteSessionFilePayload> {
   const runSsh = options.runSsh ?? runSystemSsh;
-  const output = await runSsh(environment, buildRemoteFileFetchCommand(session.filePath));
+  const kind = remoteKindForSource(session.source);
+  const output = await runSsh(environment, buildRemoteFileFetchCommand({ path: session.filePath, source: session.source, kind }));
   const payloads = decodeRemotePayload(output);
-  const expectedKind = session.source === "codex-cli" || session.source === "codex-app" || session.source === "codex-internal" ? "codex-session" : "claude-project";
-  const payload = payloads.find((item) => item.path === session.filePath && item.kind === expectedKind) ?? payloads[0];
+  const payload = payloads.find((item) => item.path === session.filePath && item.kind === kind) ?? payloads[0];
   if (!payload) throw new Error("Remote session file fetch returned no payload.");
   return payload;
 }
@@ -459,32 +463,41 @@ export async function fetchRemoteSessionMessagePage(
   return decodeRemoteMessagePage(output);
 }
 
-function buildRemoteFileFetchCommand(filePath: string): string {
+export function remoteFamilyForSource(source: SessionSource): "claude" | "codex" | "codebuddy" | "codewiz" {
+  if (source === "codewiz-cli") return "codewiz";
+  if (source === "codebuddy-cli") return "codebuddy";
+  if (source === "claude-cli" || source === "claude-app" || source === "claude-internal" || source === "tclaude-cli") {
+    return "claude";
+  }
+  return "codex";
+}
+
+function remoteKindForSource(source: SessionSource): RemoteSessionFileKind {
+  const family = remoteFamilyForSource(source);
+  if (family === "codewiz") return "codewiz-session";
+  if (family === "claude") return "claude-project";
+  if (family === "codebuddy") return "codebuddy-project";
+  return "codex-session";
+}
+
+function buildRemoteFileFetchCommand(request: { path: string; source: SessionSource; kind: RemoteSessionFileKind }): string {
+  const requestBase64 = Buffer.from(JSON.stringify(request), "utf-8").toString("base64");
   const script = String.raw`import base64, json
 from pathlib import Path
 
-path = Path(base64.b64decode("__PATH_B64__").decode("utf-8"))
+request = json.loads(base64.b64decode("__REQUEST_B64__").decode("utf-8"))
+path = Path(request["path"])
 stat = path.stat()
 content = path.read_bytes()
-suffix = path.suffix.lower()
-kind = "claude-project" if ".claude/projects" in str(path) or suffix == ".json" else "codex-session"
 print(json.dumps({
-  "kind": kind,
+  "kind": request["kind"],
+  "source": request["source"],
   "path": str(path),
   "mtimeMs": int(stat.st_mtime * 1000),
   "size": stat.st_size,
   "contentBase64": base64.b64encode(content).decode("ascii"),
-}, ensure_ascii=False))`.replace("__PATH_B64__", Buffer.from(filePath, "utf-8").toString("base64"));
+}, ensure_ascii=False))`.replace("__REQUEST_B64__", requestBase64);
   return buildPythonBase64Command(script);
-}
-
-function remoteFileKindForSource(source: SessionSource): RemoteSessionFilePayload["kind"] {
-  if (source === "codewiz-cli") return "codewiz-session";
-  if (source === "codebuddy-cli") return "codebuddy-project";
-  if (source === "codex-cli" || source === "codex-app" || source === "codex-internal" || source === "tcodex-cli") {
-    return "codex-session";
-  }
-  return "claude-project";
 }
 
 function buildRemoteMessagePageCommand(session: SessionSearchResult, offset: number, limit: number): string {
@@ -492,14 +505,7 @@ function buildRemoteMessagePageCommand(session: SessionSearchResult, offset: num
   const request = {
     path: dbPath,
     codeWizSessionId,
-    kind:
-      session.source === "codewiz-cli"
-        ? "codewiz"
-        : session.source === "codebuddy-cli"
-          ? "codebuddy"
-          : session.source.startsWith("claude") || session.source === "tclaude-cli"
-            ? "claude"
-            : "codex",
+    kind: remoteFamilyForSource(session.source),
     offset: Math.max(0, Math.floor(offset)),
     limit: Math.max(0, Math.min(500, Math.floor(limit))),
   };
@@ -653,7 +659,11 @@ const REMOTE_SESSION_FILE_KINDS = new Set<RemoteSessionFilePayload["kind"]>([
 
 const REMOTE_SUMMARY_SOURCES = new Set<SessionSource>([
   "claude-cli",
+  "claude-app",
+  "claude-internal",
   "codex-cli",
+  "codex-app",
+  "codex-internal",
   "tclaude-cli",
   "tcodex-cli",
   "codebuddy-cli",
