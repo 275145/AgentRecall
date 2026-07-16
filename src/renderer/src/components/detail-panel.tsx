@@ -223,18 +223,26 @@ export function DetailPanel({
     [panelSearchQuery],
   );
 
-  const panelSearchMatchIndices = useMemo(() => {
-    if (panelSearchTerms.length === 0) return [] as number[];
-    const indices: number[] = [];
+  const panelSearchMatchKeys = useMemo(() => {
+    if (panelSearchTerms.length === 0) return [] as string[];
+    const keys: string[] = [];
     for (const item of visibleTimelineItems) {
       if (item.kind === "message") {
         const lower = item.message.content.toLocaleLowerCase();
         if (panelSearchTerms.some((term) => lower.includes(term))) {
-          indices.push(item.message.index);
+          keys.push(item.key);
+        }
+      } else {
+        const hay = [item.event.title, item.event.detail, item.event.eventType]
+          .filter(Boolean)
+          .join(" ")
+          .toLocaleLowerCase();
+        if (panelSearchTerms.some((term) => hay.includes(term))) {
+          keys.push(item.key);
         }
       }
     }
-    return indices;
+    return keys;
   }, [visibleTimelineItems, panelSearchTerms]);
 
   useEffect(() => {
@@ -245,35 +253,35 @@ export function DetailPanel({
   }, [panelSearchOpen]);
 
   useEffect(() => {
-    if (panelSearchMatchIndices.length === 0) {
+    if (panelSearchMatchKeys.length === 0) {
       setCurrentMatchIndex(0);
       return;
     }
     setCurrentMatchIndex(0);
     requestAnimationFrame(() => scrollToPanelMatch(0));
-  }, [panelSearchMatchIndices]);
+  }, [panelSearchMatchKeys]);
 
   const scrollToPanelMatch = (index: number) => {
     const el = bodyRef.current;
     if (!el) return;
-    const messageIndex = panelSearchMatchIndices[index];
-    if (messageIndex === undefined) return;
-    const target = el.querySelector(`[data-message-index="${messageIndex}"]`) as HTMLElement | null;
+    const key = panelSearchMatchKeys[index];
+    if (key === undefined) return;
+    const target = el.querySelector(`[data-timeline-key="${key}"]`) as HTMLElement | null;
     if (target) {
       target.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   };
 
   const nextPanelMatch = () => {
-    if (panelSearchMatchIndices.length === 0) return;
-    const next = (currentMatchIndex + 1) % panelSearchMatchIndices.length;
+    if (panelSearchMatchKeys.length === 0) return;
+    const next = (currentMatchIndex + 1) % panelSearchMatchKeys.length;
     setCurrentMatchIndex(next);
     scrollToPanelMatch(next);
   };
 
   const prevPanelMatch = () => {
-    if (panelSearchMatchIndices.length === 0) return;
-    const prev = (currentMatchIndex - 1 + panelSearchMatchIndices.length) % panelSearchMatchIndices.length;
+    if (panelSearchMatchKeys.length === 0) return;
+    const prev = (currentMatchIndex - 1 + panelSearchMatchKeys.length) % panelSearchMatchKeys.length;
     setCurrentMatchIndex(prev);
     scrollToPanelMatch(prev);
   };
@@ -472,6 +480,7 @@ export function DetailPanel({
               {context.map((message) => (
                 <MessageBlock
                   key={message.index}
+                  timelineKey={`ctx-${message.index}`}
                   message={message}
                   query={query}
                   language={language}
@@ -532,15 +541,15 @@ export function DetailPanel({
                 />
                 {panelSearchQuery ? (
                   <span className="panel-search-count">
-                    {panelSearchMatchIndices.length > 0
-                      ? `${currentMatchIndex + 1}/${panelSearchMatchIndices.length}`
+                    {panelSearchMatchKeys.length > 0
+                      ? `${currentMatchIndex + 1}/${panelSearchMatchKeys.length}`
                       : l("No matches", "无匹配")}
                   </span>
                 ) : null}
                 <button
                   className="panel-search-nav"
                   onClick={prevPanelMatch}
-                  disabled={panelSearchMatchIndices.length === 0}
+                  disabled={panelSearchMatchKeys.length === 0}
                   title={l("Previous match (Shift+Enter)", "上一个匹配 (Shift+Enter)")}
                 >
                   <ChevronUp size={14} />
@@ -548,7 +557,7 @@ export function DetailPanel({
                 <button
                   className="panel-search-nav"
                   onClick={nextPanelMatch}
-                  disabled={panelSearchMatchIndices.length === 0}
+                  disabled={panelSearchMatchKeys.length === 0}
                   title={l("Next match (Enter)", "下一个匹配 (Enter)")}
                 >
                   <ChevronDown size={14} />
@@ -576,13 +585,14 @@ export function DetailPanel({
               item.kind === "message" ? (
                 <MessageBlock
                   key={item.key}
+                  timelineKey={item.key}
                   message={item.message}
                   query={panelSearchQuery || query}
                   language={language}
-                  highlight={panelSearchQuery ? panelSearchMatchIndices.includes(item.message.index) : false}
+                  highlight={panelSearchQuery ? panelSearchMatchKeys.includes(item.key) : false}
                 />
               ) : (
-                <TraceEventBlock key={item.key} event={item.event} language={language} />
+                <TraceEventBlock key={item.key} timelineKey={item.key} event={item.event} language={language} />
               )
             ))}
           </section>
@@ -600,12 +610,14 @@ function MessageBlock({
   language,
   highlight = false,
   target = false,
+  timelineKey,
 }: {
   message: SessionMessage;
   query: string;
   language: LanguageMode;
   highlight?: boolean;
   target?: boolean;
+  timelineKey: string;
 }): ReactElement {
   const truncated = message.content.length > MESSAGE_TRUNCATE_LIMIT;
   const [expanded, setExpanded] = useState(false);
@@ -618,7 +630,7 @@ function MessageBlock({
   const useMarkdown = message.role === "assistant" && !highlight && (!truncated || expanded);
 
   return (
-    <div className={`message ${message.role} ${highlight ? "match-context" : ""} ${target ? "match-target" : ""}`} data-message-index={message.index}>
+    <div className={`message ${message.role} ${highlight ? "match-context" : ""} ${target ? "match-target" : ""}`} data-message-index={message.index} data-timeline-key={timelineKey}>
       <div className="message-head">
         <strong>{message.role === "user" ? localize(language, "User", "用户") : localize(language, "Assistant", "助手")}</strong>
         <span>{formatMessageTime(message.timestamp)}</span>
@@ -649,7 +661,7 @@ function traceStatusSymbol(event: SessionTraceEvent): string {
 
 const TRACE_TRUNCATE_LIMIT = 2400;
 
-function TraceEventBlock({ event, language }: { event: SessionTraceEvent; language: LanguageMode }): ReactElement {
+function TraceEventBlock({ event, language, timelineKey }: { event: SessionTraceEvent; language: LanguageMode; timelineKey: string }): ReactElement {
   const truncated = Boolean(event.detail) && event.detail.length > TRACE_TRUNCATE_LIMIT;
   const [expanded, setExpanded] = useState(false);
   const detail = useMemo(() => {
@@ -659,7 +671,7 @@ function TraceEventBlock({ event, language }: { event: SessionTraceEvent; langua
   }, [event.detail, truncated, expanded, language]);
 
   return (
-    <details className={`trace-event ${event.kind} ${event.status || "unknown"}`}>
+    <details className={`trace-event ${event.kind} ${event.status || "unknown"}`} data-timeline-key={timelineKey}>
       <summary className="trace-head">
         <strong>
           <span className="trace-symbol">{traceStatusSymbol(event)}</span>
