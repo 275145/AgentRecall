@@ -1321,6 +1321,8 @@ function buildRemoteCollectorCommand(enabledOptionalSources: SessionSource[]): s
 }
 
 function buildPythonBase64Command(script: string): string {
-  const encoded = Buffer.from(script, "utf-8").toString("base64");
-  return `python3 -c 'import base64; exec(base64.b64decode("${encoded}").decode("utf-8"))'`;
+  const zlib = require("node:zlib") as typeof import("node:zlib");
+  const compressed = zlib.deflateRawSync(Buffer.from(script, "utf-8"));
+  const encoded = compressed.toString("base64");
+  return `python3 -c 'import base64,zlib; exec(zlib.decompress(base64.b64decode("${encoded}"), -15).decode("utf-8"))'`;
 }
