@@ -1,4 +1,4 @@
-import { forwardRef, memo, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, forwardRef, memo, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactElement } from "react";
 import {
   AppWindow,
@@ -3172,6 +3172,21 @@ function SettingsDialog({
     }
   }
   const l = (en: string, zh: string) => localize(language, en, zh);
+  const appShortcutModifier = RUNTIME_PLATFORM === "darwin" ? "⌘" : "Ctrl";
+  const appShortcuts: Array<{ label: string; keyGroups: string[][]; accessibleLabel?: string }> = [
+    { label: l("Focus search", "聚焦搜索"), keyGroups: [[appShortcutModifier, "K"]] },
+    { label: l("Search", "执行搜索"), keyGroups: [["Enter"]] },
+    { label: l("Select session", "选择会话"), keyGroups: [["↑"], ["↓"]] },
+    { label: l("Open details", "打开详情"), keyGroups: [["Space"]] },
+    { label: l("Resume selected session", "恢复选中会话"), keyGroups: [[appShortcutModifier, "Enter"]] },
+    { label: l("Find in conversation", "会话内查找"), keyGroups: [[appShortcutModifier, "F"]] },
+    {
+      label: l("Previous / next match", "上一个 / 下一个匹配"),
+      keyGroups: [["Shift", "Enter"], ["Enter"]],
+      accessibleLabel: l("Previous match: Shift + Enter; next match: Enter", "上一个匹配：Shift + Enter；下一个匹配：Enter"),
+    },
+    { label: l("Close current panel or dialog", "关闭当前面板或弹窗"), keyGroups: [["Esc"]] },
+  ];
   const shouldSignalAppUpdate = Boolean(appUpdateStatus?.updateAvailable && !appUpdateStatus.updateSkipped && !appUpdateStatus.promptSnoozed);
   const appUpdateSuppressed = Boolean(appUpdateStatus?.updateAvailable && !shouldSignalAppUpdate);
   const sessionHookSummary = sessionHookStatus === null
@@ -3304,6 +3319,39 @@ function SettingsDialog({
                     ))}
                   </select>
                 </div>
+                <section className="shortcut-reference" aria-labelledby="app-shortcuts-title">
+                  <header className="shortcut-reference-head">
+                    <h4 id="app-shortcuts-title">{l("App shortcuts", "应用内快捷键")}</h4>
+                    <p>{l("These shortcuts cannot be customized.", "这些快捷键不可自定义。")}</p>
+                  </header>
+                  <dl className="shortcut-reference-list">
+                    {appShortcuts.map((shortcut) => (
+                      <div className="shortcut-reference-row" key={shortcut.label}>
+                        <dt>
+                          {shortcut.label}
+                          {shortcut.accessibleLabel ? <span className="shortcut-reference-accessible">{shortcut.accessibleLabel}</span> : null}
+                        </dt>
+                        <dd aria-hidden={shortcut.accessibleLabel ? "true" : undefined}>
+                          {shortcut.keyGroups.map((keyGroup, groupIndex) => (
+                            <span className="shortcut-reference-group" key={keyGroup.join("+")}>
+                              <span className="shortcut-reference-combo">
+                                {keyGroup.map((key, keyIndex) => (
+                                  <Fragment key={key}>
+                                    {keyIndex > 0 ? <span className="shortcut-reference-combo-separator">+</span> : null}
+                                    <kbd>{key}</kbd>
+                                  </Fragment>
+                                ))}
+                              </span>
+                              {groupIndex < shortcut.keyGroups.length - 1 ? (
+                                <span className="shortcut-reference-separator" aria-hidden="true">/</span>
+                              ) : null}
+                            </span>
+                          ))}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                </section>
               </section>
             ) : null}
             {activeSection === "connections" ? (
