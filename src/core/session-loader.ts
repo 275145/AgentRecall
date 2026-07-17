@@ -1407,13 +1407,23 @@ function qoderContentFromRow(row: Record<string, unknown>): string {
 }
 
 function loadQoderConversationFile(filePath: string, slug: string, stat: VirtualSessionFileStat): LoadedSession | null {
-  const rows = readJsonl(filePath).filter(isRecord);
-  if (rows.length === 0) return null;
+  return loadQoderSessionRows(filePath, readJsonl(filePath), { stat, slug });
+}
+
+function extractQoderSlugFromPath(filePath: string): string {
+  const match = filePath.match(/projects\/([^/]+)\/conversation-history\//);
+  return match?.[1] ?? path.basename(filePath);
+}
+
+export function loadQoderSessionRows(filePath: string, rows: unknown[], options: { stat: VirtualSessionFileStat; slug?: string }): LoadedSession | null {
+  const filteredRows = rows.filter(isRecord);
+  if (filteredRows.length === 0) return null;
+  const slug = options.slug ?? extractQoderSlugFromPath(filePath);
   const taskId = path.basename(filePath, ".jsonl");
   const rawId = `${slug}/${taskId}`;
   const projectPath = stripQoderSlugHash(slug);
   const messages: SessionMessage[] = [];
-  for (const row of rows) {
+  for (const row of filteredRows) {
     const role = stringField(row, "role");
     if (role !== "user" && role !== "assistant") continue;
     const content = qoderContentFromRow(row);
@@ -1431,8 +1441,8 @@ function loadQoderConversationFile(filePath: string, slug: string, stat: Virtual
       filePath,
       originalTitle: cleanTitle(question) || rawId,
       firstQuestion: cleanTitle(question),
-      timestamp: stat.mtimeMs,
-      stat,
+      timestamp: options.stat.mtimeMs,
+      stat: options.stat,
     }),
     messages,
   };

@@ -303,6 +303,7 @@ function enabledRemoteOptionalSources(settings: AppSettings): SessionSource[] {
     ...(settings.includeTclaude ? ["tclaude-cli" as const] : []),
     ...(settings.includeTcodex ? ["tcodex-cli" as const] : []),
     ...(settings.includeCodeBuddyCli ? ["codebuddy-cli" as const] : []),
+    ...(settings.includeQoder ? ["qoder" as const] : []),
   ];
 }
 
@@ -721,6 +722,7 @@ async function runIndexSync(): Promise<IndexStatus> {
       includeOpenCode: settings.includeOpenCode,
       includeCursorAgent: settings.includeCursorAgent,
       includeTrae: settings.includeTrae,
+      includeQoder: settings.includeQoder,
     },
     onProgress: (status) => {
       indexStatus = { ...status, lastIndexedAt: indexStatus.lastIndexedAt };
@@ -1115,7 +1117,7 @@ function registerIpc(): void {
     await ensureRemoteSessionDetailsLoaded(sessionKey);
     return store.getTraceEvents(sessionKey, options);
   });
-  ipcMain.handle("sessions:live", () => loadCachedLiveSessionSnapshot({ includeTrae: getSettings().includeTrae }));
+  ipcMain.handle("sessions:live", () => loadCachedLiveSessionSnapshot({ includeTrae: getSettings().includeTrae, includeQoder: getSettings().includeQoder }));
   ipcMain.handle("session:summarize", async (_event, sessionKey: string) => {
     await ensureRemoteSessionDetailsLoaded(sessionKey);
     const endpoint = await resolveSummaryEndpointFromSettings();
@@ -1304,7 +1306,7 @@ function registerIpc(): void {
     setSessionCustomTitleAndSyncTerminal(sessionKey, title, {
       getSession: (key) => store.getSession(key),
       setCustomTitle: (key, customTitle) => store.setCustomTitle(key, customTitle),
-      loadLiveSessions: () => loadCachedLiveSessionSnapshot({ includeTrae: getSettings().includeTrae }),
+      loadLiveSessions: () => loadCachedLiveSessionSnapshot({ includeTrae: getSettings().includeTrae, includeQoder: getSettings().includeQoder }),
       setLiveTerminalTitle: (pid, displayTitle) => setLiveSessionTerminalTitle(pid, displayTitle),
       onSyncError: (error) => console.warn("[terminal-title] Could not synchronize live terminal title.", error),
     }),
@@ -1363,7 +1365,7 @@ function registerIpc(): void {
       store.markResumed(sessionKey);
       return { route: "resume" as const };
     }
-    const snapshot = await loadCachedLiveSessionSnapshot({ includeTrae: getSettings().includeTrae });
+    const snapshot = await loadCachedLiveSessionSnapshot({ includeTrae: getSettings().includeTrae, includeQoder: getSettings().includeQoder });
     const route = routeResumeSession(session, snapshot.error ? [] : snapshot.sessions);
     if (route.route === "app") {
       await openNativeApp(session, { openExternal: (url) => shell.openExternal(url) });

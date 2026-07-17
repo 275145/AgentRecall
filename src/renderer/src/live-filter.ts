@@ -19,7 +19,9 @@ export function liveSessionKeyForSession(session: LiveFilterableSession): string
           ? "codewiz"
         : session.source === "trae"
           ? "trae"
-          : null;
+          : session.source === "qoder"
+            ? "qoder"
+            : null;
   if (!family) return null;
   return `${family}:${session.rawId}`;
 }

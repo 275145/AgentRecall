@@ -4,6 +4,7 @@ import {
   loadCodeBuddyCliSessionRows,
   loadCodeWizSessions,
   loadCodexSessionRows,
+  loadQoderSessionRows,
   parseCodexSessionMetaLine,
   parseJsonlText,
 } from "./session-loader";
@@ -22,7 +23,8 @@ export type RemoteSessionFileKind =
   | "claude-project"
   | "claude-session-index"
   | "codebuddy-project"
-  | "codewiz-session";
+  | "codewiz-session"
+  | "qoder-project";
 
 export interface RemoteSessionFilePayload {
   kind: RemoteSessionFileKind;
@@ -74,6 +76,11 @@ export function loadRemoteSessionPayloads(environment: SessionEnvironment, paylo
         size: payload.size,
       });
       if (candidate) loaded.push(scopeRemoteSession(candidate, environment, source));
+    } else if (payload.kind === "qoder-project") {
+      const candidate = loadQoderSessionRows(payload.path, parseJsonlText(payload.content), {
+        stat: { mtimeMs: payload.mtimeMs, size: payload.size },
+      });
+      if (candidate) loaded.push(scopeRemoteSession(candidate, environment, "qoder"));
     }
   }
 
@@ -154,6 +161,7 @@ function payloadSource(payload: RemoteSessionFilePayload): SessionSource {
   if (payload.source) return payload.source;
   if (payload.kind === "codex-session") return "codex-cli";
   if (payload.kind === "codebuddy-project") return "codebuddy-cli";
+  if (payload.kind === "qoder-project") return "qoder";
   return "claude-cli";
 }
 

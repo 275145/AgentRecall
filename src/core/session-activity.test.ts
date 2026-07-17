@@ -255,6 +255,53 @@ describe("live session detection", () => {
     expect(lsofCalls).toBe(0);
   });
 
+  it("detects a running Qoder app session from lsof-extracted rawId", () => {
+    expect(
+      detectLiveSessionsFromProcessLines(
+        ["4567 /Applications/Qoder.app/Contents/MacOS/Qoder --user-data-dir /tmp/qoder-data"],
+        new Map(),
+        new Map(),
+        new Map(),
+        new Map([[4567, "demo-app-1a2b3c4d/task-fe3"]]),
+      ),
+    ).toEqual([{ family: "qoder", rawId: "demo-app-1a2b3c4d/task-fe3", pid: 4567 }]);
+  });
+
+  it("detects a running Qoder session from lsof open file paths", async () => {
+    const snapshot = await loadLiveSessionSnapshot({
+      platform: "darwin",
+      includeTrae: false,
+      includeQoder: true,
+      runner: async (command, args) => {
+        if (command === "/bin/ps") return "4567 /Applications/Qoder.app/Contents/MacOS/Qoder --user-data-dir /tmp/qoder-data";
+        if (command === "lsof" && args[0] === "-p" && args[1] === "4567") {
+          return "qoder  4567 user  txt REG 1,4 0 1 /home/me/.qoder/cache/projects/demo-app-1a2b3c4d/conversation-history/task-fe3/task-fe3.jsonl\n";
+        }
+        return "";
+      },
+    });
+
+    expect(snapshot.sessions).toEqual([{ family: "qoder", rawId: "demo-app-1a2b3c4d/task-fe3", pid: 4567 }]);
+  });
+
+  it("skips Qoder detection when includeQoder is false", async () => {
+    let lsofCalls = 0;
+    const snapshot = await loadLiveSessionSnapshot({
+      platform: "darwin",
+      includeTrae: false,
+      includeQoder: false,
+      runner: async (command) => {
+        if (command === "/bin/ps") return "4567 /Applications/Qoder.app/Contents/MacOS/Qoder --user-data-dir /tmp/qoder-data";
+        if (command === "lsof") lsofCalls++;
+        throw new Error("Qoder lsof should not run");
+      },
+    });
+
+    expect(snapshot).toMatchObject({ sessions: [] });
+    expect(snapshot.error).toBeUndefined();
+    expect(lsofCalls).toBe(0);
+  });
+
   it("reuses concurrent live session snapshot loads for the same options", async () => {
     let calls = 0;
     let resolveLoad: (value: Awaited<ReturnType<typeof loadLiveSessionSnapshot>>) => void = () => {
