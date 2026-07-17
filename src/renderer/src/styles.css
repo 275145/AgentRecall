@@ -2334,6 +2334,16 @@ select:focus-visible {
   border-bottom: 1px solid var(--border-subtle);
 }
 
+.detail-actions {
+  gap: 14px;
+}
+
+.detail-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
 .detail-summary {
   padding: 10px 18px;
   border-bottom: 1px solid var(--border-subtle);
@@ -2394,14 +2404,14 @@ select:focus-visible {
   color: var(--text);
 }
 
-.detail-actions button:first-child {
+.detail-actions .detail-action-group:first-child button:first-child {
   border-color: var(--accent);
   background: var(--accent);
   color: var(--accent-contrast);
   font-weight: 600;
 }
 
-.detail-actions button:first-child:hover:not(:disabled) {
+.detail-actions .detail-action-group:first-child button:first-child:hover:not(:disabled) {
   background: var(--accent-hover);
   color: var(--accent-contrast);
 }
