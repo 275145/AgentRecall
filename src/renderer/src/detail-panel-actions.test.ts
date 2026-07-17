@@ -169,6 +169,23 @@ describe("detail panel actions", () => {
     expect(detailActions).not.toContain('l("Rename", "重命名")');
   });
 
+  it("groups detail toolbar actions by purpose and isolates the danger action", () => {
+    const detailActions = detailPanelSource.slice(detailPanelSource.indexOf('<div className="detail-actions">'), detailPanelSource.indexOf('<div className="detail-tags">'));
+    const groups = detailActions.match(/detail-action-group/g) ?? [];
+
+    expect(groups.length).toBeGreaterThanOrEqual(4);
+
+    const firstGroup = detailActions.slice(0, detailActions.indexOf('detail-action-group', detailActions.indexOf('detail-action-group') + 1));
+    expect(firstGroup).toContain("onResume");
+    expect(firstGroup).toContain("onReveal");
+
+    const lastGroup = detailActions.slice(detailActions.lastIndexOf('detail-action-group'));
+    expect(lastGroup).toContain('className="danger"');
+    expect(lastGroup).toContain("onDelete");
+    expect(lastGroup).not.toContain("onCopyPlain");
+    expect(lastGroup).not.toContain("onReveal");
+  });
+
   it("exposes remote environment management IPC through preload and main", () => {
     for (const channel of [
       "environments:list",
