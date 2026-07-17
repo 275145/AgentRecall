@@ -322,7 +322,7 @@ export interface UsageQuotaSnapshot {
   providers: UsageQuotaCard[];
 }
 
-export type LiveSessionFamily = "claude" | "codex" | "tclaude" | "tcodex" | "codebuddy" | "codewiz" | "trae";
+export type LiveSessionFamily = "claude" | "codex" | "tclaude" | "tcodex" | "codebuddy" | "codewiz" | "trae" | "qoder";
 
 export interface LiveSession {
   family: LiveSessionFamily;

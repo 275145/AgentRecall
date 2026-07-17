@@ -138,6 +138,16 @@ def parse_message(row, kind):
     if role == "user" and row.get("parentId") is None and text.strip() == "code":
       return None
     return {"role": role, "content": text, "timestamp": codebuddy_timestamp(row.get("timestamp"))}
+  if kind == "qoder":
+    role = row.get("role")
+    if role not in {"user", "assistant"}:
+      return None
+    message = row.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    text = text_from_blocks(content)
+    if not text or (role == "user" and not meaningful_user(text)):
+      return None
+    return {"role": role, "content": text, "timestamp": ""}
   if row.get("type") not in {"user", "assistant"}:
     return None
   message = row.get("message")
@@ -1255,6 +1265,55 @@ def emit_codebuddy_summary(path, stat):
     "tokenUsage": _tok_total(token_events),
     "tokenEvents": token_events,
   })
+def emit_qoder_summary(path, stat):
+  raw_id = path.stem
+  project_path = ""
+  timestamp = int(stat.st_mtime * 1000)
+  first_question = ""
+  message_count = 0
+  message_events = []
+  path_str = str(path)
+  slug = ""
+  if "/projects/" in path_str:
+    after_projects = path_str.split("/projects/")[1]
+    slug = after_projects.split("/")[0]
+  if slug:
+    raw_id = "%s/%s" % (slug, path.stem)
+    project_path = re.sub(r"-[0-9a-f]{8}$", "", slug) or slug
+  try:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+      for index, line in enumerate(handle):
+        try:
+          row = json.loads(line)
+        except Exception:
+          continue
+        if not isinstance(row, dict):
+          continue
+        parsed = parse_message(row, "qoder")
+        if parsed:
+          message_events.append({"index": message_count, "timestamp": _tok_timestamp(parsed["timestamp"])})
+          message_count += 1
+          if parsed["role"] == "user" and not first_question:
+            first_question = parsed["content"]
+  except Exception:
+    return
+  emit({
+    "kind": "qoder-project",
+    "source": "qoder",
+    "path": str(path),
+    "mtimeMs": int(stat.st_mtime * 1000),
+    "size": stat.st_size,
+    "rawId": raw_id,
+    "projectPath": project_path,
+    "timestamp": timestamp,
+    "originalTitle": title_from(first_question) or raw_id,
+    "firstQuestion": first_question,
+    "messageCount": message_count,
+    "messageEvents": message_events,
+    "gitBranch": "",
+    "tokenUsage": _tok_empty(),
+    "tokenEvents": [],
+  })
 candidates = []
 sources = [
   ("codex-session", "codex-cli", home / ".codex" / "sessions", "*.jsonl"),
@@ -1294,6 +1353,8 @@ for _mtime, kind, source, path, _size in sorted(candidates, key=lambda item: ite
       emit_codex_summary(path, stat, codex_titles.get(source, {}), source)
     elif kind == "claude-project":
       emit_claude_summary(path, stat, claude_indexes.get(source, {}), source)
+    elif kind == "qoder-project":
+      emit_qoder_summary(path, stat)
     else:
       emit_codebuddy_summary(path, stat)
   except Exception:
@@ -1304,6 +1365,7 @@ function buildRemoteCollectorCommand(enabledOptionalSources: SessionSource[]): s
     "tclaude-cli": '("claude-project", "tclaude-cli", home / ".tclaude" / "projects", "*.jsonl")',
     "tcodex-cli": '("codex-session", "tcodex-cli", home / ".tcodex" / "sessions", "*.jsonl")',
     "codebuddy-cli": '("codebuddy-project", "codebuddy-cli", home / ".codebuddy" / "projects", "*.jsonl")',
+    "qoder": '("qoder-project", "qoder", home / ".qoder" / "cache" / "projects", "*.jsonl")',
   };
   const optionalSources = enabledOptionalSources.filter((source) => source in descriptors);
   const optionalCodexTitleIndexes = optionalSources.includes("tcodex-cli")

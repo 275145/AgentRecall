@@ -36,6 +36,7 @@ export interface LoadLiveSessionOptions {
   runner?: ProcessListRunner;
   now?: Date;
   includeTrae?: boolean;
+  includeQoder?: boolean;
   homeDir?: string;
 }
 
@@ -71,6 +72,7 @@ export function detectLiveSessionsFromProcessLines(
   codexSessionFilesByPid: Map<number, string> = new Map(),
   claudeSessionFilesByPid: Map<number, string> = new Map(),
   traeSessionIdsByPid: Map<number, string> = new Map(),
+  qoderSessionIdsByPid: Map<number, string> = new Map(),
 ): LiveSession[] {
   const sessions: LiveSession[] = [];
   const seen = new Set<string>();
@@ -84,7 +86,8 @@ export function detectLiveSessionsFromProcessLines(
       detectResumeCommand(tokens) ??
       detectPlainCodexCommand(tokens, codexSessionFilesByPid.get(entry.pid)) ??
       detectPlainClaudeCommand(tokens, claudeSessionFilesByPid.get(entry.pid)) ??
-      detectTraeAppSession(entry.command, traeSessionIdsByPid.get(entry.pid));
+      detectTraeAppSession(entry.command, traeSessionIdsByPid.get(entry.pid)) ??
+      detectQoderAppSession(entry.command, qoderSessionIdsByPid.get(entry.pid));
     if (!command) continue;
 
     const key = `${command.family}:${command.rawId}`;
@@ -100,6 +103,7 @@ function liveSessionSnapshotCacheKey(options: LoadLiveSessionOptions): string {
   return JSON.stringify({
     platform: options.platform ?? process.platform,
     includeTrae: options.includeTrae !== false,
+    includeQoder: options.includeQoder !== false,
     homeDir: options.homeDir ?? os.homedir(),
   });
 }
@@ -125,10 +129,12 @@ export async function loadLiveSessionSnapshot(options: LoadLiveSessionOptions = 
         : await Promise.all([loadPlainCodexSessionFiles(lines, runner), loadPlainClaudeSessionFiles(lines, runner, options.homeDir ?? os.homedir())]);
     const traeSessionIdsByPid =
       platform === "win32" || options.includeTrae === false ? new Map<number, string>() : await loadTraeSessionIds(lines, runner);
+    const qoderSessionIdsByPid =
+      platform === "win32" || options.includeQoder === false ? new Map<number, string>() : await loadQoderSessionIds(lines, runner);
 
     return {
       generatedAt,
-      sessions: detectLiveSessionsFromProcessLines(lines, codexSessionFilesByPid, claudeSessionFilesByPid, traeSessionIdsByPid),
+      sessions: detectLiveSessionsFromProcessLines(lines, codexSessionFilesByPid, claudeSessionFilesByPid, traeSessionIdsByPid, qoderSessionIdsByPid),
     };
   } catch (error) {
     return {
@@ -518,6 +524,55 @@ function extractTraeCurrentSessionId(value: unknown): string | null {
 
 function normalizeTraeSessionRawId(sessionId: string): string {
   return sessionId.startsWith("session_memory_") ? sessionId : `session_memory_${sessionId}`;
+}
+
+function isQoderAppCommand(command: string): boolean {
+  const lower = command.toLowerCase();
+  return (
+    lower.includes("qoder") &&
+    (lower.includes(".app") || lower.includes("--user-data-dir") || lower.includes("qoder.exe"))
+  );
+}
+
+function detectQoderAppSession(command: string, rawId: string | undefined): { family: LiveSessionFamily; rawId: string } | null {
+  if (!rawId || !isQoderAppCommand(command)) return null;
+  return { family: "qoder", rawId };
+}
+
+async function loadQoderSessionIds(lines: string[], runner: ProcessListRunner): Promise<Map<number, string>> {
+  const sessionIds = new Map<number, string>();
+  const entries = lines.map(parseProcessLine).filter((entry): entry is ProcessEntry => Boolean(entry));
+  const pids = entries.filter((entry) => isQoderAppCommand(entry.command)).map((entry) => entry.pid);
+
+  await Promise.all(
+    pids.map(async (pid) => {
+      try {
+        const output = await runner("lsof", ["-p", String(pid)]);
+        const filePath = extractQoderConversationFile(output);
+        if (!filePath) return;
+        const rawId = extractQoderRawIdFromPath(filePath);
+        if (rawId) sessionIds.set(pid, rawId);
+      } catch {
+        // Qoder can rotate workspaces or exit between ps and lsof; keep the rest.
+      }
+    }),
+  );
+
+  return sessionIds;
+}
+
+function extractQoderConversationFile(lsofOutput: string): string | null {
+  for (const line of lsofOutput.split(/\r?\n/)) {
+    const match = line.match(/(\S*conversation-history\/\S+?\.jsonl)\b/);
+    if (match?.[1]) return match[1];
+  }
+  return null;
+}
+
+function extractQoderRawIdFromPath(filePath: string): string | null {
+  const match = filePath.match(/projects\/([^/]+)\/conversation-history\/([^/]+)\//);
+  if (!match) return null;
+  return `${match[1]}/${match[2]}`;
 }
 
 function splitCommandLine(command: string): string[] {
