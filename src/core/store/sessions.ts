@@ -95,12 +95,12 @@ type ProjectAggregateRow = {
   root_custom_title: string | null;
   root_original_title: string | null;
   root_first_question: string | null;
-  root_created_at: number | null;
+  root_started_at: number | null;
 };
 
 type ProjectSummaryDraft = ProjectSummary & {
   taskWorkspaceDate: string | null;
-  rootCreatedAt: number;
+  rootStartedAt: number;
 };
 
 interface TraceEventRow {
@@ -778,7 +778,14 @@ export class SessionsStore {
           MAX(CASE WHEN sessions.is_subagent = 0 THEN sessions.custom_title END) AS root_custom_title,
           MAX(CASE WHEN sessions.is_subagent = 0 THEN sessions.original_title END) AS root_original_title,
           MAX(CASE WHEN sessions.is_subagent = 0 THEN sessions.first_question END) AS root_first_question,
-          MAX(CASE WHEN sessions.is_subagent = 0 THEN sessions.timestamp END) AS root_created_at
+          MAX(
+            CASE WHEN sessions.is_subagent = 0 THEN (
+              SELECT MIN(message_events.timestamp)
+              FROM message_events
+              WHERE message_events.session_key = sessions.session_key
+                AND message_events.timestamp > 0
+            ) END
+          ) AS root_started_at
         FROM sessions
         LEFT JOIN environments ON environments.id = sessions.environment_id
         WHERE trim(project_path) != ''
@@ -808,7 +815,7 @@ export class SessionsStore {
         createdAt: row.created_at,
         lastActivityAt: row.last_activity_at,
         taskWorkspaceDate: taskDate,
-        rootCreatedAt: row.root_created_at ?? 0,
+        rootStartedAt: row.root_started_at ?? 0,
       };
     });
     const basenameCounts = new Map<string, number>();
@@ -844,7 +851,10 @@ export class SessionsStore {
           ...summary,
           labelSuffix:
             summary.labelKind === "codex-task-untitled"
-              ? appendLabelSuffix(summary.labelSuffix, formatMonthDayTime(summary.rootCreatedAt))
+              ? appendLabelSuffix(
+                  summary.labelSuffix,
+                  formatMonthDayTime(summary.rootStartedAt) || projectBasename(summary.path),
+                )
               : summary.labelSuffix,
         })),
     )
@@ -853,7 +863,10 @@ export class SessionsStore {
         (a, b) =>
           environmentSortValue(a.environmentId) - environmentSortValue(b.environmentId) ||
           b.lastActivityAt - a.lastActivityAt ||
-          a.label.localeCompare(b.label),
+          a.label.localeCompare(b.label) ||
+          (a.labelSuffix ?? "").localeCompare(b.labelSuffix ?? "") ||
+          a.path.localeCompare(b.path) ||
+          a.environmentId.localeCompare(b.environmentId),
       );
   }
 
@@ -1938,7 +1951,7 @@ function disambiguateTaskLabels(summaries: ProjectSummaryDraft[]): ProjectSummar
     for (const summary of group) {
       const target = byIdentity.get(`${summary.environmentId}\0${summary.path}`)!;
       const date = summary.taskWorkspaceDate;
-      const clock = formatClock(summary.rootCreatedAt);
+      const clock = formatClock(summary.rootStartedAt);
       const suffix = date
         ? (dateCounts.get(date) || 0) > 1 && clock
           ? `${formatMonthDay(date)} ${clock}`
@@ -1962,6 +1975,32 @@ function disambiguateTaskLabels(summaries: ProjectSummaryDraft[]): ProjectSummar
     for (const summary of group) {
       summary.labelSuffix = appendLabelSuffix(summary.labelSuffix, projectBasename(summary.path));
     }
+  }
+
+  const basenameGroups = new Map<string, ProjectSummaryDraft[]>();
+  for (const summary of withTimeSuffixes) {
+    if (!summary.labelKind.startsWith("codex-task")) continue;
+    const rendered = `${normalizedProjectTitle(summary.label)}\0${summary.labelSuffix || ""}`;
+    const key = `${summary.environmentId}\0${rendered}`;
+    const group = basenameGroups.get(key) ?? [];
+    group.push(summary);
+    basenameGroups.set(key, group);
+  }
+  for (const group of basenameGroups.values()) {
+    if (group.length < 2) continue;
+    const partsBySummary = group.map((summary) => projectParts(summary.path));
+    const maxParentDepth = Math.max(...partsBySummary.map((parts) => parts.length - 1));
+    let uniqueFragments: string[] | null = null;
+    for (let parentDepth = 1; parentDepth <= maxParentDepth; parentDepth += 1) {
+      const fragments = partsBySummary.map((parts) => parts.at(-1 - parentDepth) || "");
+      if (fragments.every(Boolean) && new Set(fragments).size === group.length) {
+        uniqueFragments = fragments;
+        break;
+      }
+    }
+    group.forEach((summary, index) => {
+      summary.labelSuffix = appendLabelSuffix(summary.labelSuffix, uniqueFragments?.[index] || summary.path);
+    });
   }
   return withTimeSuffixes;
 }

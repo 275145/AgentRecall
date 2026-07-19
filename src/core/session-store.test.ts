@@ -1330,7 +1330,7 @@ describe("SessionStore", () => {
     });
   });
 
-  it("uses a localized-ready untitled label with the root creation time", () => {
+  it("uses a localized-ready untitled label with the stable root start time", () => {
     const store = createInMemoryStore();
     const timestamp = new Date(2026, 6, 19, 19, 25).getTime();
     const taskPath = "/Users/me/Documents/Codex/2026-07-19/new-chat";
@@ -1344,7 +1344,7 @@ describe("SessionStore", () => {
         firstQuestion: "",
         timestamp,
       }),
-      [],
+      [{ role: "user", content: "first", timestamp: new Date(timestamp).toISOString(), index: 0 }],
     );
 
     expect(projectByPath(store, taskPath)).toMatchObject({
@@ -1371,7 +1371,7 @@ describe("SessionStore", () => {
           originalTitle: "调研 OpenCode",
           timestamp,
         }),
-        messages,
+        [{ role: "user", content: "first", timestamp: new Date(timestamp).toISOString(), index: 0 }],
       );
     });
 
@@ -1395,7 +1395,7 @@ describe("SessionStore", () => {
           originalTitle: "同名任务",
           timestamp,
         }),
-        messages,
+        [{ role: "user", content: "first", timestamp: new Date(timestamp).toISOString(), index: 0 }],
       );
     }
 
@@ -1405,6 +1405,264 @@ describe("SessionStore", () => {
     expect(projectByPath(store, "/Users/me/Documents/Codex/2026-07-19/task-b").labelSuffix).toBe(
       "07-19 10:32 · task-b",
     );
+  });
+
+  it("uses the earliest root message timestamp for duplicate Codex task clocks", () => {
+    const store = createInMemoryStore();
+    const cases = [
+      {
+        projectPath: "/Users/me/Documents/Codex/2026-07-19/task-a",
+        indexedAt: new Date(2026, 6, 19, 15, 0).getTime(),
+        startedAt: new Date(2026, 6, 19, 10, 32),
+        expectedSuffix: "07-19 10:32",
+      },
+      {
+        projectPath: "/Users/me/Documents/Codex/2026-07-19/task-b",
+        indexedAt: new Date(2026, 6, 19, 16, 0).getTime(),
+        startedAt: new Date(2026, 6, 19, 10, 45),
+        expectedSuffix: "07-19 10:45",
+      },
+    ];
+
+    cases.forEach(({ projectPath, indexedAt, startedAt }, index) => {
+      store.upsertIndexedSession(
+        sampleSession({
+          sessionKey: `codex:root-message-time-${index}`,
+          rawId: `root-message-time-${index}`,
+          source: "codex-app",
+          projectPath,
+          originalTitle: "稳定标题",
+          timestamp: indexedAt,
+        }),
+        [
+          { role: "user", content: "first", timestamp: startedAt.toISOString(), index: 0 },
+          {
+            role: "assistant",
+            content: "latest",
+            timestamp: new Date(2026, 6, 19, 12, 0).toISOString(),
+            index: 1,
+          },
+        ],
+      );
+    });
+
+    expect(cases.map(({ projectPath }) => projectByPath(store, projectPath).labelSuffix)).toEqual(
+      cases.map(({ expectedSuffix }) => expectedSuffix),
+    );
+  });
+
+  it("keeps a duplicate Codex task suffix stable when only the indexed timestamp changes", () => {
+    const store = createInMemoryStore();
+    const stableMessages: SessionMessage[] = [
+      {
+        role: "user",
+        content: "first",
+        timestamp: new Date(2026, 6, 19, 10, 32).toISOString(),
+        index: 0,
+      },
+      {
+        role: "assistant",
+        content: "latest",
+        timestamp: new Date(2026, 6, 19, 12, 0).toISOString(),
+        index: 1,
+      },
+    ];
+    const stablePath = "/Users/me/Documents/Codex/2026-07-19/stable-a";
+    const otherPath = "/Users/me/Documents/Codex/2026-07-19/stable-b";
+    store.upsertIndexedSession(
+      sampleSession({
+        sessionKey: "codex:stable-a",
+        rawId: "stable-a",
+        source: "codex-app",
+        projectPath: stablePath,
+        originalTitle: "稳定标题",
+        timestamp: new Date(2026, 6, 19, 8, 0).getTime(),
+      }),
+      stableMessages,
+    );
+    store.upsertIndexedSession(
+      sampleSession({
+        sessionKey: "codex:stable-b",
+        rawId: "stable-b",
+        source: "codex-app",
+        projectPath: otherPath,
+        originalTitle: "稳定标题",
+        timestamp: new Date(2026, 6, 19, 9, 0).getTime(),
+      }),
+      [
+        { role: "user", content: "first", timestamp: new Date(2026, 6, 19, 10, 45).toISOString(), index: 0 },
+        { role: "assistant", content: "latest", timestamp: new Date(2026, 6, 19, 12, 0).toISOString(), index: 1 },
+      ],
+    );
+    const beforeReindex = projectByPath(store, stablePath).labelSuffix;
+
+    store.upsertIndexedSession(
+      sampleSession({
+        sessionKey: "codex:stable-a",
+        rawId: "stable-a",
+        source: "codex-app",
+        projectPath: stablePath,
+        originalTitle: "稳定标题",
+        timestamp: new Date(2026, 6, 19, 18, 0).getTime(),
+      }),
+      stableMessages,
+    );
+
+    expect(projectByPath(store, stablePath).labelSuffix).toBe(beforeReindex);
+  });
+
+  it("falls back to basenames for duplicate titled Codex tasks without message timestamps", () => {
+    const store = createInMemoryStore();
+    for (const slug of ["task-a", "task-b"]) {
+      store.upsertIndexedSession(
+        sampleSession({
+          sessionKey: `codex:no-message-${slug}`,
+          rawId: `no-message-${slug}`,
+          source: "codex-app",
+          projectPath: `/Users/me/Documents/Codex/2026-07-19/${slug}`,
+          originalTitle: "无消息时间",
+          timestamp: new Date(2026, 6, 19, 10, 32).getTime(),
+        }),
+        [],
+      );
+    }
+
+    expect(projectByPath(store, "/Users/me/Documents/Codex/2026-07-19/task-a").labelSuffix).toBe(
+      "07-19 · task-a",
+    );
+    expect(projectByPath(store, "/Users/me/Documents/Codex/2026-07-19/task-b").labelSuffix).toBe(
+      "07-19 · task-b",
+    );
+  });
+
+  it("uses the task basename for an untitled Codex task without a valid message timestamp", () => {
+    const store = createInMemoryStore();
+    const taskPath = "/Users/me/Documents/Codex/2026-07-19/new-chat";
+    store.upsertIndexedSession(
+      sampleSession({
+        sessionKey: "codex:untitled-no-message-time",
+        rawId: "untitled-no-message-time",
+        source: "codex-app",
+        projectPath: taskPath,
+        originalTitle: "Untitled Session",
+        firstQuestion: "",
+        timestamp: new Date(2026, 6, 19, 19, 25).getTime(),
+      }),
+      [],
+    );
+
+    expect(projectByPath(store, taskPath)).toMatchObject({
+      label: "Untitled session",
+      labelKind: "codex-task-untitled",
+      labelSuffix: "new-chat",
+    });
+  });
+
+  it("uses the shortest unique parent fragment when duplicate Codex task basenames still collide", () => {
+    const store = createInMemoryStore();
+    const startedAt = new Date(2026, 6, 19, 10, 32).toISOString();
+    for (const owner of ["a", "b"]) {
+      const projectPath = `/home/${owner}/Codex/2026-07-19/task`;
+      store.upsertIndexedSession(
+        sampleSession({
+          sessionKey: `codex:parent-${owner}`,
+          rawId: `parent-${owner}`,
+          source: "codex-app",
+          projectPath,
+          originalTitle: "同名同路径任务",
+        }),
+        [
+          { role: "user", content: "first", timestamp: startedAt, index: 0 },
+          {
+            role: "assistant",
+            content: "latest",
+            timestamp: new Date(2026, 6, 19, 12, 0).toISOString(),
+            index: 1,
+          },
+        ],
+      );
+    }
+
+    expect(projectByPath(store, "/home/a/Codex/2026-07-19/task").labelSuffix).toBe(
+      "07-19 10:32 · task · a",
+    );
+    expect(projectByPath(store, "/home/b/Codex/2026-07-19/task").labelSuffix).toBe(
+      "07-19 10:32 · task · b",
+    );
+  });
+
+  it("sorts tied projects by suffix, path, and environment identity", () => {
+    const store = createInMemoryStore();
+    const cases = [
+      { environmentId: "ssh-path-z", environmentLabel: "unused-z", projectPath: "/Users/z/Codex/2026-07-19/task" },
+      { environmentId: "ssh-path-a", environmentLabel: "unused-a", projectPath: "/Users/a/Codex/2026-07-19/task" },
+      { environmentId: "ssh-suffix-z", environmentLabel: "Zulu", projectPath: "/Users/shared/Codex/2026-07-19/suffix-task" },
+      { environmentId: "ssh-suffix-a", environmentLabel: "Alpha", projectPath: "/Users/shared/Codex/2026-07-19/suffix-task" },
+      { environmentId: "ssh-id-z", environmentLabel: "Same", projectPath: "/Users/shared/Codex/2026-07-19/id-task" },
+      { environmentId: "ssh-id-a", environmentLabel: "Same", projectPath: "/Users/shared/Codex/2026-07-19/id-task" },
+    ];
+    const tiedMessages: SessionMessage[] = [
+      { role: "user", content: "first", timestamp: new Date(2026, 6, 19, 10, 32).toISOString(), index: 0 },
+      { role: "assistant", content: "latest", timestamp: new Date(2026, 6, 19, 12, 0).toISOString(), index: 1 },
+    ];
+    for (const { environmentId, environmentLabel, projectPath } of cases) {
+      store.upsertEnvironment({
+        id: environmentId,
+        kind: "ssh",
+        label: environmentLabel,
+        hostAlias: environmentId,
+        host: `${environmentId}.example.com`,
+        user: null,
+        port: null,
+        authMode: "none",
+        identityFile: null,
+        enabled: true,
+      });
+      store.upsertIndexedSession(
+        sampleSession({
+          sessionKey: `${environmentId}:codex-app:sort`,
+          rawId: `${environmentId}-sort`,
+          source: "codex-app",
+          environmentId,
+          environmentKind: "ssh",
+          environmentLabel,
+          projectPath,
+          originalTitle: "排序任务",
+          timestamp: new Date(2026, 6, 19, 9, 0).getTime(),
+        }),
+        tiedMessages,
+      );
+    }
+
+    expect(store.listProjects().map(({ environmentId }) => environmentId)).toEqual([
+      "ssh-path-a",
+      "ssh-path-z",
+      "ssh-suffix-a",
+      "ssh-id-a",
+      "ssh-id-z",
+      "ssh-suffix-z",
+    ]);
+  });
+
+  it("keeps codex-cli dated workspaces on path labels without task disambiguation", () => {
+    const store = createInMemoryStore();
+    const taskPath = "/Users/me/Documents/Codex/2026-07-19/cli-task";
+    store.upsertIndexedSession(
+      sampleSession({
+        sessionKey: "codex:cli-dated-task",
+        rawId: "cli-dated-task",
+        source: "codex-cli",
+        projectPath: taskPath,
+        originalTitle: "不应显示的友好标题",
+      }),
+      [{ role: "user", content: "first", timestamp: new Date(2026, 6, 19, 10, 32).toISOString(), index: 0 }],
+    );
+
+    expect(projectByPath(store, taskPath)).toMatchObject({
+      label: "cli-task",
+      labelKind: "path",
+      labelSuffix: null,
+    });
   });
 
   it("keeps environment suffixes ahead of task-title collision handling", () => {

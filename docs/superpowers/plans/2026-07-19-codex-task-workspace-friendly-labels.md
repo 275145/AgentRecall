@@ -4,7 +4,7 @@
 
 **Goal:** 让 AgentRecall 左侧项目树把 Codex App 自动日期任务目录显示为唯一根会话的可读标题，同时保持真实路径作为稳定身份。
 
-**Architecture:** `SessionStore.listProjects()` 继续拥有项目聚合和路径消歧，并从现有会话字段推导结构化显示字段；不增加数据库表或 schema migration。渲染器通过一个复用的展示函数完成中英文未命名占位符和后缀拼接，所有筛选与 Resume 仍使用 `projectPath + environmentId`。
+**Architecture:** `SessionStore.listProjects()` 继续拥有项目聚合和路径消歧，并通过相关子查询从唯一根会话最早的正数 `message_events.timestamp` 推导稳定开始时间；不增加数据库表或 schema migration，也不改变加载器或 `IndexedSession.timestamp` 的语义。渲染器通过一个复用的展示函数完成中英文未命名占位符和后缀拼接，所有筛选与 Resume 仍使用 `projectPath + environmentId`。
 
 **Tech Stack:** TypeScript、Electron、React、Node.js `node:sqlite`、Vitest。
 
@@ -15,6 +15,7 @@
 - `custom_title` 优先于 `original_title`，后者已经吸收 Codex `thread_name` 和会话元数据标题；随后回退到 `first_question`。
 - subagent 不参与名称选择，但现有可见性设置仍决定项目会话计数和活动时间。
 - 不读取任务目录正文，不要求目录存在，不修改真实 Codex 会话、物理目录或 Resume 路径。
+- 时间、basename 仍碰撞时继续使用最短唯一父路径片段，最后才使用原始项目路径；最终排序在环境优先级、活动时间和基础名称后比较后缀、路径、环境身份。
 - 不新增 AI 请求、设置项、IPC 或数据库 schema。
 - 普通项目和其他来源保持当前路径标签、父目录消歧和跨环境消歧行为。
 - macOS、Linux、Windows 路径测试使用合成数据；不得读取或改写真实用户会话。
@@ -382,7 +383,7 @@ it("falls back to the root first question when no usable native title exists", (
 增加未命名降级测试，使用本地构造时间避免 CI 时区差异：
 
 ```ts
-it("uses a localized-ready untitled label with the root creation time", () => {
+it("uses a localized-ready untitled label with the stable root start time", () => {
   const store = createInMemoryStore();
   const timestamp = new Date(2026, 6, 19, 19, 25).getTime();
   const taskPath = "/Users/me/Documents/Codex/2026-07-19/new-chat";
@@ -396,7 +397,7 @@ it("uses a localized-ready untitled label with the root creation time", () => {
       firstQuestion: "",
       timestamp,
     }),
-    [],
+    [{ role: "user", content: "first", timestamp: new Date(timestamp).toISOString(), index: 0 }],
   );
 
   expect(projectByPath(store, taskPath)).toMatchObject({
@@ -427,7 +428,14 @@ MAX(CASE WHEN sessions.is_subagent = 0 THEN sessions.source END) AS root_source,
 MAX(CASE WHEN sessions.is_subagent = 0 THEN sessions.custom_title END) AS root_custom_title,
 MAX(CASE WHEN sessions.is_subagent = 0 THEN sessions.original_title END) AS root_original_title,
 MAX(CASE WHEN sessions.is_subagent = 0 THEN sessions.first_question END) AS root_first_question,
-MAX(CASE WHEN sessions.is_subagent = 0 THEN sessions.timestamp END) AS root_created_at,
+MAX(
+  CASE WHEN sessions.is_subagent = 0 THEN (
+    SELECT MIN(message_events.timestamp)
+    FROM message_events
+    WHERE message_events.session_key = sessions.session_key
+      AND message_events.timestamp > 0
+  ) END
+) AS root_started_at,
 ```
 
 把查询结果类型补成：
@@ -445,7 +453,7 @@ type ProjectAggregateRow = {
   root_custom_title: string | null;
   root_original_title: string | null;
   root_first_question: string | null;
-  root_created_at: number | null;
+  root_started_at: number | null;
 };
 ```
 
@@ -510,16 +518,18 @@ return {
   createdAt: row.created_at,
   lastActivityAt: row.last_activity_at,
   taskWorkspaceDate: taskDate,
-  rootCreatedAt: row.root_created_at ?? 0,
+  rootStartedAt: row.root_started_at ?? 0,
 };
 ```
 
-将 mapping 的内部结果声明为 `ProjectSummaryDraft`，在返回前移除 `taskWorkspaceDate` 和 `rootCreatedAt`，防止内部消歧字段泄漏到 IPC：
+相关子查询只为每个根会话读取最早的正数消息时间戳，不连接 `message_events`，因此不会放大 `root_count` 或 `session_count`。保持 `loadCodexSessionRows()` 和 `IndexedSession.timestamp` 不变。
+
+将 mapping 的内部结果声明为 `ProjectSummaryDraft`，在返回前移除 `taskWorkspaceDate` 和 `rootStartedAt`，防止内部消歧字段泄漏到 IPC：
 
 ```ts
 type ProjectSummaryDraft = ProjectSummary & {
   taskWorkspaceDate: string | null;
-  rootCreatedAt: number;
+  rootStartedAt: number;
 };
 
 function publicProjectSummary(draft: ProjectSummaryDraft): ProjectSummary {
@@ -537,7 +547,7 @@ function publicProjectSummary(draft: ProjectSummaryDraft): ProjectSummary {
 }
 ```
 
-Task 1 的父目录 basename 消歧只处理 `labelKind === "path"`；环境后缀仍可用于所有 label kind。环境后缀处理完成后，对 `labelKind === "codex-task-untitled"` 的 draft 调用 `appendLabelSuffix(draft.labelSuffix, formatMonthDayTime(draft.rootCreatedAt))`，从而保持“环境、日期时间”的后缀顺序。最终返回前调用 `.map(publicProjectSummary)`。
+Task 1 的父目录 basename 消歧只处理 `labelKind === "path"`；环境后缀仍可用于所有 label kind。环境后缀处理完成后，对 `labelKind === "codex-task-untitled"` 的 draft 调用 `appendLabelSuffix(draft.labelSuffix, formatMonthDayTime(draft.rootStartedAt) || projectBasename(draft.path))`，从而保持“环境、稳定开始时间或 basename”的后缀顺序。最终返回前调用 `.map(publicProjectSummary)`。
 
 - [ ] **Step 4: 运行任务识别测试**
 
@@ -566,7 +576,7 @@ git commit -m "feat: label Codex task workspaces from root sessions"
 - Modify: `src/core/session-store.test.ts:1183-1320`
 
 **Interfaces:**
-- Consumes: Task 2 的内部 `ProjectSummaryDraft.taskWorkspaceDate` 和 `rootCreatedAt`。
+- Consumes: Task 2 的内部 `ProjectSummaryDraft.taskWorkspaceDate` 和 `rootStartedAt`。
 - Produces: 同一环境内重复任务标题的 `labelSuffix`。
 - Preserves: 普通项目 basename、父目录和环境消歧。
 
@@ -592,7 +602,7 @@ it("disambiguates duplicate Codex task titles by date and time", () => {
         originalTitle: "调研 OpenCode",
         timestamp,
       }),
-      messages,
+      [{ role: "user", content: "first", timestamp: new Date(timestamp).toISOString(), index: 0 }],
     );
   });
 
@@ -620,7 +630,7 @@ it("uses the task directory basename when duplicate task labels still collide", 
         originalTitle: "同名任务",
         timestamp,
       }),
-      messages,
+      [{ role: "user", content: "first", timestamp: new Date(timestamp).toISOString(), index: 0 }],
     );
   }
 
@@ -669,6 +679,8 @@ it("keeps environment suffixes ahead of task-title collision handling", () => {
 });
 ```
 
+最终审查修订还要先增加以下聚焦回归覆盖：同日同标题任务使用各自最早根消息分钟；仅改变 `IndexedSession.timestamp` 的重新索引保持后缀不变；有标题与未命名任务在缺失消息时间时分别按碰撞流程或直接回退 basename；`/home/a/.../task` 与 `/home/b/.../task` 追加 `a` / `b`；主排序键相同后按后缀、路径和环境身份排序；`codex-cli` 日期路径仍保持 `labelKind: "path"`。
+
 - [ ] **Step 2: 运行测试并确认重复标题尚未消歧**
 
 Run:
@@ -677,7 +689,7 @@ Run:
 npx vitest run src/core/session-store.test.ts
 ```
 
-Expected: 新测试 FAIL；三个 `labelSuffix` 仍为 `null`。
+Expected: 稳定时间、缺失时间、父路径片段和确定性排序测试因功能缺失而 FAIL；`codex-cli` 守护测试继续 PASS。
 
 - [ ] **Step 3: 实现确定性消歧**
 
@@ -722,7 +734,7 @@ function disambiguateTaskLabels(summaries: ProjectSummaryDraft[]): ProjectSummar
     for (const summary of group) {
       const target = byIdentity.get(`${summary.environmentId}\0${summary.path}`)!;
       const date = summary.taskWorkspaceDate;
-      const clock = formatClock(summary.rootCreatedAt);
+      const clock = formatClock(summary.rootStartedAt);
       const suffix = date
         ? (dateCounts.get(date) || 0) > 1 && clock
           ? `${formatMonthDay(date)} ${clock}`
@@ -751,7 +763,9 @@ function disambiguateTaskLabels(summaries: ProjectSummaryDraft[]): ProjectSummar
 }
 ```
 
-在 `listProjects()` 中先应用现有路径/环境消歧，再调用 `disambiguateTaskLabels()`，最后 `.map(publicProjectSummary)` 和排序。环境后缀不得加入同一环境标题的分组 key。
+basename 追加后必须重新按“环境、规范化基础标题、完整后缀”分组。仍碰撞的组从最近父级开始，在相同相对深度向外查找首个全部非空且组内唯一的路径片段；找到后为组内各项追加对应片段，找不到则追加各自原始 `path` 作为最终稳定兜底。
+
+在 `listProjects()` 中先应用现有路径/环境消歧，再调用 `disambiguateTaskLabels()`，最后 `.map(publicProjectSummary)` 和排序。环境后缀不得加入同一环境标题的分组 key。排序比较器在现有环境优先级、`lastActivityAt` 和基础 `label` 之后，依次比较 `labelSuffix ?? ""`、`path`、`environmentId`。
 
 - [ ] **Step 4: 运行项目聚合测试**
 
@@ -928,7 +942,9 @@ git commit -m "docs: add Codex task label release note"
 - [ ] 手动名称优先，清空后回退到 Codex 原生标题或首条有效问题。
 - [ ] subagent 不参与命名；没有唯一根会话时回退路径名称。
 - [ ] 普通项目、其他来源、路径筛选、Resume 与跨环境行为无回归。
-- [ ] 重复标题按日期、时间、basename 稳定消歧。
+- [ ] 重复标题按稳定根消息时间、日期、时间、basename、唯一父路径片段和最终原始路径稳定消歧。
+- [ ] 缺失根消息时间时未命名任务使用 basename；重新索引的会话索引时间不改变标签。
+- [ ] 项目主排序键相同时按后缀、路径、环境身份确定排序，`codex-cli` 不进入友好任务命名。
 - [ ] 中文与英文未命名占位符在项目树、筛选标签和搜索提示中一致。
 - [ ] `npm run build:mcp`、`npm run typecheck`、`npm test`、`npm run release-note:check` 全部退出 0。
 - [ ] 分支相对 `main` 恰好新增一份用户可见发布说明。
