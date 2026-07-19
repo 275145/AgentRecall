@@ -1293,7 +1293,7 @@ export function App(): ReactElement {
       await window.sessionSearch.addTag(dialog.session.sessionKey, value);
     }
     setDialog(null);
-    await refreshAfterAction({ metadata: dialogKind === "tag" && Boolean(value) });
+    await refreshAfterAction({ metadata: dialogKind === "rename" || (dialogKind === "tag" && Boolean(value)) });
   }
 
   async function removeTag(session: SessionSearchResult, tagName: string): Promise<void> {
