@@ -89,7 +89,7 @@ Untitled session · 07-19 19:25
 
 如果唯一根会话没有正数的消息时间戳，未命名占位符改用任务目录 basename 作为后缀。该后缀只用于显示，不会暴露、重命名或修改物理目录；完整物理路径继续保留在项目行的 `title` 提示和会话详情中。
 
-为了让 core 层保持与语言无关，`ProjectSummary` 增加结构化的 `labelKind` 和 `labelSuffix`。`label` 保存基础名称，`labelSuffix` 保存可选的环境、日期、时间、basename、唯一父路径片段或最终原始路径消歧后缀。渲染器在 `labelKind: "codex-task-untitled"` 时根据当前语言生成“未命名会话”或“Untitled session”，其他情况直接使用 `label`，最后统一拼接 `labelSuffix`。普通路径标签和有标题的任务标签分别使用 `labelKind: "path"` 与 `labelKind: "codex-task-title"`。
+为了让 core 层保持与语言无关，`ProjectSummary` 增加结构化的 `labelKind` 和 `labelSuffix`。`label` 保存基础名称，`labelSuffix` 保存可选的环境、日期、时间、basename、唯一父路径片段、原始路径，以及极端碰撞时的稳定身份消歧符。渲染器在 `labelKind: "codex-task-untitled"` 时根据当前语言生成“未命名会话”或“Untitled session”，其他情况直接使用 `label`，最后统一拼接 `labelSuffix`。普通路径标签和有标题的任务标签分别使用 `labelKind: "path"` 与 `labelKind: "codex-task-title"`。
 
 ## 数据流
 

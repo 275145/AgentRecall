@@ -1551,6 +1551,62 @@ describe("SessionStore", () => {
     expect(new Set(visibleLabels).size).toBe(visibleLabels.length);
   });
 
+  it("resolves overlapping English and Chinese untitled collisions deterministically", () => {
+    const startedAt = new Date(2026, 6, 19, 10, 32);
+    const cases = [
+      {
+        projectPath: "/Users/me/Documents/Codex/2026-07-19/overlap-english",
+        originalTitle: "Untitled session · 07-19 10:32",
+        rawId: "overlap-english",
+        firstQuestion: "titled",
+      },
+      {
+        projectPath: "/Users/me/Documents/Codex/2026-07-19/overlap-untitled",
+        originalTitle: "Untitled Session",
+        rawId: "overlap-untitled",
+        firstQuestion: "",
+      },
+      {
+        projectPath: "/Users/me/Documents/Codex/2026-07-19/overlap-chinese",
+        originalTitle: "未命名会话 · 07-19 10:32",
+        rawId: "overlap-chinese",
+        firstQuestion: "titled",
+      },
+    ] as const;
+    const insertionOrders = [cases, [...cases].reverse()];
+    const results = insertionOrders.map((orderedCases) => {
+      const store = createInMemoryStore();
+      for (const { projectPath, originalTitle, rawId, firstQuestion } of orderedCases) {
+        store.upsertIndexedSession(
+          sampleSession({
+            sessionKey: `codex:${rawId}`,
+            rawId,
+            source: "codex-app",
+            projectPath,
+            originalTitle,
+            firstQuestion,
+          }),
+          [{ role: "user", content: "first", timestamp: startedAt.toISOString(), index: 0 }],
+        );
+      }
+
+      const projects = cases.map(({ projectPath }) => projectByPath(store, projectPath));
+      const englishLabels = projects.map((project) => visibleProjectLabels(project)[0]);
+      const chineseLabels = projects.map((project) => {
+        const variants = visibleProjectLabels(project);
+        return project.labelKind === "codex-task-untitled" ? variants[1] : variants[0];
+      });
+      expect(new Set(englishLabels).size).toBe(projects.length);
+      expect(new Set(chineseLabels).size).toBe(projects.length);
+
+      return Object.fromEntries(
+        projects.map(({ path, label, labelSuffix }) => [path, { label, labelSuffix }]),
+      );
+    });
+
+    expect(results[1]).toEqual(results[0]);
+  });
+
   it("revalidates visible collisions through basename, raw path, and identity fallbacks", () => {
     const store = createInMemoryStore();
     const startedAt = new Date(2026, 6, 19, 10, 32);
