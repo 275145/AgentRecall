@@ -4,7 +4,7 @@
 
 **Goal:** 让 AgentRecall 左侧项目树把 Codex App 自动日期任务目录显示为唯一根会话的可读标题，同时保持真实路径作为稳定身份。
 
-**Architecture:** `SessionStore.listProjects()` 继续拥有项目聚合和路径消歧，并通过相关子查询从唯一根会话最早的正数 `message_events.timestamp` 推导稳定开始时间；不增加数据库表或 schema migration，也不改变加载器或 `IndexedSession.timestamp` 的语义。渲染器通过一个复用的展示函数完成中英文未命名占位符和后缀拼接，所有筛选与 Resume 仍使用 `projectPath + environmentId`。
+**Architecture:** `SessionStore.listProjects()` 继续拥有项目聚合和路径消歧，并通过相关子查询从唯一根会话最早的正数 `message_events.timestamp` 推导稳定开始时间；不增加数据库表或 schema migration，也不改变加载器或 `IndexedSession.timestamp` 的语义。渲染器通过一个复用的展示函数完成中英文未命名占位符和后缀拼接，core 按同一 `base · suffix` 可见字符串检测碰撞并在每个兜底阶段后重新验证，所有筛选与 Resume 仍使用 `projectPath + environmentId`。
 
 **Tech Stack:** TypeScript、Electron、React、Node.js `node:sqlite`、Vitest。
 
@@ -15,7 +15,7 @@
 - `custom_title` 优先于 `original_title`，后者已经吸收 Codex `thread_name` 和会话元数据标题；随后回退到 `first_question`。
 - subagent 不参与名称选择，但现有可见性设置仍决定项目会话计数和活动时间。
 - 不读取任务目录正文，不要求目录存在，不修改真实 Codex 会话、物理目录或 Resume 路径。
-- 时间、basename 仍碰撞时继续使用最短唯一父路径片段，最后才使用原始项目路径；basename 阶段用内部标记保证只执行一次。最终排序在环境优先级、活动时间后比较基础名称、后缀、路径、环境身份，每个文本键 locale 相等后继续按原始 UTF-16 code units 比较。
+- 时间、basename 仍碰撞时继续使用最短唯一父路径片段，再使用原始项目路径，极端可见碰撞最后使用稳定身份编码；basename 阶段用内部标记保证只执行一次。日期/时间之后按 renderer 的实际 `base · suffix` 分组，未命名任务同时参与 `Untitled session` 与 `未命名会话` 两个变体的连通碰撞组，并在 basename、父片段/原始路径、身份阶段后分别重算。最终排序在环境优先级、活动时间后比较基础名称、后缀、路径、环境身份，每个文本键 locale 相等后继续按原始 UTF-16 code units 比较。
 - 不新增 AI 请求、设置项、IPC 或数据库 schema。
 - 普通项目和其他来源保持当前路径标签、父目录消歧和跨环境消歧行为。
 - macOS、Linux、Windows 路径测试使用合成数据；不得读取或改写真实用户会话。
@@ -680,7 +680,7 @@ it("keeps environment suffixes ahead of task-title collision handling", () => {
 });
 ```
 
-最终审查修订还要先增加以下聚焦回归覆盖：同日同标题任务使用各自最早根消息分钟；仅改变 `IndexedSession.timestamp` 的重新索引保持后缀不变；有标题与未命名任务在缺失消息时间时分别按碰撞流程或直接回退 basename；未命名碰撞不重复追加 basename；`/home/a/.../task` 与 `/home/b/.../task` 追加 `a` / `b`；覆盖三个以上碰撞项、不同总深度和无唯一父片段的 raw path 兜底；无效及纪元前消息时间不遮蔽后续正数时间；主排序键相同后按后缀、路径和环境身份排序；基础名称、后缀、路径、环境身份使用 Unicode 规范等价值时仍按原始 code units 得到非零比较；`codex-cli` 日期路径仍保持 `labelKind: "path"`。
+最终审查修订还要先增加以下聚焦回归覆盖：同日同标题任务使用各自最早根消息分钟；仅改变 `IndexedSession.timestamp` 的重新索引保持后缀不变；有标题与未命名任务在缺失消息时间时分别按碰撞流程或直接回退 basename；未命名碰撞不重复追加 basename；`/home/a/.../task` 与 `/home/b/.../task` 追加 `a` / `b`；覆盖三个以上碰撞项、不同总深度和无唯一父片段的 raw path 兜底；无效及纪元前消息时间不遮蔽后续正数时间；主排序键相同后按后缀、路径和环境身份排序；基础名称、后缀、路径、环境身份使用 Unicode 规范等价值时仍按原始 code units 得到非零比较；`codex-cli` 日期路径仍保持 `labelKind: "path"`。可见碰撞终审还必须覆盖原生标题和 `custom_title` 中的 ` · ` 与生成日期后缀相撞、英文/中文标题与未命名渲染相撞，以及 basename 后新形成碰撞并继续进入 raw path 和稳定身份兜底。
 
 - [ ] **Step 2: 运行测试并确认重复标题尚未消歧**
 
@@ -767,7 +767,9 @@ function disambiguateTaskLabels(summaries: ProjectSummaryDraft[]): ProjectSummar
 }
 ```
 
-basename 阶段仅对 `taskBasenameApplied === false` 的 draft 追加 basename，并立即把标记设为 `true`。这使第一阶段已经用 basename 处理的未命名任务直接进入下一阶段。随后重新按“环境、规范化基础标题、完整后缀”分组；仍碰撞的组从最近父级开始，在相同相对深度向外查找首个全部非空且组内唯一的路径片段，找到后为组内各项追加对应片段，找不到则追加各自原始 `path` 作为最终稳定兜底。
+basename 阶段仅对 `taskBasenameApplied === false` 的 draft 追加 basename，并立即把标记设为 `true`。这使第一阶段已经用 basename 处理的未命名任务直接进入下一阶段。日期/时间阶段结束后，按 renderer 的字面合同构造可见标签：有标题任务使用 `summary.label`，未命名任务同时使用 `Untitled session` 和 `未命名会话`，有后缀时统一拼成 `base · suffix`。同一环境中共享任一可见变体的任务通过连通分组进入同一波次。
+
+每次 basename 写入后重新计算可见碰撞组。仍碰撞的组从最近父级开始，在相同相对深度向外查找首个全部非空且组内唯一的路径片段；找不到则追加各自原始 `path`。该阶段之后再次按两个语言的实际可见字符串分组。若刻意构造的基础标题跨越结构边界后仍与完整后缀相同，则为残余组追加由 `environmentId + path` UTF-16 code units 编码出的稳定身份，并循环重验至没有碰撞。分组和组内处理使用路径与环境身份的严格比较保证确定性；身份尾段对不同项目唯一，已处理碰撞对不会再次相等，有限项目对保证循环终止。
 
 在 `listProjects()` 中先应用现有路径/环境消歧，再调用 `disambiguateTaskLabels()`，最后 `.map(publicProjectSummary)` 和排序。环境后缀不得加入同一环境标题的分组 key。排序比较器在现有环境优先级、`lastActivityAt` 之后，依次比较基础 `label`、`labelSuffix ?? ""`、`path`、`environmentId`。每个文本键先调用 `localeCompare`；返回 0 且原始字符串不同时，用 JavaScript 原始字符串 `<` 比较提供 UTF-16 code-unit 兜底。
 
@@ -947,6 +949,8 @@ git commit -m "docs: add Codex task label release note"
 - [ ] subagent 不参与命名；没有唯一根会话时回退路径名称。
 - [ ] 普通项目、其他来源、路径筛选、Resume 与跨环境行为无回归。
 - [ ] 重复标题按稳定根消息时间、日期、时间、basename、唯一父路径片段和最终原始路径稳定消歧。
+- [ ] 标题或自定义标题包含 ` · ` 时，按 renderer 的完整可见字符串检测与生成后缀的碰撞。
+- [ ] 未命名任务的英文和中文可见变体都参与碰撞连通组，basename、父片段/原始路径、稳定身份每阶段后都重新验证。
 - [ ] 缺失根消息时间时未命名任务使用 basename；重新索引的会话索引时间不改变标签。
 - [ ] 未命名碰撞不重复追加 basename；三个以上、不同深度和无唯一父片段的碰撞组均有稳定结果。
 - [ ] 无效及纪元前消息时间不遮蔽后续正数消息时间。

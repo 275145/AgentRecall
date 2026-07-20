@@ -46,6 +46,14 @@ function projectByPath(store: SessionStore, projectPath: string) {
   return project!;
 }
 
+function visibleProjectLabels(project: ReturnType<SessionStore["listProjects"]>[number]): string[] {
+  const suffix = project.labelSuffix ? ` · ${project.labelSuffix}` : "";
+  if (project.labelKind === "codex-task-untitled") {
+    return [`Untitled session${suffix}`, `未命名会话${suffix}`];
+  }
+  return [`${project.label}${suffix}`];
+}
+
 type ListedProject = ReturnType<SessionStore["listProjects"]>[number];
 
 function addSshEnvironment(store: SessionStore, id: string, label: string): void {
@@ -1441,6 +1449,153 @@ describe("SessionStore", () => {
       "07-19 10:32",
       "07-19 16:48",
     ]);
+  });
+
+  it("disambiguates a visible title delimiter from a generated date suffix", () => {
+    const store = createInMemoryStore();
+    const cases = [
+      ["/Users/me/Documents/Codex/2026-07-19/delimiter", "Foo · 07-19", new Date(2026, 6, 19, 9, 0)],
+      ["/Users/me/Documents/Codex/2026-07-19/foo-current", "Foo", new Date(2026, 6, 19, 10, 32)],
+      ["/Users/me/Documents/Codex/2026-07-18/foo-old", "Foo", new Date(2026, 6, 18, 10, 32)],
+    ] as const;
+    cases.forEach(([projectPath, originalTitle, startedAt], index) => {
+      store.upsertIndexedSession(
+        sampleSession({
+          sessionKey: `codex:visible-delimiter-${index}`,
+          rawId: `visible-delimiter-${index}`,
+          source: "codex-app",
+          projectPath,
+          originalTitle,
+        }),
+        [{ role: "user", content: "first", timestamp: startedAt.toISOString(), index: 0 }],
+      );
+    });
+
+    const visibleLabels = cases.flatMap(([projectPath]) => visibleProjectLabels(projectByPath(store, projectPath)));
+    expect(new Set(visibleLabels).size).toBe(visibleLabels.length);
+  });
+
+  it("disambiguates a custom title delimiter from a generated date suffix", () => {
+    const store = createInMemoryStore();
+    const cases = [
+      ["/Users/me/Documents/Codex/2026-07-19/custom-delimiter", "Source title", new Date(2026, 6, 19, 9, 0)],
+      ["/Users/me/Documents/Codex/2026-07-19/custom-foo-current", "Foo", new Date(2026, 6, 19, 10, 32)],
+      ["/Users/me/Documents/Codex/2026-07-18/custom-foo-old", "Foo", new Date(2026, 6, 18, 10, 32)],
+    ] as const;
+    cases.forEach(([projectPath, originalTitle, startedAt], index) => {
+      const sessionKey = `codex:visible-custom-delimiter-${index}`;
+      store.upsertIndexedSession(
+        sampleSession({
+          sessionKey,
+          rawId: `visible-custom-delimiter-${index}`,
+          source: "codex-app",
+          projectPath,
+          originalTitle,
+        }),
+        [{ role: "user", content: "first", timestamp: startedAt.toISOString(), index: 0 }],
+      );
+      if (index === 0) store.setCustomTitle(sessionKey, "Foo · 07-19");
+    });
+
+    const visibleLabels = cases.flatMap(([projectPath]) => visibleProjectLabels(projectByPath(store, projectPath)));
+    expect(new Set(visibleLabels).size).toBe(visibleLabels.length);
+  });
+
+  it("disambiguates a titled task from the English untitled rendering", () => {
+    const store = createInMemoryStore();
+    const startedAt = new Date(2026, 6, 19, 10, 32);
+    const cases = [
+      ["/Users/me/Documents/Codex/2026-07-19/english-title", "Untitled session · 07-19 10:32", "visible-english-title"],
+      ["/Users/me/Documents/Codex/2026-07-19/english-untitled", "Untitled Session", "visible-english-untitled"],
+    ] as const;
+    cases.forEach(([projectPath, originalTitle, rawId], index) => {
+      store.upsertIndexedSession(
+        sampleSession({
+          sessionKey: `codex:${rawId}`,
+          rawId,
+          source: "codex-app",
+          projectPath,
+          originalTitle,
+          firstQuestion: index === 0 ? "titled" : "",
+        }),
+        [{ role: "user", content: "first", timestamp: startedAt.toISOString(), index: 0 }],
+      );
+    });
+
+    const visibleLabels = cases.flatMap(([projectPath]) => visibleProjectLabels(projectByPath(store, projectPath)));
+    expect(new Set(visibleLabels).size).toBe(visibleLabels.length);
+  });
+
+  it("disambiguates a titled task from the Chinese untitled rendering", () => {
+    const store = createInMemoryStore();
+    const startedAt = new Date(2026, 6, 19, 10, 32);
+    const cases = [
+      ["/Users/me/Documents/Codex/2026-07-19/chinese-title", "未命名会话 · 07-19 10:32", "visible-chinese-title"],
+      ["/Users/me/Documents/Codex/2026-07-19/chinese-untitled", "Untitled Session", "visible-chinese-untitled"],
+    ] as const;
+    cases.forEach(([projectPath, originalTitle, rawId], index) => {
+      store.upsertIndexedSession(
+        sampleSession({
+          sessionKey: `codex:${rawId}`,
+          rawId,
+          source: "codex-app",
+          projectPath,
+          originalTitle,
+          firstQuestion: index === 0 ? "titled" : "",
+        }),
+        [{ role: "user", content: "first", timestamp: startedAt.toISOString(), index: 0 }],
+      );
+    });
+
+    const visibleLabels = cases.flatMap(([projectPath]) => visibleProjectLabels(projectByPath(store, projectPath)));
+    expect(new Set(visibleLabels).size).toBe(visibleLabels.length);
+  });
+
+  it("revalidates visible collisions through basename, raw path, and identity fallbacks", () => {
+    const store = createInMemoryStore();
+    const startedAt = new Date(2026, 6, 19, 10, 32);
+    const cases = [
+      {
+        projectPath: "/home/a/Codex/2026-07-19/task",
+        originalTitle: "Foo · 07-19 10:32 · task",
+        rawId: "visible-fallback-crafted",
+      },
+      {
+        projectPath: "home\\a\\Codex\\2026-07-19\\task",
+        originalTitle: "Foo",
+        rawId: "visible-fallback-windows",
+      },
+      {
+        projectPath: "/home//a/Codex/2026-07-19/task",
+        originalTitle: "Foo",
+        rawId: "visible-fallback-double-separator",
+      },
+      {
+        projectPath: "/home/d/Codex/2026-07-19/identity-task",
+        originalTitle: "Foo · 07-19 10:32 · task · /home/a/Codex/2026-07-19/task",
+        rawId: "visible-fallback-identity",
+      },
+    ] as const;
+    for (const { projectPath, originalTitle, rawId } of cases) {
+      store.upsertIndexedSession(
+        sampleSession({
+          sessionKey: `codex:${rawId}`,
+          rawId,
+          source: "codex-app",
+          projectPath,
+          originalTitle,
+        }),
+        [{ role: "user", content: "first", timestamp: startedAt.toISOString(), index: 0 }],
+      );
+    }
+
+    const projects = store.listProjects().filter(({ path }) => cases.some(({ projectPath }) => projectPath === path));
+    const visibleLabels = projects.flatMap(visibleProjectLabels);
+    expect(projects).toHaveLength(4);
+    expect(projectByPath(store, "/home/a/Codex/2026-07-19/task").labelSuffix ?? "").toContain(
+      "/home/a/Codex/2026-07-19/task",
+    );
+    expect(new Set(visibleLabels).size).toBe(visibleLabels.length);
   });
 
   it("uses the task directory basename when duplicate task labels still collide", () => {
