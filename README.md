@@ -389,6 +389,13 @@ npm run package:smoke
                 </a>
             </td>
             <td align="center">
+                <a href="https://github.com/vinkiYu">
+                    <img src="https://avatars.githubusercontent.com/u/239156258?v=4" width="80;" alt="vinkiYu"/>
+                    <br />
+                    <sub><b>vinkiYu</b></sub>
+                </a>
+            </td>
+            <td align="center">
                 <a href="https://github.com/wlh26">
                     <img src="https://avatars.githubusercontent.com/u/145627315?v=4" width="80;" alt="wlh26"/>
                     <br />
